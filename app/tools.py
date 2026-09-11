@@ -764,8 +764,13 @@ class ToolRuntime:
         self._conv = conv
         self._crm_conv_id = crm_conversation_id
         self._profile = profile or BusinessProfile()
-        # providerId del catálogo del tenant (viene del contexto del CRM, no env).
+        # proveedor (dirección, horario, ciudad).
         self._provider_id_val = provider_id or ""
+        # Formas de pago del tenant (markdown `paymenType` de providers/{id} en
+        # Firestore). Se carga con buscar_medicamento/_info_provider; el resumen
+        # del pedido lo muestra OBLIGATORIAMENTE (cada farmacia define el suyo).
+        self.paymen_type: str | None = None
+        self.provider_hours: str | None = None
         # Efectos observables por turn.py:
         self.handoff_reason: str | None = None  # se ejecuta DESPUÉS de la despedida
         self.booked = False
@@ -1173,6 +1178,13 @@ class ToolRuntime:
         nombre = _normalizar_tildes(nombre)
         data = await self._ctx.crm.get_products(self._provider_id, q=nombre, limit=20)
         self.last_term = nombre
+        # Formas de pago del tenant (markdown `paymenType` de providers/{id}).
+        # El CRM las devuelve en el mismo response; se cachean en el runtime para
+        # el resumen del pedido.
+        if data.get("paymenType"):
+            self.paymen_type = str(data.get("paymenType"))
+        if data.get("hours"):
+            self.provider_hours = str(data.get("hours"))
         products = data.get("products") or []
         # Dedupe por nombre de producto: el catálogo de Firebase repite el MISMO
         # ítem (mismo nombre) con distintos productId/precio (una entrada por
@@ -1413,13 +1425,19 @@ class ToolRuntime:
         if not self._provider_id:
             return {"ok": False, "error": "sin_provider", "detalle": "no hay farmacia configurada"}
         data = await self._ctx.crm.get_providers(self._provider_id)
-        provider = data.get("provider")
+        provider = data.get("provider") or data or {}
         if not provider:
             return {"ok": False, "error": "sin_provider_info", "detalle": "no hay info de la farmacia"}
+        # Cachear las formas de pago del tenant (markdown) para el resumen.
+        if provider.get("paymenType"):
+            self.paymen_type = str(provider.get("paymenType"))
+        if provider.get("hours"):
+            self.provider_hours = str(provider.get("hours"))
         return {
             "ok": True,
             "provider": provider,
-            "instrucciones": "responde con dirección, horario y ciudad de la farmacia",
+            "formaDePago": self.paymen_type,
+            "instrucciones": "responde con dirección, horario y ciudad de la farmacia. Si el cliente pregunta las formas de pago, cítalas y compártele la formaDePago.",
         }
 
     # ------------------------------------------------------- carrito (FR-8) ---
@@ -1602,6 +1620,26 @@ class ToolRuntime:
         bloque.append("*Total:*")
         bloque.append(f"${_fmt_ve(total_usd)} | Bs {_fmt_ve(total_bs)}")
         bloque.append("")
+        # Formas de pago del tenant (multitenant): OBLIGATORIO mostrarlas en el
+        # resumen del pedido. Vienen del campo `paymenType` (markdown) de
+        # providers/{id} en Firestore que el dueño edita. Si no quedaron
+        # cacheadas en este turno (el resumen suele pedirse en un turno distinto
+        # al de la búsqueda), se recargan vía /api/bot/products (que devuelve
+        # provider + paymenType + hours).
+        pago = self.paymen_type
+        if not pago and self._provider_id:
+            try:
+                data = await self._ctx.crm.get_products(self._provider_id, q="", limit=1)
+                pago = str(data.get("paymenType") or "") or None
+                if pago:
+                    self.paymen_type = pago
+                    self.provider_hours = str(data.get("hours")) or self.provider_hours
+            except Exception:
+                pago = None
+        if pago:
+            bloque.append("💳 *Formas de pago:*")
+            bloque.append(pago)
+            bloque.append("")
         bloque.append("¿Está todo correcto o deseas agregar algo más?")
         self.cart_summary_text = "\n".join(bloque)
         return {
@@ -1653,12 +1691,23 @@ class ToolRuntime:
         except Exception as exc:  # no derribe el turno: best-effort
             logger.warning("tools: no pude registrar pedido en el CRM: %s", exc)
         await self._ctx.store.cart_clear(self._conv.id)
+        # Formas de pago del tenant para recordarle al cliente cómo puede pagar
+        # (multitenant, del field `paymenType` de Firestore).
+        pago = self.paymen_type
+        if not pago and self._provider_id:
+            try:
+                data = await self._ctx.crm.get_products(self._provider_id, q="", limit=1)
+                pago = str(data.get("paymenType") or "") or None
+            except Exception:
+                pago = None
         return {
             "ok": True,
             "total": total,
+            "formaDePago": pago,
             "instrucciones": (
                 "agradece, confirma que el pedido quedó registrado y que un "
-                "humano lo procesará, y despídete con puerta abierta. NO inventes "
+                "humano lo procesará. Recuérdale las formas de pago disponibles "
+                "(usa formaDePago) y despídete con puerta abierta. NO inventes "
                 "folios ni tiempos de entrega."
             ),
         }
