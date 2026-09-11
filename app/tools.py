@@ -1428,6 +1428,44 @@ class ToolRuntime:
                 "error": "faltante",
                 "detalle": "producto y productId son obligatorios (debe venir de buscar_medicamento)",
             }
+        # MULTI-TENANT / DEDUP del carrito: el LLM a veces pasa el NÚMERO DE
+        # OPCIÓN como productId ('1','2','3'...) en vez del SKU real del catálogo,
+        # y/o omite precioBs. Eso crea filas DUPLICADAS —mismo producto con otro
+        # product_id— y subtotales sin Bs en el resumen. Si el productId es un
+        # índice contra last_options (la lista real que el cliente vio, ordenada
+        # por precio) o un SKU real, lo resolvemos al producto canónico para
+        # deduplicar y garantizar precios USD+Bs reales.
+        if self.last_options:
+            resolved: dict[str, Any] | None = None
+            if product_id.isdigit():
+                idx = int(product_id) - 1
+                if 0 <= idx < len(self.last_options):
+                    resolved = self.last_options[idx]
+            else:
+                resolved = next(
+                    (p for p in self.last_options if str(p.get("productId") or "") == product_id),
+                    None,
+                )
+            if resolved is not None:
+                sku = str(resolved.get("productId") or "").strip()
+                if sku:
+                    product_id = sku
+                # Precios SIEMPRE del catálogo real (nunca del LLM).
+                if resolved.get("precio") is not None:
+                    args["precioUsd"] = resolved.get("precio")
+                if resolved.get("precioBs") is not None:
+                    args["precioBs"] = resolved.get("precioBs")
+                if not producto:
+                    producto = str(
+                        resolved.get("producto")
+                        or resolved.get("title")
+                        or resolved.get("titulo")
+                        or ""
+                    )
+                if resolved.get("presentacion") is not None:
+                    args["presentacion"] = resolved.get("presentacion")
+                if resolved.get("laboratorio") is not None:
+                    args["laboratorio"] = resolved.get("laboratorio")
         presentacion = str(args.get("presentacion") or "")
         laboratorio = str(args.get("laboratorio") or "")
         precio_usd = args.get("precioUsd")
