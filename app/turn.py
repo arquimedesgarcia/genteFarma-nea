@@ -1320,11 +1320,12 @@ _UNIDADES_MEDIDA = re.compile(
 
 
 def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
-    """Detecta la selección de opciones por número, con o sin cantidad.
+    """Detecta la selección de opciones por número, con cantidades por grupo.
 
     'quiero 1 caja de 1,4,7 y 8' → [(1,1), (1,4), (1,7), (1,8)]  (cantidad 1)
     'quiero 2 cajas de la opción 3' → [(2,3)]
     'la opción 1' → [(1,1)]
+    'quiero 2 cajas de 1 y 1 caja de 3,4,5 y 7' → [(2,1), (1,3), (1,4), (1,5), (1,7)]
     Devuelve None si el texto no es una elección de opciones.
     """
     if not texto:
@@ -1347,9 +1348,7 @@ def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
         # Cantidad máxima razonable: el pre-check la recorta a last_options.
         return [(cant_each, i) for i in range(1, 51)]
     # Detectar intención: menciona "opción" o hay una lista de números con
-    # unidad de caja ("1 caja de 1,4,7") o separada por comas/y, o "quiero"
-    # seguido de lista de números ("quiero 1,6,12,20 y 31"), o "N caja(s) de M"
-    # con número ÚNICO ("1 caja de 3" → opción 3, cantidad 1).
+    # unidad de caja o separada por comas/y, o "quiero" + lista, o "N caja(s) de M".
     es_eleccion = ("opci" in t) or (
         re.search(r"\b(caja|cajas|unidad|unidades)\b", t)
         and re.search(r"\d{1,2}\s*[,y]\s*\d{1,2}", t)
@@ -1357,30 +1356,41 @@ def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
         re.search(r"\b(quiero|quisiera|necesito|dame|me das)\b", t)
         and re.search(r"\d{1,2}\s*[,y]\s*\d{1,2}", t)
     ) or (
-        re.search(
-            r"\b(caja|cajas|unidad|unidades)\s+de\s+(\d{1,2})\b", t
-        )
+        re.search(r"\b(caja|cajas|unidad|unidades)\s+de\s+(\d{1,2})\b", t)
     )
     if not es_eleccion:
         return None
-    # Cantidad: número + unidad de caja (default 1).
-    cantidad = 1
-    m_cant = re.search(r"(\d+)\s*(?:caja|cajas|unidad|unidades)", t)
-    if m_cant:
-        cantidad = max(1, int(m_cant.group(1)))
-    # Quitar la cantidad del texto para no contarla como opción.
-    resto = t
-    if m_cant:
-        resto = t.replace(m_cant.group(0), " ", 1)
-    # Opciones: números de 1-2 dígitos en el resto.
-    opciones: list[int] = []
-    for n in re.findall(r"\b(\d{1,2})\b", resto):
-        v = int(n)
-        if v >= 1 and v not in opciones:
-            opciones.append(v)
-    if not opciones:
+
+    # CANTIDADES POR GRUPO: parsear bloques "N caja(s) de X,Y,Z" que pueden
+    # repetirse unidos por "y", p.ej. "2 cajas de 1 y 1 caja de 3,4,5 y 7".
+    # Se separa en grupos donde CADA grupo tiene su propia cantidad explícita.
+    grupos_raw = re.split(
+        r"\b(?:y\s+)?(?=\d+\s*(?:caja|cajas|unidad|unidades)\s+de\b)", t
+    )
+    grupos_raw = [g for g in grupos_raw if g.strip()]
+
+    resultado: list[tuple[int, int]] = []
+    for grupo in grupos_raw:
+        grupo = grupo.strip()
+        # Cantidad de ESTE grupo (cada grupo trae su propia "N cajas de").
+        m_cant = re.search(r"(\d+)\s*(?:caja|cajas|unidad|unidades)\s+de\b", grupo)
+        if not m_cant:
+            # Grupo sin cantidad propia: hereda la del grupo anterior si hubo,
+            # si no, 1 (default).
+            cantidad = resultado[-1][0] if resultado else 1
+        else:
+            cantidad = max(1, int(m_cant.group(1)))
+        resto = grupo
+        resto = re.sub(r"\d+\s*(?:caja|cajas|unidad|unidades)\s+de\b", " ", resto, count=1)
+        # Opciones: números de 1-2 dígitos en el resto.
+        for n in re.findall(r"\b(\d{1,2})\b", resto):
+            v = int(n)
+            if v >= 1 and (cantidad, v) not in resultado:
+                resultado.append((cantidad, v))
+
+    if not resultado:
         return None
-    return [(cantidad, o) for o in opciones]
+    return resultado
 
 
 def _extraer_eleccion_opcion(texto: str) -> tuple[int, int] | None:
