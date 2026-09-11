@@ -1714,23 +1714,44 @@ class ToolRuntime:
         except Exception as exc:  # no derribe el turno: best-effort
             logger.warning("tools: no pude registrar pedido en el CRM: %s", exc)
         await self._ctx.store.cart_clear(self._conv.id)
-        # Formas de pago del tenant para recordarle al cliente cómo puede pagar
-        # (multitenant, del field `paymenType` de Firestore).
-        pago = self.paymen_type
-        if not pago and self._provider_id:
-            try:
-                data = await self._ctx.crm.get_products(self._provider_id, q="", limit=1)
-                pago = str(data.get("paymenType") or "") or None
-            except Exception:
-                pago = None
+        # Si el Resumen del Pedido ya mostró las formas de pago (ver_carrito,
+        # flag persistente cart_summary_shown), NO repetirlas aquí: el mensaje
+        # final solo confirma que un humano lo procesará. Leer el flag fresco
+        # de la BD por si el resumen se mostró en un turno anterior.
+        summary_shown = False
+        try:
+            conv = await self._ctx.store.get_or_create_conversation(self._conv.wa_identity)
+            summary_shown = bool(conv.cart_summary_shown)
+        except Exception:
+            summary_shown = bool(getattr(self._conv, "cart_summary_shown", False))
+        # Formas de pago del tenant (multitenant, field `paymenType` de Firestore)
+        # para recordarle al cliente cómo puede pagar — SOLO si el resumen no las
+        # mostró ya (evitar duplicación del bloque).
+        pago = None
+        if not summary_shown:
+            pago = self.paymen_type
+            if not pago and self._provider_id:
+                try:
+                    data = await self._ctx.crm.get_products(self._provider_id, q="", limit=1)
+                    pago = str(data.get("paymenType") or "") or None
+                except Exception:
+                    pago = None
         return {
             "ok": True,
             "total": total,
             "formaDePago": pago,
             "instrucciones": (
                 "agradece, confirma que el pedido quedó registrado y que un "
-                "humano lo procesará. Recuérdale las formas de pago disponibles "
-                "(usa formaDePago) y despídete con puerta abierta. NO inventes "
+                "humano lo procesará y despídete con puerta abierta. NO inventes "
                 "folios ni tiempos de entrega."
+                + (
+                    " El Resumen del Pedido ya mostró las formas de pago; NO "
+                    "las repitas aquí."
+                    if summary_shown
+                    else (
+                        " Recuérdale las formas de pago disponibles (usa "
+                        "formaDePago)."
+                    )
+                )
             ),
         }
