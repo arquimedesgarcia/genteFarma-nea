@@ -1172,6 +1172,22 @@ class ToolRuntime:
                 "error": "sin_provider",
                 "detalle": "no hay catálogo configurado; di que consultarás o haz handoff",
             }
+        # El cliente inició una CONSULTA nueva de medicamento. Si el turno
+        # ANTERIOR ya mostró el Resumen del Pedido (cart_summary_shown), ese
+        # carrito quedó "cerrado": no acumular los nuevos productos sobre él,
+        # aunque siga dentro de la ventana de sesión. Limpiamos el carrito y el
+        # flag para que ESTA consulta arranque un pedido nuevo y solo muestre
+        # sus productos. Si NO se mostró un resumen previo, el carrito sigue vivo
+        # (el cliente puede seguir sumando medicamentos a un mismo pedido).
+        if self._conv.cart_summary_shown:
+            logger.info(
+                "buscar_medicamento: se mostró resumen previo — carrito nuevo para '%s'",
+                nombre,
+            )
+            await self._ctx.store.cart_clear(self._conv.id)
+            await self._ctx.store.update_conversation(
+                self._conv.id, cart_summary_shown=False
+            )
         self.consulted_catalog = True
         # Normalizar tildes: el catálogo guarda 'potasico' sin tilde; si el
         # cliente escribe 'potásico', el motor no matchea (AND sobre tokens).
@@ -1602,6 +1618,13 @@ class ToolRuntime:
                 "empty": True,
                 "detalle": "el carrito está vacío; ofrécele buscar un medicamento",
             }
+        # El Resumen del Pedido "cierra" este carrito: la siguiente consulta de
+        # medicamento arranca uno nuevo (no acumula sobre este). Se persiste el
+        # flag para que persista entre turnos (el resumen suele verse en un turno
+        # y la consulta nueva llega en otro).
+        await self._ctx.store.update_conversation(
+            self._conv.id, cart_summary_shown=True
+        )
         total_usd = sum((i.precio_usd or 0) * i.cantidad for i in items)
         total_bs = sum((i.precio_bs or 0) * i.cantidad for i in items)
         # Resumen determinista: cada producto con cantidad y subtotal en USD y

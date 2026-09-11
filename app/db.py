@@ -36,6 +36,7 @@ _CONV_COLUMNS = frozenset(
         "last_product",
         "last_term",
         "last_options",
+        "cart_summary_shown",
     }
 )
 
@@ -55,6 +56,7 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         last_product=row.get("last_product"),
         last_term=row.get("last_term"),
         last_options=row.get("last_options"),
+        cart_summary_shown=row.get("cart_summary_shown", False),
     )
 
 
