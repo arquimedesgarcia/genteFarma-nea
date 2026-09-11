@@ -1288,9 +1288,12 @@ class ToolRuntime:
                     f"no encontrado '{nombre}' en el catálogo. Antes de decir 'no disponible': "
                     "1) si el nombre puede tener errores de tipeo, reintenta con la grafía "
                     "más probable (p. ej. 'lozartan'→'losartan', 'paracetmol'→'paracetamol'); "
-                    "2) prueba con el principio activo; SOLO si nada matchea, informa "
-                    "honestamente que no lo tienes y escala a humano (handoff) — NO ofrezcas "
-                    "'consultar' algo que no puedes consultar"
+                    "2) prueba con el principio activo o sugiere un genérico. Si NADA matchea, "
+                    "informa honestamente que no lo tienes disponible, MUESTRA EMPATÍA y deja el "
+                    "chat abierto: ofrécele buscar otro medicamento, consultarle a un humano SOLO "
+                    "si él lo pide expresamente, o preguntarle si quiere que verifiques algo más. "
+                    "NO pases la conversación a un humano automáticamente por un medicamento "
+                    "agotado — el cliente debe seguir teniendo al agente atendiéndolo."
                 ),
                 "busqueda": nombre,
             }

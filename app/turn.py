@@ -484,29 +484,14 @@ async def run_turn(
     if streak >= 3 and runtime.handoff_reason is None:
         runtime.handoff_reason = "hostilidad"
 
-    # Backstop determinista: si este turno se buscó un medicamento que NO está
-    # en el catálogo y el modelo no escaló solo, escalamos a humano. Un humano
-    # del negocio decide si puede conseguirlo; el agente no debe prometer algo
-    # que no puede confirmar ni ofrecer una "consulta" inexistente.
-    # EXCEPCIONES: (a) turno de RECETA ya respondida (mostró lo disponible);
-    # (b) turno donde el backstop de carrito ya resolvió la elección del cliente
-    # ("opción Z" o cantidad) — el LLM pudo llamar buscar_medicamento con un
-    # término basura ("cajas opción") que dispara med_not_found falsamente.
-    # (c) hay CARRITO ACTIVO: el cliente está en medio de un pedido; el LLM
-    # pudo llamar handoff tras una negativa ("no") que en realidad cierra la
-    # búsqueda, no el pedido.
+    # NO se hace handoff automático por medicamento no disponible: si este turno
+    # se buscó algo que no está en el catálogo, el agente lo informa con
+    # honestidad pero deja el chat abierto y ofrece seguir ayudando (buscar otro
+    # medicamento, sugerir un genérico, etc.). El handoff solo ocurre cuando el
+    # CLIENTE lo pide explícitamente (hablar con una persona) o hay hostilidad.
     cart_activo = bool(
         await ctx.store.cart_items(conv.id, session_hours=settings.cart_session_hours)
     )
-    if (
-        runtime.med_not_found
-        and runtime.handoff_reason is None
-        and not runtime.receta_atendida
-        and not runtime.cart_forced
-        and not cart_activo
-    ):
-        runtime.handoff_reason = "medicamento_no_disponible"
-        logger.info("medicamento no encontrado en el catálogo — handoff garantizado")
 
     # Backstop de contradicción: si el catálogo SÍ devolvió productos pero el
     # LLM niega disponibilidad en su texto final (alucinación no-determinista),
