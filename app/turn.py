@@ -1707,24 +1707,36 @@ def _quitar_pie_carrito_duplicado(texto: str) -> str:
     nuevo). Este limpiador quita cualquier copia del bloque que no esté al final,
     para que el cliente vea el pie UNA sola vez.
 
-    Tolerante a espacios al final de línea: WhatsApp/markdown suele dejar
-    "opción Z  \\n" (con espacios) en vez de "opción Z\\n", y el regex literal
-    no matchea. Se construye el patrón línea por línea permitiendo [ \\t]* antes
-    de cada salto de línea.
+    Tolerante a variaciones del LLM: el número de la opción y el del ejemplo
+    cambian ("opción Z"→"opción 1", "opción 3"→"opción 2"), y puede haber
+    espacios al final de línea / markdown. Por eso la letra/dígito de la opción
+    y el ejemplo se tratan como comodines, no literalmente.
     """
     if not texto:
         return texto
     import re as _re
-    # Construir el patrón a partir de las líneas del bloque, permitiendo
-    # espacios/tabs al final de cada línea y saltos de línea flexibles.
-    lineas = MENSAJE_SUGERIDO_CARRITO.split("\n")
-    partes = []
-    for i, ln in enumerate(lineas):
-        partes.append(_re.escape(ln.rstrip()))
-        if i < len(lineas) - 1:
-            partes.append(r"[ \t]*\n[ \t]*")
+    # Partes del pie con los números/letras de la opción como comodines. El LLM
+    # varía "opción Z"→"opción 1" y "opción 3"→"opción 2", así que cada opción
+    # admite dígitos o letras seguidas de fin de línea.
+    l1 = (
+        _re.escape("👉 Para agregar al carrito: quiero X cajas de la opción")
+        + r"[ \t]*[A-Za-z0-9]*"
+    )
+    l2 = (
+        _re.escape("Ejemplo: quiero")
+        + r"[ \t]*[0-9]+[ \t]*"
+        + _re.escape("cajas de la opción")
+        + r"[ \t]*[0-9]+"
+    )
+    l3 = _re.escape("🛒 ¿Otro medicamento? Escríbeme el nombre y lo busco.")
+    l4 = _re.escape("✅ Cuando termines, escribe LISTO y te muestro el resumen de tu pedido.")
+    # Unir línea por línea permitiendo espacios/tabs al final y saltos flexibles.
     pat = _re.compile(
-        r"(?:\n[ \t]*)*" + "".join(partes) + r"[ \t]*(?:\n[ \t]*)*",
+        r"(?:\n[ \t]*)*(?:[ \t]*)?"
+        + l1 + r"[ \t]*\n[ \t]*"
+        + l2 + r"[ \t]*\n[ \t]*"
+        + l3 + r"[ \t]*\n[ \t]*"
+        + l4 + r"[ \t]*(?:\n[ \t]*)*",
         _re.MULTILINE,
     )
     sin_pie = pat.sub("\n", texto)
