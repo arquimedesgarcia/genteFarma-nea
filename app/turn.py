@@ -354,7 +354,9 @@ async def run_turn(
     # --- Armar mensajes para el LLM ---------------------------------------
     referral = next((m.referral_headline for m in inbound if m.referral_headline), None)
     offered = await ctx.store.get_offered_slots(conv.id)
-    profile = await resolve_profile(ctx)
+    # MULTI-TENANT: perfil del tenant de ESTA conversación (saludo/tono propios
+    # de la farmacia), no un perfil global cacheado.
+    profile = await resolve_profile(ctx, str(crm_conv_id))
     # El providerId del catálogo lo define el CRM por tenant (organization.
     # provider_id) y llega en el contexto — NO es variable de entorno fija.
     # Se calcula ANTES de armar el prompt para inyectar el bloque de farmacia.

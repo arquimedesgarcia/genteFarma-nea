@@ -95,7 +95,7 @@ class FollowupWorker:
             return
 
         system = build_system_prompt(
-            profile=await resolve_profile(ctx),
+            profile=await resolve_profile(ctx, str(crm_conv_id)),
             context=context,
             conv=conv,
             offered=[],

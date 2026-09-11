@@ -141,10 +141,21 @@ class CrmClient:
         data: dict[str, Any] = resp.json()
         return data
 
-    async def get_profile(self) -> dict[str, Any] | None:
+    async def get_profile(self, conversation_id: str | None = None) -> dict[str, Any] | None:
         """Agent profile + knowledge base del negocio; None si el CRM no lo
-        expone todavía (404) — el bot cae al brief local (app/profile.py)."""
-        resp = await self._request("GET", "/api/bot/profile")
+        expone todavía (404) — el bot cae al brief local (app/profile.py).
+
+        MULTI-TENANT: si se pasa `conversation_id`, se resuelve el perfil de la
+        ORGANIZACIÓN de esa conversación (cada farmacia tiene su propio saludo,
+        tono e instrucciones). Sin él cae a la org global (legacy). El saludo de
+        la farmacia correcta NO debe cruzar a otras.
+        """
+        params: dict[str, str] = {}
+        if conversation_id:
+            params["conversationId"] = conversation_id
+        resp = await self._request(
+            "GET", "/api/bot/profile", params=params or None
+        )
         if resp.status_code == 404:
             return None
         if resp.status_code != 200:

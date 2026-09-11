@@ -87,11 +87,16 @@ def profile_from_brief(path: Path, default_name: str) -> BusinessProfile | None:
     return BusinessProfile(agent_name=default_name, instructions=text)
 
 
-async def resolve_profile(ctx: Any) -> BusinessProfile:
-    """Perfil vigente desde el AppContext; sin provider (tests) = mínimo."""
+async def resolve_profile(ctx: Any, conversation_id: str | None = None) -> BusinessProfile:
+    """Perfil vigente del tenant (`conversation_id`) desde el AppContext.
+
+    MULTI-TENANT: cada farmacia tiene su propio saludo/tono/instrucciones. Se le
+    pasa el conversationId para resolver el de ESA organización (no el global).
+    Sin provider (tests) = mínimo.
+    """
     if getattr(ctx, "profile", None) is None:
         return BusinessProfile(agent_name=getattr(ctx.settings, "agent_name", "Nea"))
-    return await ctx.profile.get()
+    return await ctx.profile.get(conversation_id)
 
 
 class ProfileProvider:
@@ -109,38 +114,50 @@ class ProfileProvider:
         self._default_name = default_name
         self._brief_path = Path(brief_path) if brief_path else None
         self._ttl = ttl
-        self._cached: BusinessProfile | None = None
-        self._fetched_at: float = 0.0
+        self._cached: dict[str, BusinessProfile] = {}
+        self._fetched_at: dict[str, float] = {}
         self._warned_minimal = False
 
-    async def get(self) -> BusinessProfile:
+    async def get(self, conversation_id: str | None = None) -> BusinessProfile:
+        """Perfil vigente de la organización de `conversation_id`.
+
+        MULTI-TENANT: cada farmacia tiene su propio perfil (saludo, tono,
+        instrucciones). La caché es POR conversation_id para que el saludo de
+        una farmacia NO se inyecte en otra. Si no hay conversation_id se usa
+        la org global (legacy, 404 → cae a brief/minimal).
+        """
+        key = conversation_id or "_global"
         now = time.monotonic()
-        if self._cached is not None and (now - self._fetched_at) < self._ttl:
-            return self._cached
+        cached = self._cached.get(key)
+        if cached is not None and (now - self._fetched_at.get(key, 0.0)) < self._ttl:
+            return cached
 
         payload = None
         try:
-            payload = await self._crm.get_profile()
+            payload = await self._crm.get_profile(conversation_id)
         except CrmError as exc:
-            logger.warning("perfil: el CRM no respondió (%s) — uso el último conocido", exc)
+            logger.warning(
+                "perfil %s: el CRM no respondió (%s) — uso el último conocido",
+                key, exc,
+            )
         except AttributeError:
             payload = None  # cliente sin get_profile (tests viejos): fallback
 
         if payload is not None:
-            self._cached = profile_from_payload(payload, self._default_name)
-            self._fetched_at = now
-            return self._cached
+            self._cached[key] = profile_from_payload(payload, self._default_name)
+            self._fetched_at[key] = now
+            return self._cached[key]
 
         # CRM sin perfil (404) o caído: último conocido > brief local > mínimo.
-        if self._cached is not None:
-            self._fetched_at = now  # no martillar al CRM caído en cada turno
-            return self._cached
+        if cached is not None:
+            self._fetched_at[key] = now  # no martillar al CRM caído en cada turno
+            return cached
         if self._brief_path is not None:
             brief = profile_from_brief(self._brief_path, self._default_name)
             if brief is not None:
-                self._cached = brief
-                self._fetched_at = now
-                logger.info("perfil: usando brief local %s", self._brief_path)
+                self._cached[key] = brief
+                self._fetched_at[key] = now
+                logger.info("perfil %s: usando brief local %s", key, self._brief_path)
                 return brief
         if not self._warned_minimal:
             logger.warning(
@@ -148,6 +165,6 @@ class ProfileProvider:
                 "el agente corre con el perfil mínimo (configura uno de los dos)"
             )
             self._warned_minimal = True
-        self._cached = BusinessProfile(agent_name=self._default_name)
-        self._fetched_at = now
-        return self._cached
+        self._cached[key] = BusinessProfile(agent_name=self._default_name)
+        self._fetched_at[key] = now
+        return self._cached[key]
