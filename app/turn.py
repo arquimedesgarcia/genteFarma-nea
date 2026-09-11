@@ -835,6 +835,10 @@ async def _tool_loop(
             if producto_prev.get("precioBs") is not None:
                 args_prev["precioBs"] = producto_prev["precioBs"]
             result_prev = await runtime.execute("agregar_al_carrito", args_prev)
+            # Registrar el SKU real que el backstop agregó para que el LLM no lo
+            # re-sume si vuelve a llamar agregar_al_carrito este turno (si no,
+            # la cantidad sale doblada: pidió 1 y quedan 2).
+            runtime.backstop_added_skus.add(str(producto_prev.get("productId") or ""))
             messages.append(
                 {
                     "role": "assistant",
@@ -896,6 +900,7 @@ async def _tool_loop(
                     if producto.get("precioBs") is not None:
                         args["precioBs"] = producto["precioBs"]
                     result = await runtime.execute("agregar_al_carrito", args)
+                    runtime.backstop_added_skus.add(str(producto.get("productId") or ""))
                     messages.append(
                         {
                             "role": "assistant",

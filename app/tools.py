@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from app.crm import CrmConflict, CrmError, SlotTaken
@@ -653,8 +654,15 @@ def _extraer_marcas(products: list[dict[str, Any]]) -> list[str]:
     return out
 
 
-def _fmt_ve(num: float | int | None) -> str:
-    """Formato venezolano: coma decimal y punto de miles (1.234,56)."""
+def _fmt_ve(num) -> str:
+    """Formato venezolano: coma decimal y punto de miles (1.234,56).
+
+    Acepta int/float y Decimal (asyncpg devuelve decimal.Decimal para columnas
+    NUMERIC del carrito; si se rechaza, el subtotal sale $— aunque el precio
+    esté guardado).
+    """
+    if isinstance(num, Decimal):
+        num = float(num)
     if not isinstance(num, (int, float)):
         return "—"
     s = f"{num:,.2f}"  # 1,234.56 (estilo US)
@@ -782,6 +790,12 @@ class ToolRuntime:
         self.last_options: list[dict[str, Any]] = []
         # true cuando el backstop de carrito ya forzó el add este turno (evita loops).
         self.cart_forced = False
+        # SKU reales que el BACKSTOP ya agregó al carrito en ESTE turno (pre-LLM
+        # o en-loop). El LLM luego vuelve a llamar agregar_al_carrito con los
+        # mismos productos (pensa que debe confirmar la selección); sin esto, el
+        # ON CONFLICT de cart_add suma +1 y la cantidad sale doblada (pidió 1 y
+        # quedan 2). Estos SKU se tratan como ya-agregados: idempotente.
+        self.backstop_added_skus: set[str] = set()
         # true cuando el backstop anti-alucinación ya re-consultó el catálogo
         # con el término deterministicamente correcto (evita loops infinitos).
         self.catalog_retried = False
@@ -1466,6 +1480,29 @@ class ToolRuntime:
                     args["presentacion"] = resolved.get("presentacion")
                 if resolved.get("laboratorio") is not None:
                     args["laboratorio"] = resolved.get("laboratorio")
+        # Idempotencia del backstop: este turno el backstop YA agregó este SKU
+        # (con su cantidad correcta). Si el LLM vuelve a llamar agregar_al_carrito
+        # con el mismo producto (confirmando la selección), NO lo re-suminamos:
+        # cart_add haría ON CONFLICT ... cantidad + 1 y la cantidad saldría
+        # doblada (pidió 1 caja y quedan 2). Devolvemos ok sin tocar el carrito.
+        sku_final = str(product_id or "").strip()
+        if sku_final and sku_final in self.backstop_added_skus:
+            return {
+                "ok": True,
+                "dedup": True,
+                "item": {
+                    "productId": sku_final,
+                    "producto": producto,
+                    "cantidad": cantidad,
+                    "precioUsd": args.get("precioUsd"),
+                    "precioBs": args.get("precioBs"),
+                },
+                "instrucciones": (
+                    "confirma en una línea que quedó agregado (cantidad + producto). "
+                    "Luego pregunta de forma breve si desea buscar otro medicamento "
+                    "(SI/NO). No vuelvas a llamar agregar_al_carrito para lo mismo."
+                ),
+            }
         presentacion = str(args.get("presentacion") or "")
         laboratorio = str(args.get("laboratorio") or "")
         precio_usd = args.get("precioUsd")
