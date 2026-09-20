@@ -307,3 +307,39 @@ def tiene_placeholder(texto: str) -> bool:
         if _VERBOS_INSTRUCCION.match(contenido) or _NOMBRES_HERRAMIENTA.search(contenido):
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# G9 — Cliente pide hablar con un humano pero no hay handoff real
+# ---------------------------------------------------------------------------
+# El LLM a veces responde "Entendido…" o "Te comunico…" sin llamar la
+# herramienta handoff, dejando al cliente sin escalado y con un cierre seco.
+# El juez del Laboratorio lo marca como debio_escalar/tono. Esta guarda
+# detecta la petición explícita de humano en el turno del cliente y, si el
+# runtime NO tiene handoff_reason asignado, reemplaza el texto por plantilla
+# constante y fuerza el handoff de forma determinista.
+PIDE_HUMANO = re.compile(
+    r"\b(hablar?\s+con\s+(un[ao]?\s+)?(humano|persona|asesor|agente|representante|ejecutivo)|"
+    r"com[uú]nicarme?\s+con\s+(un[ao]?\s+)?(humano|persona|asesor|agente)|"
+    r"p[aá]same?\s+(con\s+)?(un[ao]?\s+)?(humano|persona|asesor|agente)|"
+    r"quiero\s+(un[ao]?\s+)?(humano|persona|asesor|agente)\b|"
+    r"atenci[oó]n\s+humana|"
+    r"hablar?\s+con\s+alguien|"
+    r"necesito\s+(un[ao]?\s+)?(humano|persona|asesor|agente)|"
+    r"con\s+una?\s+(persona|asesor|agente)\s+real|"
+    r"quiero\s+que\s+me\s+atiendan?)\b",
+    re.I,
+)
+
+# Cierre constante de G9: NO lo redacta el LLM (en el bench generaba cierres
+# secos tipo "Entendido" sin escalar). Plantilla fija + handoff garantizado.
+TPL_CIERRE_ESCALADO = (
+    "Claro, con gusto te paso con un asesor de la farmacia para que te ayude "
+    "personalmente. En un momento alguien del equipo se comunicará contigo "
+    "por este mismo chat. ¡Estamos para servirte!"
+)
+
+
+def pide_humano(texto: str) -> bool:
+    """G9: el turno del cliente solicita explícitamente hablar con un humano."""
+    return bool(texto) and bool(PIDE_HUMANO.search(texto))

@@ -738,6 +738,13 @@ async def run_turn(
         elif guards.tiene_placeholder(final_text):
             logger.warning("guarda G8 VETO: placeholder de herramienta en texto final — plantilla búsqueda honesta")
             final_text = guards.TPL_BUSQUEDA_HONESTA
+        # G9 — cliente pide hablar con humano pero el LLM no llamó handoff:
+        # el bench marcaba el cierre seco ("Entendido…") como debio_escalar/tono.
+        # Plantilla constante empática + handoff garantizado.
+        elif guards.pide_humano(user_text) and runtime.handoff_reason is None:
+            logger.warning("guarda G9 VETO: cliente pide humano sin handoff — plantilla cierre escalado")
+            final_text = guards.TPL_CIERRE_ESCALADO
+            runtime.handoff_reason = "lead_request"
 
     sent = False
     if final_text and final_text.strip():
