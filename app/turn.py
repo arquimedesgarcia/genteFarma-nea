@@ -19,6 +19,7 @@ from app import media
 from app.config import canonical_identity
 from app.crm import CrmConflict, CrmError
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
+from app import guards
 from app.llm import LlmExhausted
 from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
 from app.profile import resolve_profile
@@ -401,6 +402,18 @@ async def run_turn(
     streak = hostile_streak([m.content for m in history if m.role == "user"])
     if streak >= 3:
         messages.append({"role": "system", "content": HOSTILITY_ALERT})
+    # Guarda G3 (canal sin media): el cliente menciona foto/adjunto pero este
+    # turno NO tiene imagen ni OCR → señal explícita para que jamás afirme
+    # haber recibido nada (falla "Recibí tu foto" del Laboratorio).
+    tiene_ocr = bool(_texto_ocr_completo(user_text))
+    if (
+        farmacia
+        and not image_uris
+        and not tiene_ocr
+        and guards.menciona_media(user_text)
+    ):
+        logger.info("guarda G3: lead menciona media sin imagen real — inyecto restricción de canal")
+        messages.append({"role": "system", "content": guards.NO_MEDIA_ALERT})
     # Candado de cierre: conversación que no va a ningún lado. Se despide con
     # UNA línea cálida en este turno y después calla (gate 1.5). El conteo es
     # determinista aquí; el LLM solo pone la redacción.
@@ -483,6 +496,14 @@ async def run_turn(
     # llamado el modelo o no (la regla de negocio no depende de su humor).
     if streak >= 3 and runtime.handoff_reason is None:
         runtime.handoff_reason = "hostilidad"
+    # Guarda G4: acusación de fraude dirigida → escalado INMEDIATO (un solo
+    # mensaje basta; el agente del Laboratorio respondía "no tengo capacidad"
+    # o seguía vendiendo en vez de escalar).
+    if runtime.handoff_reason is None and guards.acusacion_fraude(user_text):
+        logger.warning("guarda G4: acusación de fraude — handoff inmediato")
+        runtime.handoff_reason = "hostilidad"
+        # T8: el cierre de escalado es PLANTILLA CONSTANTE, no generación LLM.
+        final_text = guards.TPL_CIERRE_G4
 
     # NO se hace handoff automático por medicamento no disponible: si este turno
     # se buscó algo que no está en el catálogo, el agente lo informa con
@@ -643,6 +664,80 @@ async def run_turn(
             "backstop resumen determinista: reemplazando texto del LLM por el resumen canónico del carrito"
         )
         final_text = runtime.cart_summary_text
+
+    # --- Guardas anti-alucinación (QA T4) — vetos deterministas -------------
+    # Se ejecutan AL FINAL: un veto reemplaza el texto por plantilla constante
+    # y/o fuerza handoff. Cada activación queda logueada para el conteo de
+    # vetos del reporte QA.
+    if farmacia and final_text:
+        # G2 — política fuera del KB: escalado hardcodeado, jamás generación.
+        if guards.intencion_fuera_kb(user_text):
+            logger.warning("guarda G2 VETO: intención fuera de KB (%r) — plantilla de escalado", user_text[:80])
+            final_text = guards.TPL_FUERA_KB
+            if runtime.handoff_reason is None:
+                runtime.handoff_reason = "fuera_de_kb"
+        # G3 — el agente afirma haber recibido una imagen que NO llegó.
+        elif (
+            not image_uris
+            and not tiene_ocr
+            and guards.afirma_recibir_media(final_text)
+        ):
+            logger.warning("guarda G3 VETO: el agente afirmó recibir media inexistente — plantilla sin-media")
+            final_text = guards.TPL_SIN_MEDIA
+        # G1 — precio citado sin respaldo del catálogo.
+        elif (
+            not runtime.last_products
+            and not runtime.cart_summary_text
+            and guards.pide_precio_sin_dato(user_text)
+            and re.search(
+                r"\$\s*\d|\bBs\.?\s*\d|\d+(?:[.,]\d+)?\s*B", final_text, re.I
+            )
+        ):
+            logger.warning("guarda G1 VETO: precio sin respaldo de catálogo — plantilla sin-precio")
+            final_text = guards.TPL_SIN_PRECIO
+        # G1-ext — superlativo de precio ('el más económico', 'el genérico de')
+        # afirmado por el agente sin datos del catálogo en este turno.
+        elif (
+            not runtime.last_products
+            and not runtime.cart_summary_text
+            and guards.cita_superlativo_precio(final_text)
+        ):
+            logger.warning("guarda G1 VETO: superlativo de precio sin respaldo de catálogo — plantilla sin-precio")
+            final_text = guards.TPL_SIN_PRECIO
+        # G5 — principio activo/composición/genérico afirmado sin respaldo de
+        # catálogo. El agente inventa la composición de un medicamento cuando
+        # no hay resultados de tool en este turno (Daflon → 'ramiprilo').
+        elif (
+            guards.afirma_composicion(final_text)
+            and not runtime.last_products
+        ):
+            logger.warning("guarda G5 VETO: afirmación de composición/genérico sin respaldo — plantilla sin-composición")
+            final_text = guards.TPL_SIN_COMPOSICION
+        # G6 — precio con dígitos, stock o principio activo directo afirmado
+        # sin respaldo de catálogo. Complementa G1 (que solo actúa cuando el
+        # cliente preguntó el precio) y G5 (composición más amplia): G6 cubre
+        # el LLM que inventa datos aunque el cliente NO haya pedido precio
+        # explícitamente (p. ej. "el Daflon cuesta $5", "hay 10 unidades").
+        elif (
+            not runtime.last_products
+            and not runtime.cart_summary_text
+            and guards.afirma_dato_catalogo(final_text)
+        ):
+            logger.warning("guarda G6 VETO: datos de producto sin respaldo de catálogo — plantilla verificación")
+            final_text = guards.TPL_VERIFICACION_CATALOGO
+        # G7 — eco: el agente devuelve casi literalmente el mensaje del cliente
+        # en lugar de ejecutar la acción (buscar, agregar, confirmar) o pedir
+        # el dato que falta. Caso QA 'Comprador decidido': el agente repitió
+        # "Perfecto, quiero 2 cajas de losartan 50 mg." sin llamar ninguna tool.
+        elif guards.es_echo(final_text, user_text):
+            logger.warning("guarda G7 VETO: eco del mensaje del cliente — plantilla anti-eco")
+            final_text = guards.TPL_NO_ECHO
+        # G8 — placeholder sin ejecutar: el LLM escribió la plantilla de una
+        # tool-call en lugar de ejecutarla (p. ej. '[inserta información del
+        # producto desde buscar_medicamento]'). Caso QA 'Errores y modismos'.
+        elif guards.tiene_placeholder(final_text):
+            logger.warning("guarda G8 VETO: placeholder de herramienta en texto final — plantilla búsqueda honesta")
+            final_text = guards.TPL_BUSQUEDA_HONESTA
 
     sent = False
     if final_text and final_text.strip():
