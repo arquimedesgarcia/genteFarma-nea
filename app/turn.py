@@ -766,6 +766,17 @@ async def run_turn(
         ):
             logger.warning("guarda G10 VETO: promesa de búsqueda sin tool call — plantilla honesta G10")
             final_text = guards.TPL_G10_PROMESA
+        # G11 — el agente prometió escalar a un humano por iniciativa propia
+        # (ej: "te comunico con un asesor", "alguien te contactará") sin haber
+        # llamado la herramienta handoff. G9 cubre el caso donde el CLIENTE
+        # pide humano; G11 cubre la promesa espontánea del agente sin handoff.
+        elif (
+            guards.promete_escalado(final_text)
+            and runtime.handoff_reason is None
+        ):
+            logger.warning("guarda G11 VETO: agente prometió escalado sin handoff — plantilla G11")
+            final_text = guards.TPL_G11_ESCALADO
+            runtime.handoff_reason = "lead_request"
 
     sent = False
     if final_text and final_text.strip():

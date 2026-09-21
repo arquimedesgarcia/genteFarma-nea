@@ -403,3 +403,40 @@ def afirma_composicion_farmacologica(texto: str) -> bool:
 def promete_busqueda_sin_accion(texto: str) -> bool:
     """G10b: el texto del AGENTE promete una búsqueda futura sin haber ejecutado herramienta."""
     return bool(texto) and bool(G10_PROMESA_BUSQUEDA.search(texto))
+
+
+# ---------------------------------------------------------------------------
+# G11 — Promesa de escalado sin llamar handoff
+# ---------------------------------------------------------------------------
+# El LLM afirma que "te comunico con un asesor", "te paso con alguien del
+# equipo" o "un asesor te contactará" sin haber llamado la herramienta
+# handoff. El cliente queda esperando un contacto que nunca ocurrirá.
+# G9 solo cubre cuando el CLIENTE pide humano explícitamente; G11 cubre
+# cuando el AGENTE promete por iniciativa propia la transferencia/contacto.
+PROMESA_ESCALADO = re.compile(
+    r"te\s+comunico\s+con\s+(un[ao]?\s+)?(asesor|asistente|agente|humano|persona|alguien|el\s+equipo)"
+    r"|te\s+paso\s+con\s+(un[ao]?\s+)?(asesor|asistente|agente|humano|persona|alguien|el\s+equipo)"
+    r"|te\s+transfiero\b"
+    r"|te\s+voy\s+a\s+transferir\b"
+    r"|transferir[eé]\s+(con|a)\b"
+    r"|voy\s+a\s+comunicarte\s+con\s+(un[ao]?\s+)?(asesor|asistente|agente|humano|persona|alguien|el\s+equipo)"
+    r"|alguien\s+(del\s+equipo\s+)?(te\s+contactar[aá]|se\s+comunicar[aá]\s+contigo|te\s+escribir[aá]|te\s+atiend\w+|te\s+llam[aá])\b"
+    r"|un[ao]?\s+asesor\s+(te\s+contactar[aá]|te\s+llam[aá]|te\s+escribir[aá]|te\s+atiend\w+)\b"
+    r"|el\s+equipo\s+(te\s+contactar[aá]|te\s+atender[aá]|se\s+comunicar[aá])\b"
+    r"|(un[ao]?\s+)?(asesor|asistente|agente|humano|persona)\s+te\s+contactar[aá]\b"
+    r"|(un[ao]?\s+)?(asesor|asistente|agente|humano|persona)\s+se\s+comunicar[aá]\s+contigo\b",
+    re.I,
+)
+
+# Plantilla G11: confirma que un asesor seguirá el caso por este chat.
+# Redactada sin frases que disparen PROMESA_ESCALADO (sin "te paso con",
+# "te comunico con", "alguien ... se comunicará contigo").
+TPL_G11_ESCALADO = (
+    "Con gusto, un asesor de la farmacia tomará tu caso y se pondrá en "
+    "contacto contigo por este mismo chat. ¡Estamos para servirte!"
+)
+
+
+def promete_escalado(texto: str) -> bool:
+    """G11: el texto del AGENTE promete conectar/transferir a un asesor o humano sin handoff real."""
+    return bool(texto) and bool(PROMESA_ESCALADO.search(texto))
