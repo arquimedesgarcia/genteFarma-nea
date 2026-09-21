@@ -444,3 +444,38 @@ TPL_G11_ESCALADO = (
 def promete_escalado(texto: str) -> bool:
     """G11: el texto del AGENTE promete conectar/transferir a un asesor o humano sin handoff real."""
     return bool(texto) and bool(PROMESA_ESCALADO.search(texto))
+
+
+# ---------------------------------------------------------------------------
+# G12 — Tool-call JSON cruda filtrada al texto del cliente
+# ---------------------------------------------------------------------------
+# El LLM a veces emite la llamada a herramienta como texto plano en vez de
+# ejecutarla: el cliente recibe '{"name":"sugerir_generico","arguments":{...}}'.
+# Caso real del Laboratorio (fase 10, G11b-A, escenario pregunton_precios).
+# Familiar del placeholder G8, pero G8 solo cubre corchetes '[inserta...]', no
+# JSON. Detecta cualquier objeto JSON cuyo contenido mencione un campo "name"
+# con nombre de herramienta (o cualquier "name": seguido de identificador con
+# forma de tool snake_case entre llaves en el texto visible).
+_TOOLCALL_JSON = re.compile(
+    r"\{[^{}]{0,200}?[\"']name[\"']\s*:\s*[\"'][a-z_]+[\"']", re.I,
+)
+
+# Plantilla G12: disculpa honesta + reintento, sin datos inventados ni
+# promesas de escalado (no debe disparar G11 ni G10).
+TPL_G12_TOOLCALL = (
+    "Disculpa, tuve un problema técnico al procesar tu mensaje. "
+    "¿Me lo repites para ayudarte ahora mismo?"
+)
+
+
+def contiene_toolcall_json(texto: str) -> bool:
+    """G12: True si el texto final contiene una tool-call JSON cruda filtrada."""
+    if not texto:
+        return False
+    if _TOOLCALL_JSON.search(texto):
+        return True
+    # Cobertura adicional: nombre de herramienta conocido dentro de llaves.
+    for m in re.finditer(r"\{([^{}]*)\}", texto, re.S):
+        if _NOMBRES_HERRAMIENTA.search(m.group(1)) and '"name"' in m.group(1).lower():
+            return True
+    return False

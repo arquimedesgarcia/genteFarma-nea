@@ -738,6 +738,13 @@ async def run_turn(
         elif guards.tiene_placeholder(final_text):
             logger.warning("guarda G8 VETO: placeholder de herramienta en texto final — plantilla búsqueda honesta")
             final_text = guards.TPL_BUSQUEDA_HONESTA
+        # G12 — tool-call JSON cruda filtrada al texto: el LLM emitió la llamada
+        # a herramienta como texto plano ('{"name":"sugerir_generico",...}') en
+        # vez de ejecutarla. Caso real del Laboratorio (fase 10, G11b-A,
+        # pregunton_precios). G8 no lo cubre (solo corchetes '[inserta...]').
+        elif guards.contiene_toolcall_json(final_text):
+            logger.warning("guarda G12 VETO: tool-call JSON cruda en texto final — plantilla G12")
+            final_text = guards.TPL_G12_TOOLCALL
         # G9 — cliente pide hablar con humano pero el LLM no llamó handoff:
         # el bench marcaba el cierre seco ("Entendido…") como debio_escalar/tono.
         # Plantilla constante empática + handoff garantizado.
