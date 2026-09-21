@@ -745,6 +745,27 @@ async def run_turn(
             logger.warning("guarda G9 VETO: cliente pide humano sin handoff — plantilla cierre escalado")
             final_text = guards.TPL_CIERRE_ESCALADO
             runtime.handoff_reason = "lead_request"
+        # G10a — clase terapéutica o uso farmacológico afirmado sin haber consultado
+        # el catálogo en este turno. Caso 'pregunton_precios' del Laboratorio: el
+        # agente describía "Daflón 500 es un antiinflamatorio AINE que se usa para..."
+        # sin dato de herramienta. G5/G6 no cubren clases terapéuticas amplias.
+        # NO se activa si el turno SÍ llamó buscar_medicamento (consulted_catalog).
+        elif (
+            not runtime.consulted_catalog
+            and guards.afirma_composicion_farmacologica(final_text)
+        ):
+            logger.warning("guarda G10 VETO: composición/uso farmacológico sin catálogo — plantilla honesta G10")
+            final_text = guards.TPL_G10_COMPOSICION
+        # G10b — promesa de búsqueda futura sin haber llamado herramienta en el turno.
+        # El agente dice "Voy a buscar", "Déjame verificar", "Busco y te aviso" sin
+        # haber ejecutado buscar_medicamento: el cliente queda esperando una acción
+        # que nunca ocurrirá en este turno.
+        elif (
+            not runtime.consulted_catalog
+            and guards.promete_busqueda_sin_accion(final_text)
+        ):
+            logger.warning("guarda G10 VETO: promesa de búsqueda sin tool call — plantilla honesta G10")
+            final_text = guards.TPL_G10_PROMESA
 
     sent = False
     if final_text and final_text.strip():

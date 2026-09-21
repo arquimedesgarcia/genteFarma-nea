@@ -343,3 +343,63 @@ TPL_CIERRE_ESCALADO = (
 def pide_humano(texto: str) -> bool:
     """G9: el turno del cliente solicita explícitamente hablar con un humano."""
     return bool(texto) and bool(PIDE_HUMANO.search(texto))
+
+
+# ---------------------------------------------------------------------------
+# G10 — Composición/uso farmacológico o promesa de búsqueda sin respaldo
+# ---------------------------------------------------------------------------
+# El agente afirma la clase terapéutica o el uso de un medicamento ('es un
+# antiinflamatorio AINE', 'sirve para dolores de cabeza') o promete una
+# búsqueda futura ('voy a buscar', 'déjame verificar') sin haber llamado
+# buscar_medicamento en el turno. Hallazgo del Laboratorio (caso
+# 'pregunton_precios'): el agente describía composición/uso del Daflón 500 sin
+# dato de herramienta. G5/G6 no cubren clases terapéuticas amplias ni
+# promesas de búsqueda futura.
+#
+# FALSO POSITIVO principal: NO debe activarse cuando el turno SÍ llamó
+# buscar_medicamento (runtime.consulted_catalog=True). La condición de turno se
+# evalúa en turn.py; aquí solo se define la detección en el texto del agente.
+G10_COMPOSICION = re.compile(
+    r"\b(AINE[s]?|antiinflamatorio[s]?|antibi[oó]tico[s]?|"
+    r"analg[eé]sico[s]?|antipir[eé]tico[s]?|antihipertensivo[s]?|"
+    r"antidiab[eé]tico[s]?|antihistam[íi]nico[s]?|diur[eé]tico[s]?|"
+    r"vasodilatador(?:es)?|anticoagulante[s]?|antif[úu]ngico[s]?|"
+    r"broncodilatador(?:es)?|corticoesteroide[s]?|"
+    r"es\s+un\s+(?:medicamento|f[aá]rmaco)|"
+    r"sirve\s+para|se\s+utiliza\s+para|se\s+usa\s+para|"
+    r"para\s+el\s+tratamiento\s+de|indicado\s+para)\b",
+    re.I,
+)
+
+G10_PROMESA_BUSQUEDA = re.compile(
+    r"\b(?:voy\s+a\s+(?:buscar|verificar|consultar|revisar|checar)|"
+    r"d[eé]jame\s+(?:buscar|verificar|consultar|revisar|checar|ver)|"
+    r"busco\s+y\b|"
+    r"en\s+un\s+momento\s+(?:busco|verifico|consulto|te\s+digo)|"
+    r"estoy\s+buscando|te\s+busco\b|"
+    r"buscar[eé]|verificar[eé]|consultar[eé]|"
+    r"voy\s+a\s+checar|me\s+fijo\s+y\b|"
+    r"ahora\s+mismo\s+(?:busco|verifico|consulto))\b",
+    re.I,
+)
+
+TPL_G10_COMPOSICION = (
+    "No tengo información médica confiable sobre ese medicamento. Para datos "
+    "de composición o uso, te recomiendo consultarlo con el equipo de la "
+    "farmacia. ¿Te ayudo con algo más?"
+)
+
+TPL_G10_PROMESA = (
+    "No tengo esa información disponible en este momento. ¿Te ayudo con tu "
+    "pedido o deseas que tome tu mensaje para el equipo?"
+)
+
+
+def afirma_composicion_farmacologica(texto: str) -> bool:
+    """G10a: el texto del AGENTE afirma clase terapéutica o uso de un medicamento."""
+    return bool(texto) and bool(G10_COMPOSICION.search(texto))
+
+
+def promete_busqueda_sin_accion(texto: str) -> bool:
+    """G10b: el texto del AGENTE promete una búsqueda futura sin haber ejecutado herramienta."""
+    return bool(texto) and bool(G10_PROMESA_BUSQUEDA.search(texto))
