@@ -424,7 +424,11 @@ PROMESA_ESCALADO = re.compile(
     r"|un[ao]?\s+asesor\s+(te\s+contactar[aá]|te\s+llam[aá]|te\s+escribir[aá]|te\s+atiend\w+)\b"
     r"|el\s+equipo\s+(te\s+contactar[aá]|te\s+atender[aá]|se\s+comunicar[aá])\b"
     r"|(un[ao]?\s+)?(asesor|asistente|agente|humano|persona)\s+te\s+contactar[aá]\b"
-    r"|(un[ao]?\s+)?(asesor|asistente|agente|humano|persona)\s+se\s+comunicar[aá]\s+contigo\b",
+    r"|(un[ao]?\s+)?(asesor|asistente|agente|humano|persona)\s+se\s+comunicar[aá]\s+contigo\b"
+    # Promesas IMPERSONALES sin sujeto humano explícito (caso real del lab:
+    # "Esa petición la manejarán en breve") — 3ª persona futura de verbos de
+    # gestión, sin agente definido: el cliente queda esperando igual.
+    r"|(?:la|lo|los|las|se)\s+(?:manejar[aá]n?|gestionar[aá]n?|revisar[aá]n?|atiender[aá]n?|encargar[aá]n?|procesar[aá]n?)\b",
     re.I,
 )
 
