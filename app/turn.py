@@ -42,6 +42,7 @@ from app.tools import (
     _limpiar_termino_medicamento,
     _normalizar_tildes,
     _normalizar_unidad,
+    _sin_frase_de_indicacion,
     _termino_es_medicamento_plausible,
     _PALABRAS_FUNCIONALES,
 )
@@ -5103,7 +5104,15 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
     'tienes acido folico de 10 mg' -> 'acido folico 10 mg' (incluye mg/ml)."""
     if not texto:
         return None
-    palabras = re.findall(r"[a-záéíóúüñ0-9]+", texto.lower())
+    # La FRASE de indicación ('tos seca', 'dolor de cabeza') no es parte del nombre: describe
+    # para qué sirve. Sin quitarla, el TÍTULO y el término arrastraban la enfermedad
+    # ('BROXOL TOS SECA') y la búsqueda se degradaba de 11 productos a 3 basura.
+    texto = _sin_frase_de_indicacion(
+        texto.lower()
+        .replace("á", "a").replace("é", "e").replace("í", "i")
+        .replace("ó", "o").replace("ú", "u")
+    )
+    palabras = re.findall(r"[a-záéíóúüñ0-9]+", texto)
     # La unidad HABLADA se normaliza ANTES de decidir ("nifedipina 30 miligramos"
     # → "nifedipina 30 mg"). Sin esto el 30 se descarta por ir seguido de una
     # palabra que no está en la lista de unidades y la dosis se pierde.
