@@ -355,6 +355,53 @@ _PRESENTACION = {
 }
 
 
+# FRASES DE INDICACIÓN: describen PARA QUÉ es el medicamento, no CUÁL es.
+#
+# Caso real (conv 7, provider 19): "Broxol tos seca"
+#     term='broxol'          -> 11 productos   (BROXOL EXISTE: BROXOL TOS JAB ADUL/PED…)
+#     term='broxol tos seca' ->  3 productos   (toalla "MALLA SECA", protector "ACTIVA SEC",
+#                                               jabón "PIEL SECA")
+# La ENFERMEDAD degradaba la búsqueda: 'tos' casa con la abreviatura T/S de otros productos y
+# 'seca' con toallas/jabones. El mismo patrón ya había pasado con 'beusan tos seca' (conv 2560).
+#
+# REGLA: se quita la FRASE, nunca la palabra suelta. Medido contra el catálogo real:
+#     'tos'  solo -> 3 productos REALES (BROXOL TOS JAB ADUL, BROXOL TOS JAB PED, BEUSAN … TOS)
+#     'seca' solo -> 2 productos REALES (TOALLA … MALLA SECA, JABON BIOS PIEL SECA)
+#     'tos seca'  como frase -> 0 productos  -> quitarla es seguro
+# Quitar 'tos' o 'seca' sueltas borraría productos legítimos.
+#
+# Las 32 frases de abajo se midieron una a una contra el catálogo: NINGUNA aparece como frase
+# dentro de un nombre de producto. La única descartada fue 'piel seca' — ESA SÍ existe
+# ('JABON BIOS PIEL SECA X 90 GR BARRA'), así que no se toca.
+# (Sin tildes: se aplican sobre el texto ya normalizado.)
+_FRASES_INDICACION = (
+    "tos seca", "tos productiva", "tos con flema", "tos con moco", "tos con catarro",
+    "dolor de cabeza", "dolor de garganta", "dolor de estomago", "dolor de barriga",
+    "dolor de espalda", "dolor muscular", "dolor de oidos", "dolor de muela",
+    "presion alta", "presion arterial", "azucar alta", "colesterol alto",
+    "falta de aire", "congestion nasal", "nariz tapada", "malestar estomacal",
+    "ardor de estomago", "falta de apetito", "garganta irritada",
+    "mucha sed", "orina frecuente", "resfriado comun", "gripe", "fiebre",
+    "infeccion urinaria", "hongos en los pies",
+)
+
+# Ordenadas de MÁS LARGA a más corta para que la frase específica gane a una más general.
+_RE_FRASE_INDICACION = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(p).replace(r"\ ", r"\s+")
+               for p in sorted(_FRASES_INDICACION, key=len, reverse=True))
+    + r")\b"
+)
+
+
+def _sin_frase_de_indicacion(t_sin: str) -> str:
+    """Quita las frases de indicación ('tos seca', 'dolor de cabeza') del término.
+
+    Espera el texto YA normalizado (minúsculas y sin tildes), que es como se tokeniza.
+    """
+    return _RE_FRASE_INDICACION.sub(" ", t_sin or "")
+
+
 def _limpiar_termino_medicamento(term: str) -> str:
     """Deja SOLO las palabras "sustantivas" (posible fármaco) del término.
 
@@ -375,6 +422,9 @@ def _limpiar_termino_medicamento(term: str) -> str:
     if not t:
         return ""
     t_sin = t.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+    # La FRASE de indicación se quita ANTES de tokenizar: describe PARA QUÉ sirve el
+    # medicamento, no CUÁL es. 'broxol tos seca' → 'broxol' (11 productos en vez de 3 basura).
+    t_sin = _sin_frase_de_indicacion(t_sin)
     palabras = re.findall(r"[a-z0-9]+", t_sin)
     # La forma HABLADA de la unidad ("miligramos") se traduce a su abreviatura
     # ("mg") ANTES de decidir. Sin esto el número que la precede se descarta por
