@@ -1305,7 +1305,24 @@ async def _tool_loop(
     # entrega. Los pasos obligatorios se resuelven ANTES del modelo.
     if farmacia:
         env_pedido = _pedido_de_envase(user_text)
-        if env_pedido and runtime.last_term:
+        # EL MENSAJE NO DEBE TRAER SU PROPIO MEDICAMENTO.
+        #
+        # Este guard aplica el tamaño de caja que el cliente mencionó (`x 30 Tab`) al
+        # ÚLTIMO medicamento de la conversación. Eso es correcto cuando el cliente está
+        # afinando la consulta anterior ("no tienes de 10 pastillas?"), pero NO cuando
+        # llega con una consulta nueva que trae sus propios medicamentos.
+        #
+        # Caso real (conv 2109, provider 19, 2026-10-16): el cliente pidió 8 medicamentos
+        #     "Glimepiride de. 4 MG x 30 Tab, candesatan 16 x 30 Tab, ..."
+        # y `last_term` era 'discolayte' (de una sesión del 9-oct). El guard tomó el '30'
+        # de "x 30 Tab", buscó DISCOLAYTE, no lo encontró en envase de 30 y respondió
+        #     "No tengo DISCOLAYTE en envase de 30 unidades. Lo tengo en: 69 unidades."
+        # NINGUNO de los 8 medicamentos se buscó: el guard RETORNA y el camino de lista
+        # nunca corre. Es la misma regla que ya se aplicó al backstop de refinamiento:
+        # la FORMA refina, el FÁRMACO manda.
+        if env_pedido and runtime.last_term and not _trae_medicamento_propio(
+            user_text, runtime.last_term
+        ):
             # Se busca con el término LIMPIO: last_term puede traer el envase ya pegado
             # ('brasartan 80 mg 10') y contaminaría la consulta.
             term_busqueda = _termino_sin_envase(runtime.last_term, env_pedido)
@@ -2260,6 +2277,15 @@ _VERBOS_MEDICAMENTO = re.compile(
 _FILLER = {
     "hola", "buenas", "buen", "buenos", "buena", "dia", "dias", "tardes",
     "noches", "gracias", "por", "favor", "quisiera", "podria", "puede",
+    # FRASE DE CONSULTA: el cliente ANUNCIA la lista antes de enumerarla
+    # ("por favor me podrías cotizar los siguientes medicamentos. Glimepiride...,
+    # candesatan..., ..."). Sin filtrarlas, esa frase se buscaba como si fuera UN
+    # medicamento y el cliente veía "⚠️ No disponibles: COTIZAR SIGUIENTES MEDICAMENTOS".
+    # MEDIDO en los 7 providers activos: 0 productos reales. Los 4 aciertos de 'cotizar'
+    # en el 27 eran CORTA UÑA/CORTAUÑA y los 3 de 'presupuesto' en el 28 eran
+    # PRESTOBARBA: falsos positivos del matcher difuso, o sea el bug que se quiere evitar.
+    "cotizar", "cotizame", "cotizacion", "cotizaciones", "cotizarlos",
+    "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
     "me", "le", "la", "de", "el", "los", "las", "para", "que", "con",
     "una", "un", "en", "y", "o", "a", "si", "no", "como", "cuanto", "es",
     "son", "tiene", "tienen", "hay", "está", "estan", "disponible",
@@ -4795,13 +4821,23 @@ def _sin_vocativo(texto: str) -> str:
     resto = m.group(2).strip()
     if not resto:
         return texto
+    # SIN TILDES para evaluar los verbos: las listas de verbos vienen sin tildes, así que
+    # 'podrías' NUNCA casaba con `\bpodrias\b` y el vocativo no se quitaba. Caso real
+    # (conv 2109): "Hola Robi, buenas tardes, por favor me podrías cotizar..." dejaba
+    # 'Hola Robi' como trozo → 'ROBI' presentado como medicamento que no tenemos.
+    resto_norm = (
+        resto.lower()
+        .replace("á", "a").replace("é", "e").replace("í", "i")
+        .replace("ó", "o").replace("ú", "u").replace("ü", "u")
+    )
     tiene_verbo = bool(
-        re.search(_VERBOS_MEDICAMENTO.pattern, resto, re.IGNORECASE)
-        or re.search(_VERBOS_MOTIVO.pattern, resto, re.IGNORECASE)
+        re.search(_VERBOS_MEDICAMENTO.pattern, resto_norm, re.IGNORECASE)
+        or re.search(_VERBOS_MOTIVO.pattern, resto_norm, re.IGNORECASE)
         or re.search(
-            r"\b(?:dar|dame|darme|darte|darnos|denme|puedes|podrias|podria|quiero|"
+            r"\b(?:dar|dame|darme|darte|darnos|denme|puedes|podrias|podria|podriamos|"
+            r"cotizar|cotizame|presupuesto|quiero|"
             r"quisiera|necesito|busco|tienes|hay)\b",
-            resto,
+            resto_norm,
             re.IGNORECASE,
         )
     )
