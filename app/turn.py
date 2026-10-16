@@ -985,6 +985,24 @@ async def _resolver_paso_entrega(
                 # Sin carrito no hay resumen que mostrar; que el LLM continúe.
                 return False, None
             return True, runtime.cart_summary_text
+        # EL CLIENTE NO CONTESTA EL MENÚ, PERO PIDE EL TOTAL.
+        #
+        # Ser flexible: contestarle lo que está pidiendo en vez de repetirle la pregunta.
+        # Caso real (conv 1003, provider 19, 2026-10-16): el cliente escribió
+        #     "Cuánto sería el total."  y  "Cuánto sería el monto total de los 3 productos ?"
+        # y recibió el menú de entrega (y después nada). Nunca vio su total.
+        #
+        # La pregunta de entrega SE QUEDA EN VUELO a propósito: el cliente puede contestar
+        # "1"/"2" en el turno siguiente y el flujo continúa con normalidad. Limpiarla aquí
+        # haría que el guard de `ver_carrito` volviera a preguntar el método.
+        if _pide_el_total(user_text):
+            result = await runtime.execute("ver_carrito", {})
+            if runtime.cart_summary_text:
+                logger.info(
+                    "paso de entrega: el cliente pidió el TOTAL sin contestar el menú "
+                    "— muestro el resumen y dejo la pregunta de entrega en vuelo",
+                )
+                return True, runtime.cart_summary_text
         # No se reconoce: puede ser una consulta nueva (el cliente cambió de tema).
         # Se limpia la pregunta pendiente y se deja al LLM atender el mensaje.
         logger.info(
@@ -2655,6 +2673,39 @@ def _eleccion_entrega(texto: str) -> str | None:
     if _DELIVERY_PALABRAS.search(t):
         return "delivery"
     return None
+
+
+def _pide_el_total(texto: str) -> bool:
+    """¿El cliente está pidiendo el TOTAL / el resumen del pedido?
+
+    Se evalúa cuando el agente ACABA de preguntar cómo quiere recibir el pedido
+    (`delivery_pending == 'method'`) y el cliente, en vez de contestar "1"/"2", pregunta
+    cuánto es. Hay que contestarle lo que pide, no repetirle el menú.
+
+    Caso real (conv 1003, provider 19, 2026-10-16):
+        22:19  cliente: "Cuánto sería el total."
+        22:19  agente : "Antes de cerrar tu pedido, ¿cómo prefieres recibirlo? 1 / 2"
+        22:20  cliente: "Cuánto sería el monto total de los 3 productos ?"
+               agente : (sin respuesta — el menú se repetía)
+    El cliente preguntó el total DOS veces y nunca lo vio.
+
+    NO se usa para decidir si mostrar el resumen: eso ya lo hace `_quiere_ver_resumen`.
+    Esto es solo para reconocer que el cliente está INSISTIENDO con el total mientras hay
+    una pregunta de entrega en vuelo. Por eso es deliberadamente amplio: en ese contexto,
+    'total' o 'monto' sin más ya significan "dame la cuenta".
+    """
+    if not texto:
+        return False
+    t = texto.strip().lower()
+    if _INTENTO_VER_RESUMEN.search(t):
+        return True
+    if re.search(r"\b(total|monto|subtotal|cuenta)\b", t):
+        return True
+    # "cuánto es/sale/vale/sería" sin la palabra total ("¿y cuánto es?", "¿cuánto sale?").
+    # Exige el verbo: un 'cuánto' suelto puede ser una pregunta de dosis ("cuánto de X").
+    return bool(re.search(
+        r"\bcu[aá]nt[oa]s?\s+(?:es|son|sale|salen|vale|valen|ser[íi]a|serian|"
+        r"ser[íi]an|me\s+da|da|queda|quedan|cuesta|cuestan)\b", t))
 
 
 def _parece_direccion(texto: str) -> bool:
