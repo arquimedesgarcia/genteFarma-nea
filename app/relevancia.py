@@ -187,6 +187,25 @@ _MIN_LEN_SENAL = 4
 _MIN_LEN_ENTRADA = 3
 _MIN_LEN_TYPO = 5
 
+
+def _es_codigo_del_nombre(w: str) -> bool:
+    """¿Es un CÓDIGO del nombre (d3, k2, b6, b12, q10)? Entonces NO es una dosis.
+
+    Los NÚMEROS puros sí son dosis y no identifican nada ('40', '850': el catálogo los
+    filtra aparte). Pero un código letra+número es parte del NOMBRE: VITAMINA D3 no es
+    lo mismo que VITAMINA B12, y son dos productos distintos del catálogo.
+
+    Sin esto, `tokens_farmaco('vitamina d3 k2')` devolvía `['vitamina']`: el filtro de
+    relevancia no podía exigir ni 'd3' ni 'k2', así que se dejaba pasar TODO lo que
+    tuviera 'vitamina' (multivitaminas, jabón con provitamina, B12...). Medido: el
+    producto que el cliente quiere —`VITAMINA D3+K2 2000 IU X 30 TAB PHARMACORP`— no
+    aparecía en la respuesta.
+
+    Se excluye la forma 'x30' (marcador de ENVASE, no del nombre) para que no se exija
+    como si fuera parte del fármaco.
+    """
+    return bool(re.fullmatch(r"[a-wyz]{1,2}\d{1,3}", w))
+
 # Distancia de edición máxima tolerada (cubre los typos ya soportados).
 _MAX_DIST = 2
 
@@ -253,7 +272,10 @@ def tokens_senal(termino: str, min_len: int | None = None) -> list[str]:
     out: list[str] = []
     for w in _norm(termino).split():
         if len(w) < umbral or w.isdigit():
-            continue
+            # EXCEPCIÓN: los CÓDIGOS del nombre ('d3', 'k2', 'b12') son cortos pero
+            # identifican el producto. Ver `_es_codigo_del_nombre`.
+            if not _es_codigo_del_nombre(w):
+                continue
         if w in _FUNCIONALES:
             continue
         out.append(w)

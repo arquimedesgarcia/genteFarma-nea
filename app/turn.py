@@ -5043,6 +5043,30 @@ def _envase_pedido_en_linea(linea: str) -> str:
     return m.group(1).lstrip("0") or m.group(1)
 
 
+# Regex de la DOSIS escrita ANTES del envase: en "<nombre> <n> x <m>", el número que
+# precede al 'x' es la dosis y el que sigue es el tamaño de caja.
+_RE_DOSIS_ANTES_DE_ENVASE = re.compile(r"\b(\d+(?:[.,]\d+)?)\s*x\s*\d+\b", re.IGNORECASE)
+
+
+def _dosis_antes_del_envase(texto: str) -> str:
+    """La DOSIS del patrón '<nombre> <dosis> x <envase> <forma>' — sin unidad escrita.
+
+    El cliente suele escribir la dosis SIN 'mg' cuando ya la acompaña del envase:
+        'candesatan 16 x 30 Tab'   → 16 es la dosis (candesartán 16 mg), 30 el envase
+        'metformina de  500 x 30'  → 500 la dosis, 30 el envase
+    `_extraer_dosis` exige la unidad (`4 MG`), así que en estos dos casos no devolvía
+    nada y el filtro de concentración NO se aplicaba: el cliente pedía metformina 500 y
+    recibía 850, 1000 y hasta 1 MG mezclados (caso real conv 2109, provider 19).
+
+    El 'x' es el desambiguador que da el propio cliente: el número ANTES es la dosis y
+    el DE DESPUÉS el envase (`_pedido_de_envase`). Sin 'x' no se asume nada:
+    'flextrin x 60' no tiene dosis, y '2 cajas de metformina 500' lo cubre el guard de
+    cantidad de compra.
+    """
+    m = _RE_DOSIS_ANTES_DE_ENVASE.search(texto or "")
+    return m.group(1) if m else ""
+
+
 # --- RECLAMO: el cliente corrige lo que YA recibió; no pide nada nuevo ---
 # Caso real (conv cv_5xcp1rqrsxiegmd4evcz):
 #     cliente: "Buenos días, eso no es lo que pedi"
@@ -5124,7 +5148,15 @@ def _medicamentos_con_dosis(texto: str) -> list[tuple[str, str]]:
         if not term or not _termino_es_medicamento_plausible(term):
             continue
         # La dosis se busca en la LÍNEA (donde vive el número), no en el término ya limpio.
-        dosis = _extraer_dosis(linea) or _dosis_sin_unidad(limpia) or _dosis_sin_unidad(term)
+        # OJO: tiene que ser la LÍNEA. El término limpio ya perdió el número cuando el
+        # cliente escribió la dosis sin unidad ('candesatan 16 x 30 Tab' → 'candesatan
+        # 30 tab'), así que ahí no hay nada que encontrar.
+        dosis = (
+            _extraer_dosis(linea)
+            or _dosis_sin_unidad(limpia)
+            or _dosis_sin_unidad(term)
+            or _dosis_antes_del_envase(linea)
+        )
         if term in vistos:
             continue
         vistos.add(term)
