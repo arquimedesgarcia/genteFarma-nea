@@ -163,6 +163,13 @@ def _es_solo_saludo(term: str) -> bool:
 # cliente que el backstop intenta buscar como si fueran medicamentos (p. ej.
 # 'caja cada uno', 'medicamento llega vencido cambian', 'van responder').
 _PALABRAS_FUNCIONALES = {
+    # FRASE DE CONSULTA: el cliente anuncia la lista antes de enumerarla. No es un
+    # medicamento y no puede encabezar el título ni la búsqueda (el cliente vería
+    # "⚠️ No disponibles: COTIZAR SIGUIENTES MEDICAMENTOS"). MEDIDO: 0 productos reales
+    # en los 7 providers activos; los aciertos de 'cotizar' (CORTAUÑA) y 'presupuesto'
+    # (PRESTOBARBA) eran falsos positivos del matcher difuso.
+    "cotizar", "cotizame", "cotizacion", "cotizaciones", "cotizarlos",
+    "siguiente", "siguientes", "presupuesto",
     "van", "vamos", "respondo", "responder", "respuesta", "necesito",
     "quiero", "quieres", "quiere", "busco", "busca", "buscan", "buscar",
     "tienes", "tiene", "tienen", "tener", "hay", "es", "son", "estan", "esta",
@@ -267,6 +274,17 @@ _ACCESORIOS_MEDICOS = {
 }
 
 
+# Tokens de DOSIS y ENVASE: no aportan nombre de fármaco, pero tampoco convierten un
+# medicamento en una frase. Se usan para no descartar términos largos LEGÍTIMOS como
+# 'glimepiride 4 mg 30 tab' (ver _termino_es_medicamento_plausible).
+_TOKENS_DE_DOSIS = {
+    "mg", "ml", "mcg", "g", "gr", "gramos", "cc", "ui", "kg", "meq",
+    "tab", "tabs", "tableta", "tabletas", "comp", "comprimido", "comprimidos",
+    "cap", "caps", "capsula", "capsulas", "jbe", "jarabe", "susp", "sol", "sob",
+    "unid", "unidad", "unidades", "amp", "ampolla", "fco", "cja",
+}
+
+
 def _termino_es_medicamento_plausible(term: str) -> bool:
     """True si el término parece un medicamento, no una frase del cliente.
 
@@ -290,8 +308,23 @@ def _termino_es_medicamento_plausible(term: str) -> bool:
     if not palabras:
         return False
     # Más de 4 palabras → probablemente una frase, no un medicamento.
+    #
+    # EXCEPCIÓN: cuando las palabras QUE SOBRAN son dosis/envase, el término es un
+    # medicamento perfectamente normal con concentración y tamaño de caja. Medido:
+    #     'glimepiride 4 mg 30 tab'   (5 palabras) -> se DESCARTAba
+    #     'acido folico 10 mg 30 tab' (6 palabras) -> se DESCARTAba
+    #     'amlodipina 5 mg 30 tab'    (5 palabras) -> se DESCARTAba
+    # Caso real (conv 2109, provider 19): el cliente pidió 8 medicamentos
+    #     "Glimepiride de. 4 MG x 30 Tab, candesatan 16 x 30 Tab, ..."
+    # y GLIMEPIRIDE se perdió aquí — el trozo se descartó entero y el cliente nunca vio
+    # ese medicamento.
     if len(palabras) > 4:
-        return False
+        # Las que no son número ni dosis/envase: si son pocas, sigue siendo un fármaco.
+        sobrantes = [w for w in palabras
+                     if not w.isdigit() and w not in _TOKENS_DE_DOSIS]
+        if len(sobrantes) > 3:
+            return False
+        # Si son pocas, NO se acepta sin más: sigue el resto del filtro (sustantivas).
     # Contar palabras "sustantivas" (no funcionales).
     sustantivas = [w for w in palabras if w not in _PALABRAS_FUNCIONALES and len(w) >= 3]
     if not sustantivas:
