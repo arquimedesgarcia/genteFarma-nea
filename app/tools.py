@@ -18,10 +18,12 @@ from app.crm import CrmConflict, CrmError, SlotTaken
 from app.relevancia import (
     _norm,
     _token_cabeza_farmaco,
+    es_relevante,
     es_relevante_estricto,
     filtrar_relevantes,
     hay_senal_de_farmaco,
     parece_presentacion_personal,
+    tokens_farmaco,
 )
 
 # Palabras que revelan que el LLM alucinó una frase como término de búsqueda
@@ -1224,6 +1226,58 @@ def _mejor_token_catalogo(nucleo: str, tokens: set[str]) -> tuple[str | None, fl
     return mejor, mejor_ratio, mejor_ratio - segundo
 
 
+def _nucleo_ausente(term: str, products: list[dict[str, Any]]) -> str | None:
+    """El fármaco que el cliente NOMBRÓ no aparece en NINGÚN producto devuelto.
+
+    Devuelve ese token (para intentar corregir su escritura), o None si no aplica.
+
+    POR QUÉ: el motor del CRM matchea por palabras y devuelve lo que comparte CUALQUIER
+    token. Si el cliente escribe un fármaco con un typo grande, el término puede acabar
+    apoyándose en una palabra GENÉRICA compartida y devolver una lista entera de otra
+    cosa — sin que la lista esté vacía, así que ningún camino de corrección se activa.
+
+    Caso real (conv 2109, provider 19, 2026-10-16): el cliente pidió
+        'acido acetalicio'   (typo de ácido acetilsalicílico = aspirina)
+    y el CRM devolvió 20 productos que comparten solo 'ácido': ACIDO FOLICO, ACIDO
+    ASCORBICO, ACIDO TRANEXAMICO... Ninguno es lo que pidió. `filtrar_relevantes`
+    tampoco los quita, porque el rescate escalonado encuentra 'acido' (20 de 20) y lo da
+    por bueno. La aspirina SÍ está en el catálogo como ACIDO ACETILSALICILICO.
+
+    El núcleo es el ÚLTIMO token de fármaco: el cliente escribe el nombre y añade
+    descriptores después ('magnesio plus life', 'acido acetalicio').
+    """
+    farmacos = tokens_farmaco(term)
+    if len(farmacos) < 2:
+        return None
+    nucleo = farmacos[-1]
+    if any(es_relevante(nucleo, str(p.get("nombre") or "")) for p in products):
+        return None
+    return nucleo
+
+
+async def _tokens_catalogo_por_prefijos(
+    crm: Any, provider_id: str | None, nucleo: str
+) -> set[str]:
+    """Sondea el catálogo con prefijos DECRECIENTES del núcleo y devuelve sus tokens.
+
+    El catálogo no tiene endpoint de listado, solo búsqueda. En 'cardevidol' el error
+    está en la posición 4, así que el prefijo 'card' NO trae CARVEDILOL: hay que bajar
+    hasta 'car'. Se acumulan tokens hasta tener suficientes para comparar.
+    """
+    tokens: set[str] = set()
+    for n_p in _PREFIJOS_SONDEO:
+        if n_p > len(nucleo):
+            continue
+        try:
+            d_p = await crm.get_products(provider_id, q=nucleo[:n_p], limit=25)
+        except Exception:
+            continue
+        tokens |= _tokens_de_catalogo(d_p.get("products") or [])
+        if len(tokens) >= 60:
+            break
+    return tokens
+
+
 def _formatear_lista_productos(
     products: list[dict[str, Any]], titulo: str
 ) -> str:
@@ -1850,6 +1904,53 @@ class ToolRuntime:
                 "buscar_medicamento: '%s' — %d/%d productos descartados por relevancia",
                 nombre, antes - len(products), antes,
             )
+
+        # EL FÁRMACO QUE EL CLIENTE NOMBRÓ NO ESTÁ EN LA LISTA (pero la lista NO está
+        # vacía, así que ninguno de los caminos de abajo se activaría).
+        #
+        # Caso real (conv 2109, provider 19, 2026-10-16): 'acido acetalicio' (typo de
+        # ácido acetilsalicílico) devolvía 20 productos que solo comparten 'ácido'
+        # (ACIDO FOLICO, ACIDO ASCORBICO, ACIDO TRANEXAMICO...). Ninguno es lo que el
+        # cliente pidió. Se intenta la MISMA corrección por catálogo que ya existe para
+        # los typos largos, pero disparada por «el fármaco nombrado no está» en vez de
+        # por «la lista está vacía». NUNCA se inventa el término: el token corregido
+        # tiene que EXISTIR en el catálogo.
+        if products:
+            nucleo = _nucleo_ausente(nombre, products)
+            if nucleo:
+                tokens_cat = await _tokens_catalogo_por_prefijos(
+                    self._ctx.crm, self._provider_id, nucleo
+                )
+                token_ok, ratio_t, margen_t = _mejor_token_catalogo(nucleo, tokens_cat)
+                if (
+                    token_ok
+                    and token_ok != nucleo
+                    and ratio_t >= _UMBRAL_TYPO_CATALOGO
+                    and margen_t > 0.0
+                ):
+                    prefijo = " ".join(nombre.strip().split()[:-1])
+                    term_corregido = (
+                        f"{prefijo} {token_ok}".strip() if prefijo else token_ok
+                    )
+                    data_c = await self._ctx.crm.get_products(
+                        self._provider_id, q=term_corregido, limit=20
+                    )
+                    candidatos_c = _dedupe_por_nombre(data_c.get("products") or [])
+                    corregidos = filtrar_relevantes(term_corregido, candidatos_c)
+                    if corregidos:
+                        logger.info(
+                            "buscar_medicamento: '%s' — el fármaco '%s' no está en los "
+                            "%d resultados; recuperado por catálogo: '%s' "
+                            "(ratio %.3f, margen %.3f)",
+                            nombre, nucleo, len(products), term_corregido,
+                            ratio_t, margen_t,
+                        )
+                        self.corregido_desde = nombre
+                        self.corregido_a = term_corregido
+                        self.last_term = term_corregido
+                        data = data_c
+                        products = corregidos
+
         # Dedupe por nombre de producto: el catálogo de Firebase repite el MISMO
         # ítem (mismo nombre) con distintos productId/precio (una entrada por
         # farmacia/precio). Quedarse con el de MENOR precio evita listas de 20
@@ -1973,19 +2074,9 @@ class ToolRuntime:
             # prefijo 'card' NO trae CARVEDILOL; hace falta bajar hasta 'car'.
             nucleo_typo = nombre.strip().lower().split()[-1] if nombre.strip() else ""
             prefijo_typo = " ".join(nombre.strip().split()[:-1])
-            tokens_cat: set[str] = set()
-            for n_p in _PREFIJOS_SONDEO:
-                if n_p > len(nucleo_typo):
-                    continue
-                try:
-                    d_p = await self._ctx.crm.get_products(
-                        self._provider_id, q=nucleo_typo[:n_p], limit=25
-                    )
-                except Exception:
-                    continue
-                tokens_cat |= _tokens_de_catalogo(d_p.get("products") or [])
-                if len(tokens_cat) >= 60:
-                    break
+            tokens_cat = await _tokens_catalogo_por_prefijos(
+                self._ctx.crm, self._provider_id, nucleo_typo
+            )
             token_ok, ratio_t, margen_t = _mejor_token_catalogo(nucleo_typo, tokens_cat)
             if token_ok and ratio_t >= _UMBRAL_TYPO_CATALOGO and margen_t > 0.0:
                 term_corregido = (
