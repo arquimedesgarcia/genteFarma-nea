@@ -1819,6 +1819,7 @@ async def _tool_loop(
                     )
                     grupos: list[tuple[str, list[dict[str, Any]]]] = []
                     no_disponibles: list[str] = []
+                    avisos: dict[str, str] = {}
                     for med in medicamentos:
                         runtime.corregido_desde = None
                         runtime.corregido_a = None
@@ -1857,12 +1858,17 @@ async def _tool_loop(
                         envase_pedido = (
                             envase_por_term.get(med) or _envase_pedido_en_linea(med)
                         )
+                        aviso_envase = ""
                         if envase_pedido:
                             antes_e = len(prods)
+                            # El aviso se calcula ANTES de filtrar, sobre la lista completa:
+                            # necesita saber qué envases HAY para poder decir "lo tengo en".
+                            aviso_envase = _aviso_envase_agotado(prods, envase_pedido)
                             prods = _filtrar_por_envase(prods, envase_pedido)
                             logger.info(
-                                "receta: '%s' envase %s → %d de %d productos",
+                                "receta: '%s' envase %s → %d de %d productos%s",
                                 med, envase_pedido, len(prods), antes_e,
+                                f' · aviso: {aviso_envase}' if aviso_envase else "",
                             )
                         # EL TÍTULO LLEVA LA GRAFÍA DEL CATÁLOGO, no la que escribió el
                         # cliente. Si hubo corrección por typo ('hidrocoticida' →
@@ -1876,6 +1882,8 @@ async def _tool_loop(
                         )
                         if prods:
                             grupos.append((titulo, prods))
+                            if aviso_envase:
+                                avisos[titulo.strip().upper()] = aviso_envase
                         else:
                             logger.info("receta: %s no está en el catálogo", med)
                             no_disponibles.append(titulo)
@@ -1899,7 +1907,7 @@ async def _tool_loop(
                         if opciones_global:
                             runtime.last_options = opciones_global
                             runtime.last_product = opciones_global[0]
-                        receta_final = _formatear_receta(grupos, no_disponibles)
+                        receta_final = _formatear_receta(grupos, no_disponibles, avisos)
                         await _send(
                             ctx,
                             runtime._conv.id,
@@ -4980,6 +4988,40 @@ def _filtrar_por_envase(
     return out or products
 
 
+def _aviso_envase_agotado(products: list[dict[str, Any]], envase: str) -> str:
+    """Aviso cuando el cliente pidió un envase que NO existe: 'Lo tengo en: 30 unidades.'
+
+    POR QUÉ HACE FALTA: `_filtrar_por_envase` tiene un fallback —si ningún producto tiene el
+    envase pedido, devuelve la lista completa— para no negar el medicamento. Pero sin este
+    aviso el cliente ve el envase de 30 SIN QUE NADIE LE DIGA que el de 60 que pidió no
+    está: no puede distinguir «no lo tengo en 60» de «no me entendió». Es el mismo fallo que
+    ya se arregló en el guard de envase (`_respuesta_envase_agotado`): re-listar sin decir el
+    NO es no responder.
+
+    Caso real (conv 2109, provider 19): el cliente pidió 'flextrin x 60' y el catálogo solo
+    tiene FLEXTRIN X 30 CAPS BLANDAS. Recibía el de 30 a secas.
+
+    Devuelve '' si no hay nada que avisar (el envase pedido SÍ está, o no se pidió ninguno).
+    """
+    if not envase or not products:
+        return ""
+    tamanos: list[str] = []
+    for p in products:
+        tam = _envase_de_nombre(
+            p.get("producto") or p.get("nombre") or p.get("title")
+        )
+        if tam and tam not in tamanos:
+            tamanos.append(tam)
+    if not tamanos or envase in tamanos:
+        return ""
+    try:
+        tamanos = sorted(tamanos, key=int)
+    except ValueError:
+        tamanos = sorted(tamanos)
+    detalle = ", ".join(f"{t} unidades" for t in tamanos)
+    return f"⚠️ No tengo envase de {envase} unidades. Lo tengo en: {detalle}."
+
+
 def _envase_pedido_en_linea(linea: str) -> str:
     """El envase que el cliente pidió en ESA línea de la consulta.
 
@@ -5366,6 +5408,7 @@ def _parsear_medicamentos_receta(texto: str) -> list[str]:
 def _formatear_receta(
     grupos: list[tuple[str, list[dict[str, Any]]]],
     no_disponibles: list[str] | None = None,
+    avisos: dict[str, str] | None = None,
 ) -> str:
     """Genera la respuesta de receta en formato determinista, con numeración
     GLOBAL corrida entre medicamentos:
@@ -5402,6 +5445,12 @@ def _formatear_receta(
             ),
         )
         lineas.append(titulo.strip().upper())
+        # El aviso va pegado a su medicamento: el cliente acaba de leer el nombre y
+        # necesita saber que el envase que pidió no está, ANTES de la lista.
+        _aviso = (avisos or {}).get(titulo.strip().upper())
+        if _aviso:
+            lineas.append(_aviso)
+            lineas.append("")
         for p in ordenados:
             n += 1
             nombre = str(p.get("producto") or p.get("title") or "").strip()
