@@ -479,7 +479,12 @@ def _limpiar_termino_medicamento(term: str) -> str:
     sustantivas = [
         w for w in palabras
         if (w in unidades)
-        or (w not in _PALABRAS_FUNCIONALES and (len(w) >= 3 or w.isdigit()))
+        # Los CÓDIGOS del nombre ('d3', 'k2', 'b12') tienen 2-3 caracteres pero
+        # identifican el producto: sin ellos, 'vitamina d3/k2' se reducía a 'vitamina'
+        # y el cliente recibía multivitaminas, B12 y hasta jabón con provitamina.
+        # Cualquier token CON dígito cuenta: el relleno nunca lleva números.
+        or (w not in _PALABRAS_FUNCIONALES
+            and (len(w) >= 3 or w.isdigit() or any(c.isdigit() for c in w)))
     ]
     if not sustantivas:
         return ""
