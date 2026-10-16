@@ -1647,6 +1647,16 @@ async def _tool_loop(
                     for _t, _d in _medicamentos_con_dosis(contenido_cliente or ""):
                         if _d:
                             dosis_por_term[_t] = _d
+                    # El ENVASE que pidió el cliente, también por línea. Se extrae igual
+                    # que la dosis: de la LÍNEA original (donde vive el número).
+                    envase_por_term: dict[str, str] = {}
+                    for _linea in _lineas_lista_medicamentos(contenido_cliente or ""):
+                        _term = _extraer_termino_medicamento(_sin_motivo(_linea))
+                        if not _term:
+                            continue
+                        _env = _envase_pedido_en_linea(_linea)
+                        if _env:
+                            envase_por_term[_term] = _env
                     logger.info(
                         "backstop receta: %d medicamentos detectados — consultando todos",
                         len(medicamentos),
@@ -1682,6 +1692,21 @@ async def _tool_loop(
                             logger.info(
                                 "receta: '%s' dosis %s → %d de %d productos",
                                 med, dosis_pedida, len(prods), antes,
+                            )
+                        # FILTRAR POR EL ENVASE (cuántas tabletas trae la caja).
+                        # El motor del catálogo ignora los números igual que ignoraba la
+                        # dosis: el cliente pidió "4 MG x 30 Tab" y recibía también el
+                        # envase de 10. Mismo patrón que la dosis: se busca con el nombre
+                        # LIMPIO y se filtra DESPUÉS sobre lo devuelto.
+                        envase_pedido = (
+                            envase_por_term.get(med) or _envase_pedido_en_linea(med)
+                        )
+                        if envase_pedido:
+                            antes_e = len(prods)
+                            prods = _filtrar_por_envase(prods, envase_pedido)
+                            logger.info(
+                                "receta: '%s' envase %s → %d de %d productos",
+                                med, envase_pedido, len(prods), antes_e,
                             )
                         # EL TÍTULO LLEVA LA GRAFÍA DEL CATÁLOGO, no la que escribió el
                         # cliente. Si hubo corrección por typo ('hidrocoticida' →
@@ -4762,6 +4787,62 @@ def _filtrar_por_dosis(
         if objetivo in nums:
             out.append(p)
     return out or products
+
+
+def _filtrar_por_envase(
+    products: list[dict[str, Any]], envase: str
+) -> list[dict[str, Any]]:
+    """Deja solo los productos cuyo ENVASE coincide con el que pidió el cliente.
+
+    Es el hermano de `_filtrar_por_dosis`, y hace la misma falta: el motor del catálogo
+    matchea por el FÁRMACO e IGNORA los números, así que devuelve los envases mezclados.
+
+    Caso real (conv 2109, provider 19): el cliente pidió
+        "Glimepiride de. 4 MG x 30 Tab"
+    y recibía 4 opciones, la primera de ellas `GLIMEPIRIDA 4 MG X 10 TAB` — 10 tabletas
+    cuando pidió 30. Medido en ese catálogo: 'candesatan 30 tab' devuelve 12 productos
+    (10 de envase 30 y 2 de envase 10); 'amlodipina 5 mg 30 tab' devuelve 6 (4 de 30 y
+    2 de 10).
+
+    Si el filtro deja 0 productos NO se descarta todo: se devuelve la lista completa. Es
+    mejor ofrecer los envases que hay (el cliente elige, o se le puede decir que el de 30
+    no está) que negar el medicamento por un envase que este catálogo quizá no maneje.
+
+    Los productos cuyo envase NO se puede leer del título se descartan mientras haya
+    otros que sí coincidan: si el cliente pidió 30, no se le puede confirmar que un
+    producto ilegible trae 30. (Medido: en estos catálogos el título siempre trae el
+    envase, así que no se pierde nada.)
+    """
+    if not envase or not products:
+        return products
+    objetivo = envase.lstrip("0") or envase
+    out = [
+        p for p in products
+        if _envase_de_nombre(p.get("producto") or p.get("nombre") or p.get("title"))
+        == objetivo
+    ]
+    return out or products
+
+
+def _envase_pedido_en_linea(linea: str) -> str:
+    """El envase que el cliente pidió en ESA línea de la consulta.
+
+    Se prueba primero `_pedido_de_envase` (que exige la forma escrita: 'de 10 pastillas',
+    '30 tabletas') y solo si no hay nada se cae a la forma 'X N', que es como escribe la
+    mayoría: 'x 30 Tab', 'metformina de 500 x 30', 'flextrin x 60'.
+
+    POR QUÉ NO SE TOCA `_pedido_de_envase`: esa función alimenta el GUARD de envase
+    agotado, que decide cuándo se le responde al cliente "no lo tengo en envase de N".
+    Ampliarla cambiaría cuándo dispara ese mensaje. Aquí solo se necesita saber el número
+    para filtrar, así que la ampliación se queda local.
+    """
+    pedido = _pedido_de_envase(linea)
+    if pedido:
+        return pedido
+    m = _RE_X_ENVASE.search((linea or "").strip().lower())
+    if not m:
+        return ""
+    return m.group(1).lstrip("0") or m.group(1)
 
 
 # --- RECLAMO: el cliente corrige lo que YA recibió; no pide nada nuevo ---
