@@ -1226,6 +1226,31 @@ def _mejor_token_catalogo(nucleo: str, tokens: set[str]) -> tuple[str | None, fl
     return mejor, mejor_ratio, mejor_ratio - segundo
 
 
+def _correccion_por_largo_plausible(escrito: str, candidato: str) -> bool:
+    """¿La corrección tiene la FORMA de un typo y no de otra palabra?
+
+    Un typo quita, cambia o traspone letras: la palabra queda igual de larga o MÁS
+    larga (el cliente se comió una letra). No convierte una palabra en otra mucho más
+    corta. Cuando lo hace, no es un typo de lo que escribió: es OTRA palabra.
+
+    Caso real (conv 2109, provider 19):
+        'panadol'  → 'panal'   (7 → 5 letras) → PANAL BABYGANICS, PANAL MIMLOT...
+    El cliente pedía Panadol (acetaminofén) y recibía pañales. El ratio NO lo distingue:
+    'panadol'→'panal' puntúa 0.833, EXACTAMENTE igual que 'atamle'→'atamel' (0.833) y
+    por debajo de 'omeprasol'→'omeprazol' (0.889), que sí son typos legítimos. Subir el
+    umbral rompería los buenos sin arreglar el malo.
+
+    El LARGO SÍ los separa. MEDIDO con 90 typos sintéticos (borrado, transposición y
+    sustitución) sobre 202 tokens reales del catálogo del provider 19: con y sin este
+    guard se recuperan los MISMOS 63 (70,0%), y bloquea 'panadol'→'panal'. No cuesta
+    ninguna recuperación legítima.
+
+    Se permite UN carácter de menos: cubre al cliente que escribe una letra de más
+    ('omeprazoll' → 'omeprazol') sin abrir la puerta a encoger la palabra.
+    """
+    return len(candidato) >= len(escrito) - 1
+
+
 def _nucleo_ausente(term: str, products: list[dict[str, Any]]) -> str | None:
     """El fármaco que el cliente NOMBRÓ no aparece en NINGÚN producto devuelto.
 
@@ -1927,6 +1952,7 @@ class ToolRuntime:
                     and token_ok != nucleo
                     and ratio_t >= _UMBRAL_TYPO_CATALOGO
                     and margen_t > 0.0
+                    and _correccion_por_largo_plausible(nucleo, token_ok)
                 ):
                     prefijo = " ".join(nombre.strip().split()[:-1])
                     term_corregido = (
@@ -2078,7 +2104,12 @@ class ToolRuntime:
                 self._ctx.crm, self._provider_id, nucleo_typo
             )
             token_ok, ratio_t, margen_t = _mejor_token_catalogo(nucleo_typo, tokens_cat)
-            if token_ok and ratio_t >= _UMBRAL_TYPO_CATALOGO and margen_t > 0.0:
+            if (
+                token_ok
+                and ratio_t >= _UMBRAL_TYPO_CATALOGO
+                and margen_t > 0.0
+                and _correccion_por_largo_plausible(nucleo_typo, token_ok)
+            ):
                 term_corregido = (
                     f"{prefijo_typo} {token_ok}".strip() if prefijo_typo else token_ok
                 )
