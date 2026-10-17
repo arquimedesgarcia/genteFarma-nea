@@ -1271,6 +1271,21 @@ async def _tool_loop(
         and not runtime.cart_forced
         and not runtime.consulted_catalog
     ):
+        # ¿EL CLIENTE ESTÁ LEYENDO OTRA LISTA? Si alguno de los números que cita no
+        # existe en la actual, no se añade NADA y se le pide aclaración. Antes se añadían
+        # los que cabían —a un producto equivocado— y el resto se perdía en silencio.
+        # Ver `_opciones_no_encajan`.
+        if _opciones_no_encajan(eleccion_prev, runtime.last_options):
+            logger.warning(
+                "backstop carrito (pre-LLM): las opciones %s no caben en la lista actual "
+                "(%d) — NO se agrega nada, pido aclaración",
+                [op for _, op in eleccion_prev], len(runtime.last_options),
+            )
+            await _send(
+                ctx, runtime._conv.id, runtime._crm_conv_id,
+                MENSAJE_OPCIONES_NO_ENCAJAN,
+            )
+            return None
         runtime.cart_forced = True
         for cantidad_prev, opcion_prev in eleccion_prev:
             idx_prev = opcion_prev - 1
@@ -1348,6 +1363,19 @@ async def _tool_loop(
                         user_text[:40],
                     )
                     elecciones = None
+                # MISMA REGLA que en el pre-LLM: si los números citados no caben en la
+                # lista actual, el cliente está leyendo OTRA lista → nada se agrega.
+                if elecciones and _opciones_no_encajan(elecciones, runtime.last_options):
+                    logger.warning(
+                        "backstop carrito: las opciones %s no caben en la lista actual "
+                        "(%d) — NO se agrega nada, pido aclaración",
+                        [op for _, op in elecciones], len(runtime.last_options),
+                    )
+                    await _send(
+                        ctx, runtime._conv.id, runtime._crm_conv_id,
+                        MENSAJE_OPCIONES_NO_ENCAJAN,
+                    )
+                    return None
                 for cantidad, opcion in (elecciones or []):
                     idx = opcion - 1
                     if not (0 <= idx < len(runtime.last_options)):
@@ -1696,6 +1724,10 @@ async def _tool_loop(
                     grupos: list[tuple[str, list[dict[str, Any]]]] = []
                     no_disponibles: list[str] = []
                     avisos: dict[str, str] = {}
+                    # Productos que el cliente pidió AGREGAR explícitamente y que se
+                    # pueden añadir sin preguntar: cantidad dicha por él + un único
+                    # candidato. Ver el bloque que los agrega, después del bucle.
+                    agregables: list[tuple[str, dict[str, Any], int]] = []
                     for med in medicamentos:
                         runtime.corregido_desde = None
                         runtime.corregido_a = None
@@ -1777,6 +1809,21 @@ async def _tool_loop(
                             grupos.append((titulo, prods))
                             if aviso_envase:
                                 avisos[titulo.strip().upper()] = aviso_envase
+                            # ¿EL CLIENTE PIDIÓ AGREGARLO? ("le agregas 3 cajas de
+                            # glymar de 4 MG"). Solo se añade si (a) lo pidió con un
+                            # verbo de agregar, (b) dijo CUÁNTAS unidades y (c) hay UN
+                            # ÚNICO candidato — si hay varios, no se adivina: se le
+                            # ofrece la lista para que elija.
+                            if _tambien_pide_agregar(user_text):
+                                _cant = _cantidad_pedida(med)
+                                if _cant and len(prods) == 1:
+                                    agregables.append((titulo, prods[0], _cant))
+                                elif _cant:
+                                    logger.info(
+                                        "receta: '%s' se pidió agregar x%d pero hay %d "
+                                        "candidatos — no se adivina",
+                                        med, _cant, len(prods),
+                                    )
                         else:
                             logger.info("receta: %s no está en el catálogo", med)
                             no_disponibles.append(titulo)
@@ -1800,6 +1847,52 @@ async def _tool_loop(
                         if opciones_global:
                             runtime.last_options = opciones_global
                             runtime.last_product = opciones_global[0]
+                        # ---- AGREGAR LO QUE EL CLIENTE PIDIÓ Y DARLE EL RESUMEN ----
+                        #
+                        # Caso real (conv 2109, provider 19, 2026-10-17 03:37):
+                        #     cliente: "Me puedes dar el resumen de esto y le agregas
+                        #               3 cajas de glymar de 4 MG y 2 toallas securezza x 15"
+                        # El cliente dio una ORDEN explícita ("le agregas") con cantidad y
+                        # producto. Antes se le ofrecía la lista y tenía que volver a
+                        # confirmar; y el resumen del carrito no salía en esa respuesta.
+                        # Ahora se añaden (solo los que tienen UN único candidato y
+                        # cantidad dicha por el cliente) y se responde con el resumen, que
+                        # ya los incluye.
+                        if agregables:
+                            hechos: list[str] = []
+                            for _tit, _prod, _cant in agregables:
+                                args_add: dict[str, Any] = {
+                                    "productId": _prod.get("productId"),
+                                    "producto": _prod.get("producto") or "",
+                                    "cantidad": _cant,
+                                    "presentacion": _prod.get("presentacion") or "",
+                                    "laboratorio": _prod.get("laboratorio") or "",
+                                }
+                                if _prod.get("precio") is not None:
+                                    args_add["precioUsd"] = _prod["precio"]
+                                if _prod.get("precioBs") is not None:
+                                    args_add["precioBs"] = _prod["precioBs"]
+                                await runtime.execute("agregar_al_carrito", args_add)
+                                logger.info(
+                                    "receta: el cliente lo pidió — agrego '%s' x%d",
+                                    args_add["producto"], _cant,
+                                )
+                                hechos.append(f"- {_cant} de {args_add['producto']}")
+                            result = await runtime.execute("ver_carrito", {})
+                            if runtime.cart_summary_text:
+                                receta_final = (
+                                    "✅ Agregado al pedido:\n"
+                                    + "\n".join(hechos)
+                                    + "\n\n"
+                                    + runtime.cart_summary_text
+                                )
+                                await _send(
+                                    ctx,
+                                    runtime._conv.id,
+                                    runtime._crm_conv_id,
+                                    receta_final,
+                                )
+                                return None  # turno atendido
                         receta_final = _formatear_receta(grupos, no_disponibles, avisos)
                         await _send(
                             ctx,
@@ -2317,6 +2410,39 @@ _UNIDADES_MEDIDA = re.compile(
 )
 
 
+def _opciones_no_encajan(
+    elecciones: list[tuple[int, int]] | None, opciones: list[dict[str, Any]] | None
+) -> bool:
+    """El cliente cita números de opción que NO existen en la lista actual.
+
+    Cuando pasa, el cliente está leyendo OTRA lista —una anterior, o la de su pantalla—
+    y resolver por número es puro azar: las opciones que caen dentro del rango se añaden
+    (a un producto equivocado) y las demás se descartan en silencio.
+
+    Caso real (conv 2109, provider 19, 2026-10-17 03:33):
+        cliente: "X 1 caja opción 6, x 3 opción 12, x 1 opción 16, x 1 opción 18,
+                  x 1 opción 23, x 1 opción 27"
+        agente : "He agregado al carrito: 1 caja de COLAYTE SOBRE X 69,7 GR DISCOLAYTE"
+    El cliente citaba la lista de 29 opciones que tenía delante; `last_options` guardaba
+    una de **7**. La opción 6 cabía en las dos, y esa casualidad metió un COLAYTE (de una
+    sesión del 9-oct) en el carrito. El cliente respondió "yo no pedí el colayte".
+
+    Ante la duda NO se añade nada: mejor pedirle que repita los números que meterle un
+    producto que no pidió.
+    """
+    if not elecciones:
+        return False
+    if not opciones:
+        return True
+    return max(op for _, op in elecciones) > len(opciones)
+
+
+MENSAJE_OPCIONES_NO_ENCAJAN = (
+    "⚠️ Ojo: esas opciones no coinciden con la última lista que te envié.\n\n"
+    "¿Me repites los números, o mejor me dices el nombre del medicamento y lo busco?"
+)
+
+
 def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
     """Detecta la selección de opciones por número, con cantidades por grupo.
 
@@ -2359,6 +2485,43 @@ def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
     if not es_eleccion:
         return None
 
+    # ---- FORMA CON LA PALABRA "opción" ------------------------------------------
+    # En "<cantidad> caja(s) opción <M>" la cantidad va ANTES de la palabra y el número
+    # de opción DESPUÉS. El escaneo genérico de números de más abajo se come el primero
+    # como si fuera una opción: la cantidad hacía de opción Y se perdía la cantidad.
+    #
+    # Caso real (conv 2109, provider 19, 2026-10-17 03:33):
+    #     "X 1 caja opción 6, x 3 opción 12, x 1 opción 16, x 1 opción 18,
+    #      x 1 opción 23, x 1 opción 27"
+    #     antes → [(1,1), (1,6), (1,3), (1,12), (1,16), (1,18), (1,23), (1,27)]
+    #             ocho entradas donde el cliente escribió seis: la opción 1 es FANTASMA
+    #             ("1 caja") y la opción 12 iba con cantidad 3, no 1.
+    #     ahora → [(1,6), (3,12), (1,16), (1,18), (1,23), (1,27)]
+    if "opci" in t:
+        pares: list[tuple[int, int]] = []
+        for m_op in re.finditer(r"opci[oó]n\s+(\d{1,2})", t):
+            opcion = int(m_op.group(1))
+            cantidad = 1
+            # La cantidad es el número inmediatamente anterior ("x 3 opción 12" → 3).
+            ventana = t[max(0, m_op.start() - 14):m_op.start()]
+            m_cant_antes = re.search(
+                r"(\d{1,2})\s*(?:cajas?|unidades?)?\s*(?:de\s+la\s+|la\s+)?\s*$", ventana
+            )
+            if m_cant_antes:
+                v = int(m_cant_antes.group(1))
+                if 1 <= v <= 99:
+                    cantidad = v
+            pares.append((cantidad, opcion))
+            # "…opción 5 y 7": el 7 va con la MISMA cantidad. La 'y' tiene que ir pegada
+            # al número de opción para no comerse el arranque del bloque siguiente.
+            m_mas = re.match(r"\s*[,y]\s*(\d{1,2})\b", t[m_op.end():])
+            if m_mas:
+                v2 = int(m_mas.group(1))
+                if 1 <= v2 <= 99 and (cantidad, v2) not in pares:
+                    pares.append((cantidad, v2))
+        if pares:
+            return pares
+
     # CANTIDADES POR GRUPO: parsear bloques "N caja(s) de X,Y,Z" que pueden
     # repetirse unidos por "y", p.ej. "2 cajas de 1 y 1 caja de 3,4,5 y 7".
     # Se separa en grupos donde CADA grupo tiene su propia cantidad explícita.
@@ -2380,6 +2543,10 @@ def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
             cantidad = max(1, int(m_cant.group(1)))
         resto = grupo
         resto = re.sub(r"\d+\s*(?:caja|cajas|unidad|unidades)\s+de\b", " ", resto, count=1)
+        # Un número pegado a "caja(s)/unidad(es)" es una CANTIDAD, nunca una opción —
+        # aunque no lleve el "de" ("x 2 cajas 3" → cantidad 2, opción 3). Sin esto, la
+        # cantidad entra en la lista de opciones y se agrega un producto fantasma.
+        resto = re.sub(r"\b\d{1,2}\s*(?:cajas?|unidades?)\b", " ", resto)
         # Opciones: números de 1-2 dígitos en el resto.
         for n in re.findall(r"\b(\d{1,2})\b", resto):
             v = int(n)
@@ -3233,6 +3400,34 @@ _RE_ENVASE_FORMA_NUM = re.compile(
 )
 # Cantidad de COMPRA: no es un tamaño de envase, la resuelve el carrito.
 _RE_CANTIDAD_COMPRA = re.compile(r"\b\d+\s*(?:cajas?|unidades?|frascos?|paquetes?|blisters?)\b")
+
+# CANTIDAD QUE EL CLIENTE PIDE AL AGREGAR: "le agregas 3 cajas de glymar", "2 toallas
+# securezza". Va ANCLADO AL PRINCIPIO de la línea para no confundirlo con la dosis ni con
+# el envase: '3 cajas glymar 4 mg' → 3, pero 'glimepiride 4 mg 30 tab' → nada.
+# (Es un regex PROPIO, no `_RE_CANTIDAD_COMPRA`: aquel decide si un número es envase y
+# añadirle 'toallas' cambiaría ese juicio.)
+_RE_CANTIDAD_PEDIDA = re.compile(
+    r"^\s*(\d{1,2})\s*"
+    r"(?:cajas?|unidades?|frascos?|paquetes?|blisters?|toallas?|pomos?|tubos?|"
+    r"sobres?|rollos?|cajitas?)\b",
+    re.IGNORECASE,
+)
+
+
+def _cantidad_pedida(texto: str) -> int:
+    """Cuántas unidades pide el cliente en esta línea ('3 cajas de glymar' → 3).
+
+    Devuelve 0 si no hay una cantidad explícita. Sin cantidad explícita NO se agrega
+    nada: el agente ofrecería el producto y esperaría la respuesta, que es lo seguro.
+    """
+    m = _RE_CANTIDAD_PEDIDA.match(texto or "")
+    if not m:
+        return 0
+    try:
+        n = int(m.group(1))
+    except ValueError:
+        return 0
+    return n if 1 <= n <= 99 else 0
 
 # El "X N" del título del producto: 'BRASARTAN CTDN 80MG/12.5X10 FARMA' → '10'.
 _RE_X_ENVASE = re.compile(r"x\s*0*(\d{1,3})\b")
