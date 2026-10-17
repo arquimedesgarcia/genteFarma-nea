@@ -1855,9 +1855,26 @@ async def _tool_loop(
                         # dosis: el cliente pidió "4 MG x 30 Tab" y recibía también el
                         # envase de 10. Mismo patrón que la dosis: se busca con el nombre
                         # LIMPIO y se filtra DESPUÉS sobre lo devuelto.
+                        # ORDEN: primero el ENVASE, porque la dosis necesita saberlo para
+                        # no confundirse con él (ver el guard de abajo).
                         envase_pedido = (
                             envase_por_term.get(med) or _envase_pedido_en_linea(med)
                         )
+                        dosis_pedida = (
+                            dosis_por_term.get(med)
+                            or _dosis_sin_unidad(med)
+                            or _extraer_dosis(med)
+                        )
+                        # UN NÚMERO IGUAL AL ENVASE NO ES UNA DOSIS.
+                        # El término puede acabar con el tamaño de caja cuando el cliente
+                        # lo escribió ('metformina de 500 x 30' → término 'metformina 30'):
+                        # leer ese '30' como concentración filtraba los productos por el
+                        # número 30 y devolvía las concentraciones mezcladas otra vez
+                        # (medido: 'dosis 30 → 15 de 20', TODOS los envases de 30 con
+                        # 500/850/1000/1 MG dentro). La dosis real —'500'— viene de la
+                        # LÍNEA, vía `_dosis_antes_del_envase`.
+                        if dosis_pedida and envase_pedido and dosis_pedida == envase_pedido:
+                            dosis_pedida = ""
                         aviso_envase = ""
                         if envase_pedido:
                             antes_e = len(prods)
@@ -5151,11 +5168,14 @@ def _medicamentos_con_dosis(texto: str) -> list[tuple[str, str]]:
         # OJO: tiene que ser la LÍNEA. El término limpio ya perdió el número cuando el
         # cliente escribió la dosis sin unidad ('candesatan 16 x 30 Tab' → 'candesatan
         # 30 tab'), así que ahí no hay nada que encontrar.
+        # Y `_dosis_antes_del_envase` va ANTES de los respaldos sobre el TÉRMINO: el
+        # término puede acabar con el tamaño de caja ('metformina 30') y colarse como si
+        # fuera la concentración, pisando el '500' que sí está en la línea.
         dosis = (
             _extraer_dosis(linea)
+            or _dosis_antes_del_envase(linea)
             or _dosis_sin_unidad(limpia)
             or _dosis_sin_unidad(term)
-            or _dosis_antes_del_envase(linea)
         )
         if term in vistos:
             continue
