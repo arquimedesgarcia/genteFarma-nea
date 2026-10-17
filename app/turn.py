@@ -768,11 +768,24 @@ async def run_turn(
     # cantidad y subtotal en USD Y Bs, y el total en ambos — aunque el modelo
     # omita el monto en Bs. Se ejecuta después de los backstops de lista porque
     # last_products no aplica aquí (ver_carrito consulta cart_items).
-    if farmacia and runtime.cart_summary_text:
+    #
+    # PERO NO SI EL CLIENTE ADEMÁS ESTÁ AGREGANDO PRODUCTOS: en ese caso el texto del
+    # LLM es el que trae lo que el cliente pidió añadir, y sustituirlo por el resumen
+    # del carrito ACTUAL lo hace desaparecer. Caso real (conv 2109, 2026-10-17):
+    #     cliente: "Me puedes dar el resumen de esto y le agregas 3 cajas de glymar de
+    #               4 MG y 2 toallas securezza x 15"
+    #     el LLM enumeró GLYMAR y SECUREZZA  →  este backstop los borró y dejó solo el
+    #     resumen del carrito (COLAYTE). El cliente no volvió a ver lo que pidió.
+    if farmacia and runtime.cart_summary_text and not _tambien_pide_agregar(user_text):
         logger.info(
             "backstop resumen determinista: reemplazando texto del LLM por el resumen canónico del carrito"
         )
         final_text = runtime.cart_summary_text
+    elif farmacia and runtime.cart_summary_text:
+        logger.info(
+            "backstop resumen determinista: NO se aplica — el cliente además está "
+            "agregando productos; se respeta el texto del LLM"
+        )
 
     # --- Guardas anti-alucinación (QA T4) — vetos deterministas -------------
     # Se ejecutan AL FINAL: un veto reemplaza el texto por plantilla constante
@@ -1212,6 +1225,13 @@ async def _resolver_paso_entrega(
         carrito
         and conv.delivery_method is None
         and _quiere_ver_resumen(user_text, tiene_carrito=True)
+        # Y NO SE PREGUNTA SI EL CLIENTE TODAVÍA ESTÁ AGREGANDO PRODUCTOS.
+        # Preguntar el método de entrega mientras el cliente sigue dictando el pedido
+        # corta el turno y se traga lo que pidió. Caso real (conv 2109, 2026-10-17):
+        #     "Me puedes dar el resumen de esto y le agregas 3 cajas de glymar de 4 MG
+        #      y 2 toallas securezza x 15"  →  solo recibió el menú de entrega.
+        # Ver `_tambien_pide_agregar`.
+        and not _tambien_pide_agregar(user_text)
     ):
         # Si el cliente ya dijo "delivery"/"retirar" en el mismo mensaje, no se
         # pregunta: se toma la elección.
@@ -1570,7 +1590,19 @@ async def _tool_loop(
             # no llamó ver_carrito, lo forzamos (el modelo a veces no lo llama).
             # El "no" suelto (a "¿Deseas buscar otro medicamento?") con carrito
             # activo también cuenta: quiere el resumen, no handoff.
-            if farmacia and _quiere_ver_resumen(user_text, tiene_carrito=carrito_activo) and not runtime.summary_forced:
+            #
+            # PERO NO SI ADEMÁS ESTÁ AGREGANDO PRODUCTOS: forzar ver_carrito mete el
+            # carrito ACTUAL en el contexto y el modelo se limita a resumirlo, dejando
+            # sin atender los productos que el cliente acaba de pedir. Medido con el LLM
+            # real (conv 2109, 2026-10-17): en los dos casos el carrito resumido salió
+            # sin el GLYMAR ni el SECUREZZA que el cliente había pedido en el mismo
+            # mensaje. Sin forzar, el modelo sí busca y enumera los dos productos.
+            if (
+                farmacia
+                and _quiere_ver_resumen(user_text, tiene_carrito=carrito_activo)
+                and not runtime.summary_forced
+                and not _tambien_pide_agregar(user_text)
+            ):
                 runtime.summary_forced = True
                 logger.info("backstop resumen: forzando ver_carrito")
                 result = await runtime.execute("ver_carrito", {})
@@ -2336,6 +2368,10 @@ _FILLER = {
     # PRESTOBARBA: falsos positivos del matcher difuso, o sea el bug que se quiere evitar.
     "cotizar", "cotizame", "cotizacion", "cotizaciones", "cotizarlos",
     "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
+    # 'resumen' NO es un medicamento. En "dame el resumen de esto y le agregas 3 cajas
+    # de glymar" el troceador lo tomaba como un producto más y el cliente leía
+    # "⚠️ No disponibles en el catálogo: RESUMEN".
+    "resumen", "resumenes", "resúmenes",
     "me", "le", "la", "de", "el", "los", "las", "para", "que", "con",
     "una", "un", "en", "y", "o", "a", "si", "no", "como", "cuanto", "es",
     "son", "tiene", "tienen", "hay", "está", "estan", "disponible",
@@ -2610,6 +2646,16 @@ _INTENTO_VER_RESUMEN = re.compile(
     re.IGNORECASE,
 )
 
+# Verbos de AGREGAR productos. Ver `_tambien_pide_agregar`.
+_RE_PIDE_AGREGAR = re.compile(
+    r"\b(agrega|agregas|agregar|agregame|agrégame|agregale|agrégale|agregalo|"
+    r"añade|añades|añadir|añademe|añademela|añádele|"
+    r"suma|sumas|sumale|súmale|sumame|sumamele|"
+    r"incluye|incluyes|incluir|incluyeme|"
+    r"ponme|pones|mete|meteme|adiciona|adicionar)\b",
+    re.IGNORECASE,
+)
+
 
 def _quiere_info_horario(texto: str) -> bool:
     """True si el cliente pregunta el HORARIO de la farmacia.
@@ -2650,6 +2696,31 @@ def _quiere_info_horario(texto: str) -> bool:
             r"a\s+qu[eé]\s+hora|me\s+pueden|decir|informaci[oó]n|cu[aá]l)", t))
     # Sin la palabra "horario"/"hora": solo cuenta si habla de abrir/cerrar.
     return abrir_cerrar
+
+
+def _tambien_pide_agregar(texto: str) -> bool:
+    """¿El cliente, ADEMÁS, está agregando productos al carrito?
+
+    Sirve para NO preguntar el método de entrega cuando el pedido aún está creciendo.
+    Preguntar "¿cómo prefieres recibirlo?" mientras el cliente todavía dicta productos
+    corta el pedido a la mitad y **se traga lo que pidió**.
+
+    Caso real (conv 2109, provider 19, 2026-10-17 03:37):
+        cliente: "Me puedes dar el resumen de esto y le agregas 3 cajas de glymar
+                  de 4 MG y 2 toallas securezza x 15"
+        agente : "Antes de cerrar tu pedido, ¿cómo prefieres recibirlo? 1️⃣ 2️⃣"
+    El cliente pedía tres cosas —el resumen, 3 GLYMAR y 2 SECUREZZA— y solo recibió el
+    menú de entrega. `_quiere_ver_resumen` veía la palabra "resumen" y el guard de la
+    rama 2 cerraba el turno ahí.
+
+    Se detectan los verbos de AGREGAR (agrega/agregas/agregame/añade/sumale/incluye/
+    ponme/mete...). Si el cliente sigue agregando, el turno va al LLM, que sí tiene las
+    tools del carrito; la pregunta de entrega llegará cuando el pedido se cierre de
+    verdad (un "LISTO" o un "dame el resumen" sin más).
+    """
+    if not texto:
+        return False
+    return bool(_RE_PIDE_AGREGAR.search(texto.strip().lower()))
 
 
 def _quiere_ver_resumen(texto: str, tiene_carrito: bool = False) -> bool:
@@ -4806,7 +4877,17 @@ _VERBOS_MOTIVO = re.compile(
     r"\b(?:precio|precios|cuesta|cuestan|cuanto|cuánto|vale|valen|"
     r"disponible|disponibles|disponen|disponemos|tienen|tienes|tiene|tenemos|"
     r"venden|vendes|consigo|consigues|conseguir|hay|manejan|trabajan|"
-    r"necesito|busco|quiero|quisiera|dame|me das)\b",
+    r"necesito|busco|quiero|quisiera|dame|me das|"
+    # AGREGAR AL CARRITO. El cliente que ya está armando el pedido pide AÑADIR, y ese
+    # verbo se quedaba pegado al producto: 'agregas 3 cajas glymar 4 mg' se buscaba como
+    # 'agregas 3 glymar 4 mg', y como el catálogo exige TODOS los tokens, la relevancia
+    # lo descartaba y GLYMAR salía como "no disponible".
+    # Caso real (conv 2109, 2026-10-17): "…y le agregas 3 cajas de glymar de 4 MG y 2
+    # toallas securezza x 15" → el agente respondió
+    #     "⚠️ No disponibles en el catálogo: RESUMEN, AGREGAS 3 CAJAS GLYMAR 4 MG"
+    r"agrega|agregas|agregar|agregale|agrégale|agregalo|agregame|agrégame|"
+    r"añade|añades|añadir|añademe|añádele|"
+    r"sumale|súmale|sumame|incluye|incluyes|incluir|ponme|mete|adiciona)\b",
     re.IGNORECASE,
 )
 # Separadores de ENUMERACIÓN de medicamentos.
