@@ -172,6 +172,8 @@ _PALABRAS_FUNCIONALES = {
     # (PRESTOBARBA) eran falsos positivos del matcher difuso.
     "cotizar", "cotizame", "cotizacion", "cotizaciones", "cotizarlos",
     "siguiente", "siguientes", "presupuesto",
+    # 'resumen' no es un medicamento (ver el gemelo en turn.py::_FILLER).
+    "resumen", "resumenes", "resúmenes",
     "van", "vamos", "respondo", "responder", "respuesta", "necesito",
     "quiero", "quieres", "quiere", "busco", "busca", "buscan", "buscar",
     "tienes", "tiene", "tienen", "tener", "hay", "es", "son", "estan", "esta",
