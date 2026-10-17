@@ -43,6 +43,7 @@ from app.tools import (
     _limpiar_termino_medicamento,
     _normalizar_tildes,
     _normalizar_unidad,
+    _nucleo_ausente,
     _sin_frase_de_indicacion,
     _termino_es_medicamento_plausible,
     _PALABRAS_FUNCIONALES,
@@ -614,9 +615,11 @@ async def run_turn(
             "backstop contradicción: el LLM negó disponibilidad pese a %d productos — reemplazo con lista real",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_products_term or runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de lista desordenada: si el LLM enumeró TODOS los productos
     # pero en un orden distinto al canónico (precio ascendente), reemplazamos
@@ -633,9 +636,11 @@ async def run_turn(
             "backstop lista desordenada: el LLM mostró %d productos fuera del orden canónico — reemplazo con lista ordenada por precio",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_products_term or runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de formato no canónico: el LLM enumeró los productos pero con
     # su propio estilo (markdown, $ con punto, sin 💊 ni Bs). Se reemplaza por
@@ -659,9 +664,11 @@ async def run_turn(
             "backstop formato: el LLM enumeró %d productos sin el formato canónico — reemplazo con lista estándar",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_products_term or runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de omisión: si el catálogo devolvió productos pero el texto final
     # NO menciona el medicamento (ni el término ni ningún nombre de producto),
@@ -687,9 +694,11 @@ async def run_turn(
             "backstop omisión: el LLM no mencionó el producto pese a %d resultados — reemplazo con lista real",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_products_term or runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de precios inventados: si el catálogo devolvió productos pero el
     # texto final cita un precio ($) que NO coincide con ningún producto real,
@@ -705,9 +714,11 @@ async def run_turn(
             "backstop precio inventado: el LLM citó un precio falso pese a %d productos — reemplazo con lista real",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_products_term or runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de handoff injustificado: si el catálogo SÍ devolvió productos
     # pero el LLM despide al cliente o lo pasa a humano (sin que el medicamento
@@ -730,9 +741,11 @@ async def run_turn(
             "backstop handoff injustificado: el LLM despidió pese a %d productos — reemplazo con lista real",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_products_term or runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de bloque de carrito: SIEMPRE que se consultaron productos
     # (last_products) y el texto final es una lista de presentaciones (no un
@@ -1965,6 +1978,25 @@ async def _tool_loop(
                             grupos.append((titulo, prods))
                             if aviso_envase:
                                 avisos[titulo.strip().upper()] = aviso_envase
+                            # ¿PIDIÓ ALGO QUE NO TENGO? El motor del catálogo se cae al OR
+                            # cuando la búsqueda exacta no da nada, así que una marca que no
+                            # existe desaparece en SILENCIO y el cliente recibe otras marcas
+                            # bajo el título de lo que pidió. Se comprueba sobre el término
+                            # EFECTIVO (el corregido, si hubo corrección): así 'acido
+                            # acetalicio' no avisa, porque la corrección a acetilsalicílico
+                            # sí está en los productos devueltos.
+                            _term_ef = getattr(runtime, "corregido_a", None) or med
+                            _ausente = _nucleo_ausente(_term_ef, prods)
+                            if _ausente:
+                                logger.info(
+                                    "receta: '%s' no está en NINGUNO de los %d productos "
+                                    "— aviso 'no lo tengo'", _ausente, len(prods),
+                                )
+                                _av = _aviso_no_lo_tengo(_term_ef, _ausente)
+                                _clave = titulo.strip().upper()
+                                avisos[_clave] = (
+                                    f"{avisos[_clave]}\n{_av}" if _clave in avisos else _av
+                                )
                             # ¿EL CLIENTE PIDIÓ AGREGARLO? ("le agregas 3 cajas de
                             # glymar de 4 MG"). Solo se añade si (a) lo pidió con un
                             # verbo de agregar, (b) dijo CUÁNTAS unidades y (c) hay UN
@@ -2465,6 +2497,13 @@ _FILLER = {
     # de glymar" el troceador lo tomaba como un producto más y el cliente leía
     # "⚠️ No disponibles en el catálogo: RESUMEN".
     "resumen", "resumenes", "resúmenes",
+    # 'costo'/'porf' NO son medicamentos. Caso real (conv 2109, provider 19):
+    # "tiene disponible crema dental sensodyne y que costo porf" → el troceador partía ahí y
+    # cotizaba "COSTO PORF" con AMPICILINA 1GR (POR 1 AMPOLLA) y ANTILAX (POR 10 TABLETAS):
+    # 'porf' (por favor) casa con el "POR" de los nombres. Y 'costo' daba 0 productos, o sea
+    # tampoco es un medicamento. MEDIDO: 'costo' → 0; 'porf' → 2 (ambos por el "POR").
+    "porf", "porfa", "porfavor", "porfis", "favorcito",
+    "costo", "costos", "costar", "costaria", "costarían", "costaban",
     "me", "le", "la", "de", "el", "los", "las", "para", "que", "con",
     "una", "un", "en", "y", "o", "a", "si", "no", "como", "cuanto", "es",
     "son", "tiene", "tienen", "hay", "está", "estan", "disponible",
@@ -5279,6 +5318,65 @@ def _filtrar_por_envase(
         == objetivo
     ]
     return out or products
+
+
+def _aviso_no_lo_tengo(term: str, ausente: str) -> str:
+    """Aviso cuando el cliente pidió algo que NO está en el catálogo pero hay lista.
+
+    POR QUÉ HACE FALTA: el motor del catálogo exige todos los tokens y, si no los encuentra,
+    reintenta con OR — así que una marca que no existe se cae SILENCIOSAMENTE y el cliente
+    recibe una lista de otras marcas bajo el TÍTULO DE LO QUE PIDIÓ.
+
+    Caso real (conv 2109, provider 19, 2026-10-17 12:01):
+        cliente: "Buenas tardes tiene disponible crema dental sensodyne y que costo porf"
+        agente : "CREMA DENTAL SENSODYNE" seguido de 8 productos... NINGUNO de Sensodyne
+                 (Colgate Triple Acción, Colgate Kids, Tantum Verde...).
+    `sensodyne` da 0 productos en ese catálogo: el título prometía algo que la lista no
+    cumplía. Re-listar sin decir el NO es no responder — la misma regla que el aviso de
+    envase.
+
+    Devuelve '' si no hay nada que avisar.
+    """
+    if not term or not ausente:
+        return ""
+    resto = " ".join(w for w in term.split() if w.lower() != ausente.lower())
+    if resto.strip():
+        return f"⚠️ No tengo {ausente.upper()}. De {resto.upper()} hay esto:"
+    return f"⚠️ No tengo {ausente.upper()}."
+
+
+def _lista_con_aviso(
+    productos: list[dict[str, Any]], term: str, cierre: str = ""
+) -> str:
+    """La lista canónica precedida del aviso, si el cliente pidió algo que NO está.
+
+    POR QUÉ: el motor del catálogo exige todos los tokens y, si no los encuentra, reintenta
+    con OR — así que una marca que no existe se cae SILENCIOSAMENTE y el cliente recibe
+    otras marcas bajo el TÍTULO DE LO QUE PIDIÓ. Y hay un backstop que EMPEORA el problema:
+    cuando el LLM niega disponibilidad y hay productos, le pisa la negativa con la lista.
+    Si el LLM tenía razón, pisarlo es exactamente lo que engaña al cliente.
+
+    Caso real (conv 2109, provider 19, 2026-10-17 12:01):
+        cliente: "Buenas tardes tiene disponible crema dental sensodyne y que costo porf"
+        el LLM : negó disponibilidad — CORRECTAMENTE, 'sensodyne' da 0 productos
+        backstop: "el LLM negó disponibilidad pese a 8 productos — reemplazo con lista real"
+        cliente: "CREMA DENTAL SENSODYNE" + 8 Colgate y Tantum. NINGUNO de Sensodyne.
+
+    Se usa en TODOS los backstops que reemplazan el texto por la lista: si uno avisa y otro
+    no, el mismo mensaje da respuestas distintas según qué backstop salte.
+
+    El título pasa sin el token ausente, para no prometer lo que la lista no trae.
+    """
+    ausente = _nucleo_ausente(term, productos)
+    if not ausente:
+        return _formatear_lista_productos(productos, term) + cierre
+    resto = " ".join(w for w in term.split() if w.lower() != ausente.lower()).strip()
+    return (
+        _aviso_no_lo_tengo(term, ausente)
+        + "\n\n"
+        + _formatear_lista_productos(productos, resto or term)
+        + cierre
+    )
 
 
 def _aviso_envase_agotado(products: list[dict[str, Any]], envase: str) -> str:

@@ -174,6 +174,10 @@ _PALABRAS_FUNCIONALES = {
     "siguiente", "siguientes", "presupuesto",
     # 'resumen' no es un medicamento (ver el gemelo en turn.py::_FILLER).
     "resumen", "resumenes", "resúmenes",
+    # 'costo'/'porf' tampoco: 'porf' casa con el "POR" de AMPICILINA "POR 1 AMPOLLA" y
+    # ANTILAX "POR 10 TABLETAS" (ver el gemelo en turn.py::_FILLER).
+    "porf", "porfa", "porfavor", "porfis", "favorcito",
+    "costo", "costos", "costar", "costaria", "costarían", "costaban",
     "van", "vamos", "respondo", "responder", "respuesta", "necesito",
     "quiero", "quieres", "quiere", "busco", "busca", "buscan", "buscar",
     "tienes", "tiene", "tienen", "tener", "hay", "es", "son", "estan", "esta",
