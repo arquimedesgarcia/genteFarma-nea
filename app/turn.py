@@ -5388,6 +5388,14 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
                 and palabras[i + 1] in unidades
             ):
                 terminos.append(w)
+                continue
+            # CÓDIGO del nombre ('d3', 'k2', 'b6'): corto pero identifica el producto.
+            # Sin esto, 'vitamina d3/k2' se reducía a 'vitamina' y el cliente recibía
+            # multivitaminas, B12 y hasta JABÓN CON PROVITAMINA B5. (Hay una regla
+            # gemela en `_limpiar_termino_medicamento`; las dos limpian el término por
+            # caminos distintos y las dos tienen que conservarlo.)
+            if any(c.isdigit() for c in w):
+                terminos.append(w)
             continue
         if w in excluidas:
             continue
