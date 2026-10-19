@@ -315,6 +315,10 @@ def _termino_es_medicamento_plausible(term: str) -> bool:
     palabras = re.findall(r"[a-z0-9]+", t_sin)
     if not palabras:
         return False
+    # Una VÍA DE ADMINISTRACIÓN no es un medicamento: 'intraarticular' describe cómo se usa
+    # lo ya nombrado. Sin esto, "Es intraarticular" se cotizaba como producto (KENACORT).
+    if all(w in _VIAS_ADMINISTRACION or w in _PALABRAS_FUNCIONALES for w in palabras):
+        return False
     # Más de 4 palabras → probablemente una frase, no un medicamento.
     #
     # EXCEPCIÓN: cuando las palabras QUE SOBRAN son dosis/envase, el término es un
@@ -328,8 +332,16 @@ def _termino_es_medicamento_plausible(term: str) -> bool:
     # ese medicamento.
     if len(palabras) > 4:
         # Las que no son número ni dosis/envase: si son pocas, sigue siendo un fármaco.
-        sobrantes = [w for w in palabras
-                     if not w.isdigit() and w not in _TOKENS_DE_DOSIS]
+        # La DOSIS PEGADA a la unidad ('25mg', '5ml') cuenta como dosis, no como palabra:
+        # sin esto, 'acido hialuronico 25mg 2 5ml' se descartaba como «no parece
+        # medicamento» y el agente no buscaba nada. Caso real (conv 3132, provider 05):
+        # el cliente escribió justo así y el turno se quedó sin consultar el catálogo.
+        sobrantes = [
+            w for w in palabras
+            if not w.isdigit()
+            and w not in _TOKENS_DE_DOSIS
+            and not re.fullmatch(r"\d+(?:[.,]\d+)?(?:mg|ml|mcg|gr|g|ui|cc|kg|tab|caps?)", w)
+        ]
         if len(sobrantes) > 3:
             return False
         # Si son pocas, NO se acepta sin más: sigue el resto del filtro (sustantivas).
@@ -443,6 +455,30 @@ def _sin_frase_de_indicacion(t_sin: str) -> str:
     return _RE_FRASE_INDICACION.sub(" ", t_sin or "")
 
 
+# VÍA DE ADMINISTRACIÓN — NO ES UN MEDICAMENTO.
+#
+# Caso real (conv 3132, provider 05, 2026-10-19 13:23): el cliente venía preguntando por
+# ácido hialurónico y escribió "Es intraarticular". El agente le cotizó
+#     INTRAARTICULAR
+#     💊 1. KENACORT -A X 10 MG AMPOLLAS INTRAARTICULAR   $40,56
+# o sea: trató la FORMA DE ADMINISTRAR como si fuera el producto que pedía — un corticoide
+# en vez del ácido hialurónico. La vía dice CÓMO se usa lo ya nombrado; nunca es la petición.
+# Se filtra del TÉRMINO (el nombre real del producto sigue intacto en el catálogo).
+# Su gemelo en turn.py::_FILLER NO basta: hay dos caminos de limpieza (ver el historial de
+# 'd3/k2' y de `dar`), así que la regla vive aquí y la usan los dos.
+_VIAS_ADMINISTRACION = {
+    "intraarticular", "intramuscular", "endovenoso", "endovenosa", "intravenoso",
+    "intravenosa", "subcutaneo", "subcutanea", "subcutáneo", "subcutánea",
+    "parenteral", "intradermico", "intradérmico", "intratecal",
+    "oftalmico", "oftálmico", "oftalmica", "oftálmica", "otico", "ótico", "otica",
+    "topico", "tópico", "topica", "tópica", "transdermico", "transdérmico",
+    "inhalado", "inhalada", "inhalatorio", "nebulizacion", "nebulización",
+    "rectal", "vaginal", "nasal", "sublingual", "intranasal",
+    "intraoperatorio", "intralesional", "periarticular", "via", "vía",
+    "oral", "orales", "parenterales",
+}
+
+
 def _limpiar_termino_medicamento(term: str) -> str:
     """Deja SOLO las palabras "sustantivas" (posible fármaco) del término.
 
@@ -490,6 +526,7 @@ def _limpiar_termino_medicamento(term: str) -> str:
         # y el cliente recibía multivitaminas, B12 y hasta jabón con provitamina.
         # Cualquier token CON dígito cuenta: el relleno nunca lleva números.
         or (w not in _PALABRAS_FUNCIONALES
+            and w not in _VIAS_ADMINISTRACION
             and (len(w) >= 3 or w.isdigit() or any(c.isdigit() for c in w)))
     ]
     if not sustantivas:
@@ -1197,6 +1234,17 @@ def _variantes_typo(term: str, max_variantes: int | None = None) -> list[str]:
 # 'medicamento controlado manejan' 0.556, 'dovilin' 0.533, 'audio lead' 0.444.
 # 0.65 separa ambos grupos con margen (el typo más flojo es 0.700).
 _UMBRAL_TYPO_CATALOGO = 0.65
+
+# Para RE-BUSCAR por el núcleo solo (ver `buscar_medicamento`) se exige más que para
+# corregir un typo: que la corrección sea una VARIANTE DE ESCRITURA del mismo fármaco, no
+# una palabra parecida de otro producto. MEDIDO contra los catálogos reales:
+#     hialuronico -> hialuronato   0.818  (mismo principio activo: TOPTEAR)   -> DEBE pasar
+#     sensodyne   -> sensitive     0.556  (otra marca: Colgate Sensitive)     -> NO debe pasar
+#     acetalicio  -> acetilsalicilico 0.769 (typo real; no necesita esta rama)
+# El umbral de typo (0.65) NO separa los dos primeros casos; 0.75 sí, con hueco 0.194.
+# Con 0.65 la rama del núcleo cambiaba SENSODYNE por una pasta de otra marca y tapaba el
+# aviso de que no está; con 0.85 se perdía el ácido hialurónico.
+_UMBRAL_NUCLEO_MISMO_FARMACO = 0.75
 
 # Prefijos con los que se sondea el catálogo, de más largo a más corto. Hace falta bajar
 # hasta 3 letras: en 'cardevidol' el error está en la posición 4, así que 'card' NO trae
@@ -1953,6 +2001,7 @@ class ToolRuntime:
         # tiene que EXISTIR en el catálogo.
         if products:
             nucleo = _nucleo_ausente(nombre, products)
+            token_ok = None
             if nucleo:
                 tokens_cat = await _tokens_catalogo_por_prefijos(
                     self._ctx.crm, self._provider_id, nucleo
@@ -1987,6 +2036,55 @@ class ToolRuntime:
                         self.last_term = term_corregido
                         data = data_c
                         products = corregidos
+
+                # SI EL FÁRMACO SIGUE SIN APARECER, BUSCAR SOLO CON EL NÚCLEO.
+                #
+                # Corregir el typo no basta cuando el cliente usa un SINÓNIMO que el
+                # catálogo escribe de otra forma: la frase corregida puede volver a caer
+                # al OR por una palabra genérica. Hay que soltar el resto del término y
+                # pedir el fármaco a secas.
+                #
+                # Caso real (conv 3132, provider 05, 2026-10-19):
+                #     cliente: "Ácido hialuronico 25mg/ 2,5ml"
+                #     'acido hialuronico'  -> corregido a 'acido hialuronato' -> 20 ACIDO
+                #       FOLICO / ASCORBICO / BORICO (el AND falla y el OR se apoya en
+                #       'acido'); TOPTEAR NO aparecía.
+                #     'hialuronico' o 'hialuronato' SOLOS -> 1 producto:
+                #       TOPTEAR 4 MG / 10 ML (HIALURONATO DE SODIO)   <- el que pedía
+                # El catálogo lo tenía todo el tiempo; lo escondía la palabra 'acido'.
+                if _nucleo_ausente(self.corregido_a or nombre, products):
+                    nucle_buscar = token_ok or nucleo
+                    # SOLO si el núcleo sigue siendo EL MISMO FÁRMACO. Una corrección
+                    # «parecida» de OTRA marca no sirve: 'hialuronico'→'hialuronato'
+                    # puntúa 0.95 (es el mismo principio activo, y en el catálogo está
+                    # TOPTEAR), pero 'sensodyne'→'sensitive' puntúa 0.78 y lo único que
+                    # consigue es tapar el aviso de que SENSODYNE no está, cambiándolo por
+                    # una pasta de otra marca. Se exige variante de escritura.
+                    if nucle_buscar == nucleo or ratio_t >= _UMBRAL_NUCLEO_MISMO_FARMACO:
+                        data_n = await self._ctx.crm.get_products(
+                            self._provider_id, q=nucle_buscar, limit=20
+                        )
+                        cand_n = _dedupe_por_nombre(data_n.get("products") or [])
+                        solo_nucleo = filtrar_relevantes(nucle_buscar, cand_n)
+                        # Tiene que aparecer DE VERDAD en algún nombre: si no, no mejora.
+                        _nu = _normalizar_tildes(nucle_buscar.lower())
+                        if solo_nucleo and any(
+                            _nu in _normalizar_tildes(
+                                str(p.get("nombre") or p.get("producto") or "").lower()
+                            )
+                            for p in solo_nucleo
+                        ):
+                            logger.info(
+                                "buscar_medicamento: '%s' — '%s' sigue sin estar en los %d "
+                                "resultados; busco SOLO por el núcleo '%s' (%d productos)",
+                                nombre, nucleo, len(products), nucle_buscar, len(solo_nucleo),
+                            )
+                            products = solo_nucleo
+                            data = data_n
+                            self.last_term = nucle_buscar
+                            if not self.corregido_a:
+                                self.corregido_desde = nombre
+                                self.corregido_a = nucle_buscar
 
         # Dedupe por nombre de producto: el catálogo de Firebase repite el MISMO
         # ítem (mismo nombre) con distintos productId/precio (una entrada por

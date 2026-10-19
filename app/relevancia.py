@@ -187,6 +187,10 @@ _MIN_LEN_SENAL = 4
 _MIN_LEN_ENTRADA = 3
 _MIN_LEN_TYPO = 5
 
+# Número + unidad PEGADOS: '25mg', '500ml', '10mcg', '2gr'. Es una DOSIS, no un nombre de
+# fármaco. (Los códigos del nombre —'d3', 'k2', 'b12'— no llevan unidad y no caen aquí.)
+_RE_DOSIS_TOKEN = re.compile(r"\d+(?:[.,]\d+)?(?:mg|ml|mcg|gr|g|ui|cc|kg|tab|caps?)$")
+
 
 def _es_codigo_del_nombre(w: str) -> bool:
     """¿Es un CÓDIGO del nombre (d3, k2, b6, b12, q10)? Entonces NO es una dosis.
@@ -271,6 +275,14 @@ def tokens_senal(termino: str, min_len: int | None = None) -> list[str]:
     umbral = _MIN_LEN_ENTRADA if min_len is None else min_len
     out: list[str] = []
     for w in _norm(termino).split():
+        # UNA DOSIS NO ES UN FÁRMACO. '25mg', '500ml', '10mcg' son número+unidad pegados:
+        # no identifican nada. Sin esta regla, en 'acido hialuronico 25mg 2' el token de
+        # señal '25mg' acababa siendo el NÚCLEO del fármaco, la corrección por catálogo lo
+        # "arreglaba" a 'kimiceg' (un LABORATORIO) y el cliente recibía 20 productos de
+        # Kimiceg en vez del ácido hialurónico que había pedido.
+        # (No confundir con los códigos del nombre 'd3'/'k2'/'b12': esos no llevan unidad.)
+        if _RE_DOSIS_TOKEN.fullmatch(w):
+            continue
         if len(w) < umbral or w.isdigit():
             # EXCEPCIÓN: los CÓDIGOS del nombre ('d3', 'k2', 'b12') son cortos pero
             # identifican el producto. Ver `_es_codigo_del_nombre`.
