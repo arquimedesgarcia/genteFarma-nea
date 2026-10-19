@@ -44,6 +44,7 @@ from app.tools import (
     _normalizar_tildes,
     _normalizar_unidad,
     _nucleo_ausente,
+    _VIAS_ADMINISTRACION,
     _sin_frase_de_indicacion,
     _termino_es_medicamento_plausible,
     _PALABRAS_FUNCIONALES,
@@ -3624,6 +3625,7 @@ def _cantidad_pedida(texto: str) -> int:
         return 0
     return n if 1 <= n <= 99 else 0
 
+
 # El "X N" del título del producto: 'BRASARTAN CTDN 80MG/12.5X10 FARMA' → '10'.
 _RE_X_ENVASE = re.compile(r"x\s*0*(\d{1,3})\b")
 
@@ -5918,7 +5920,7 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
     palabras = [_normalizar_unidad(w) for w in palabras]
     # Verbos de consulta y relleno: nunca son parte del medicamento.
     verbos = set(re.findall(r"[a-záéíóúüñ]+", _VERBOS_MEDICAMENTO.pattern))
-    excluidas = _FILLER | verbos
+    excluidas = _FILLER | verbos | _VIAS_ADMINISTRACION
     # Unidades de dosis que SÍ son parte del término: mg, ml, mcg, gotas, etc.
     unidades = {"mg", "ml", "mcg", "gotas", "ampolla", "ampollas", "jarabe",
                 "tabletas", "tab", "capsulas", "cap", "crema", "spray",
