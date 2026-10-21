@@ -317,7 +317,12 @@ def _termino_es_medicamento_plausible(term: str) -> bool:
         return False
     # Una VÍA DE ADMINISTRACIÓN no es un medicamento: 'intraarticular' describe cómo se usa
     # lo ya nombrado. Sin esto, "Es intraarticular" se cotizaba como producto (KENACORT).
-    if all(w in _VIAS_ADMINISTRACION or w in _PALABRAS_FUNCIONALES for w in palabras):
+    if all(
+        w in _VIAS_ADMINISTRACION
+        or w in _CATEGORIAS_TERAPEUTICAS
+        or w in _PALABRAS_FUNCIONALES
+        for w in palabras
+    ):
         return False
     # Más de 4 palabras → probablemente una frase, no un medicamento.
     #
@@ -455,6 +460,37 @@ def _sin_frase_de_indicacion(t_sin: str) -> str:
     return _RE_FRASE_INDICACION.sub(" ", t_sin or "")
 
 
+# CATEGORÍA TERAPÉUTICA / INDICACIÓN IMPRESA EN LA CAJA — NO ES EL MEDICAMENTO.
+#
+# Caso real (2026-10-19): el cliente mandó la FOTO de una caja de
+#     Fexofenadina Clorhidrato CALOX · Medicamento Genérico
+#     Antialérgico · Antihistamínico · Via Oral · 10 Tabletas Recubiertas · 120 mg
+# y el agente cotizó CUATRO "medicamentos": ANTIHISTAMINICO, FEXOFENADINA CLORHIDRATO,
+# CALOX (21 productos de ese laboratorio) y ANTISEPTICO. Solo el segundo lo es.
+#
+# La caja trae, además del fármaco: la marca, el laboratorio, la CATEGORÍA («Antialérgico
+# Antihistamínico») y la forma. Lo único que se busca es el fármaco.
+# Es la misma regla que ya vale para la indicación en el texto («broxol tos seca» → broxol):
+# PARA QUÉ SIRVE no es CUÁL ES.
+_CATEGORIAS_TERAPEUTICAS = {
+    "antihistaminico", "antihistaminica", "antihistaminicos", "antialergico",
+    "antialergica", "antialergicos", "antiseptico", "antiseptica", "antisepticos",
+    "analgesico", "analgesica", "analgesicos", "antibiotico", "antibiotica",
+    "antibioticos", "antiinflamatorio", "antiinflamatoria", "antiinflamatorios",
+    "antiflamatorio", "antipiretico", "antipiretica", "antiacido", "antiacida",
+    "antifungico", "antifungica", "antimicotico", "antimicotica", "antiviral",
+    "antivirales", "antitusivo", "antitusigena", "antitusigeno", "antiespasmodico",
+    "antiespasmotico", "expectorante", "mucolitico", "descongestionante", "laxante",
+    "antidiarreico", "antihemorroidal", "antihipertensivo", "antihipertensiva",
+    "antidiabetico", "antidiabetica", "hipoglucemiante", "diuretico", "diuretica",
+    "vasodilatador", "vasoconstrictor", "antiarritmico", "anticoagulante",
+    "antiagregante", "antiagregantes", "corticoide", "corticosteroide", "esteroide",
+    "broncodilatador", "antiemetico", "antiulceroso", "antiacne", "antimicotico",
+    "multivitaminico", "vitaminico", "suplemento", "suplementos", "generico",
+    "generica", "genericos", "genericas",
+}
+
+
 # VÍA DE ADMINISTRACIÓN — NO ES UN MEDICAMENTO.
 #
 # Caso real (conv 3132, provider 05, 2026-10-19 13:23): el cliente venía preguntando por
@@ -527,6 +563,7 @@ def _limpiar_termino_medicamento(term: str) -> str:
         # Cualquier token CON dígito cuenta: el relleno nunca lleva números.
         or (w not in _PALABRAS_FUNCIONALES
             and w not in _VIAS_ADMINISTRACION
+            and w not in _CATEGORIAS_TERAPEUTICAS
             and (len(w) >= 3 or w.isdigit() or any(c.isdigit() for c in w)))
     ]
     if not sustantivas:
@@ -1310,6 +1347,38 @@ def _correccion_por_largo_plausible(escrito: str, candidato: str) -> bool:
     return len(candidato) >= len(escrito) - 1
 
 
+def _es_nombre_de_laboratorio(term: str, products: list[dict[str, Any]]) -> bool:
+    """¿El término es el LABORATORIO de estos productos, y no el medicamento?
+
+    La caja de un medicamento trae el fármaco y, aparte, el laboratorio. El OCR los devuelve
+    como líneas separadas, y «CALOX» acabó cotizándose como si fuera un medicamento: los 21
+    productos de ese laboratorio (acetaminofén, amlodipina, albendazol, loratadina…) como
+    respuesta a la foto de una FEXOFENADINA. El cliente pidió un fármaco y recibió un
+    catálogo entero de una marca.
+
+    SE DETECTA POR DATOS, sin lista de laboratorios que mantener: si la mayoría de los
+    productos devueltos declara ESE valor en su campo `laboratorio`, el término nombra al
+    laboratorio. Un fármaco nunca cumple eso: 'losartan' devuelve productos de muchos
+    laboratorios distintos.
+
+    Exige UN SOLO token (los laboratorios son una palabra) y al menos 2 productos con el
+    campo, para no decidir con un dato suelto.
+    """
+    tokens = [w for w in _normalizar_tildes((term or "").lower()).split() if w]
+    if len(tokens) != 1:
+        return False
+    t = tokens[0]
+    labs = [
+        _normalizar_tildes(str(p.get("laboratorio") or "").strip().lower())
+        for p in products
+    ]
+    labs = [x for x in labs if x]
+    if len(labs) < 2:
+        return False
+    iguales = sum(1 for x in labs if x == t)
+    return iguales / len(labs) >= 0.8
+
+
 def _nucleo_ausente(term: str, products: list[dict[str, Any]]) -> str | None:
     """El fármaco que el cliente NOMBRÓ no aparece en NINGÚN producto devuelto.
 
@@ -1988,6 +2057,18 @@ class ToolRuntime:
                 "buscar_medicamento: '%s' — %d/%d productos descartados por relevancia",
                 nombre, antes - len(products), antes,
             )
+
+        # ¿EL TÉRMINO ES UN LABORATORIO Y NO UN MEDICAMENTO? (ver el docstring)
+        # Va ANTES de cualquier recuperación: no hay nada que recuperar, el cliente no
+        # nombró un fármaco. Sin esto, 'calox' devolvía 21 productos de esa marca como
+        # respuesta a la foto de una FEXOFENADINA.
+        if products and _es_nombre_de_laboratorio(nombre, products):
+            logger.info(
+                "buscar_medicamento: '%s' es un LABORATORIO (no un medicamento) — "
+                "descarto los %d productos de esa marca", nombre, len(products),
+            )
+            products = []
+            self.med_not_found = True
 
         # EL FÁRMACO QUE EL CLIENTE NOMBRÓ NO ESTÁ EN LA LISTA (pero la lista NO está
         # vacía, así que ninguno de los caminos de abajo se activaría).
