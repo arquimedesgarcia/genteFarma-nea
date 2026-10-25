@@ -25,6 +25,7 @@ from app.relevancia import es_relevante
 from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt
+from app.wtext import a_formato_whatsapp
 from app.state import (
     AppContext,
     Conversation,
@@ -2423,7 +2424,7 @@ async def _send(ctx: AppContext, conv_id: int, crm_conv_id: str, text: str) -> b
     4831 chars). Se divide en partes por línea vacía (párrafos) SIN cortar
     opciones de la lista por la mitad; cada parte ≤ WA_MAX_CHARS.
     """
-    partes = _partir_mensaje_largo(text, WA_MAX_CHARS)
+    partes = _partir_mensaje_largo(a_formato_whatsapp(text), WA_MAX_CHARS)
     # Modo laboratorio (endpoint /api/chat): captura las respuestas en el
     # outbox en vez de enviarlas por WhatsApp. No reenvía, no encola
     # pending_send, no toca la ventana ni la API.
