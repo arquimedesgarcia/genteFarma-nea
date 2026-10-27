@@ -49,6 +49,8 @@ from app.tools import (
     _VIAS_ADMINISTRACION,
     _sin_frase_de_indicacion,
     _termino_es_medicamento_plausible,
+    _titulo_normalizado,
+    _tokens_de_titulo,
     _PALABRAS_FUNCIONALES,
 )
 
@@ -5402,8 +5404,35 @@ def _concentracion_de_nombre(nombre: object) -> str:
 # nombre ('Medicamento Fexofenadina Clorhidrato Calox'). Caso real 2026-10-27.
 _PALABRAS_DE_CAJA = {
     "medicamento", "medicamentos", "generico", "genericos", "generica", "genericas",
-    "medicamento generico", "medicamento genericos",
+    # Etiquetas: el OCR devuelve el rótulo del campo pegado al nombre. Caso real: la misma
+    # caja de FEXOFENADINA se leyó 'Nombre del Fexofenadina Clorhidrato Calox'.
+    "nombre", "del", "descripcion", "producto", "presentacion",
 }
+
+
+def _cierra_siempre_los_titulos(token: str, productos: list[dict[str, Any]]) -> bool:
+    """¿Ese token aparece en los títulos y SIEMPRE como última palabra?
+
+    Es la firma del LABORATORIO: la marca se escribe al final del título
+    ('ACETAMINOFEN 500 MG X 10 TAB CALOX') y el fármaco, nunca — el fármaco abre el título
+    o va dentro de un paréntesis. Basta UNA aparición: en una búsqueda de 3 productos puede
+    ser que la marca aparezca en uno solo.
+
+    Caso en que NO debe disparar: 'acido folico', donde 'FOLICO' cierra algunos títulos
+    ('NONAFOL 5 MG X 30 TAB (ACIDO FOLICO)') pero en otros va en medio → no siempre cierra.
+    """
+    if not token:
+        return False
+    apariciones = 0
+    for p in productos:
+        toks = _tokens_de_titulo(
+            _titulo_normalizado(p.get("producto") or p.get("nombre") or p.get("title"))
+        )
+        if token in toks:
+            apariciones += 1
+            if toks[-1] != token:
+                return False
+    return apariciones >= 1
 
 
 def _titulo_de_lista(titulo: str, productos: list[dict[str, Any]]) -> str:
@@ -5430,7 +5459,10 @@ def _titulo_de_lista(titulo: str, productos: list[dict[str, Any]]) -> str:
         return titulo
     if len(limpio) > 2:
         ultimo = _normalizar_tildes(limpio[-1].lower()).strip(" -.,;:()[]")
-        if ultimo and _es_nombre_de_laboratorio(ultimo, productos):
+        if ultimo and (
+            _es_nombre_de_laboratorio(ultimo, productos)
+            or _cierra_siempre_los_titulos(ultimo, productos)
+        ):
             limpio = limpio[:-1]
     return " ".join(limpio).strip() or titulo
 
