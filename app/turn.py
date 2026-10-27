@@ -1905,6 +1905,20 @@ async def _tool_loop(
                         runtime.corregido_a = None
                         result = await runtime.execute("buscar_medicamento", {"nombre": med})
                         prods = (result or {}).get("products") or []
+                        # EL TÉRMINO ERA EL LABORATORIO, NO UN MEDICAMENTO.
+                        # Caso real (conv 7, provider 05, 2026-10-27): la foto de una caja de
+                        # 'Fexofenadina Clorhidrato CALOX' se leyó como dos medicamentos,
+                        # FEXOFENADINA y CALOX, y la respuesta incluyó un catálogo entero de
+                        # esa marca (20 productos: acetaminofén, amlodipina, albendazol...).
+                        # Se ignora en SILENCIO: no es un "no disponible" — el cliente nunca
+                        # nombró un fármaco CALOX.
+                        if getattr(runtime, "es_laboratorio", False):
+                            logger.info(
+                                "receta: '%s' es el LABORATORIO de los productos, no un "
+                                "medicamento — se ignora (sin aviso de no disponible)",
+                                med,
+                            )
+                            continue
                         # FILTRAR POR LA DOSIS QUE PIDIÓ EL CLIENTE.
                         #
                         # SE FILTRA AL FINAL, NO SE BUSCA CON LA DOSIS. Medido: si el
