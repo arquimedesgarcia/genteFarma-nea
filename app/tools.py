@@ -1347,6 +1347,26 @@ def _correccion_por_largo_plausible(escrito: str, candidato: str) -> bool:
     return len(candidato) >= len(escrito) - 1
 
 
+def _titulo_normalizado(valor: object) -> str:
+    """Título de producto listo para comparar: sin tildes, minúsculas, sin signos en los bordes."""
+    texto = _normalizar_tildes(str(valor or "").lower())
+    return texto.strip(" -·.,;:()[]/*")
+
+
+def _tokens_de_titulo(titulo: str) -> list[str]:
+    return [t for t in re.split(r"[^a-z0-9ñ]+", titulo) if t]
+
+
+def _termina_con_token(titulo: str, token: str) -> bool:
+    toks = _tokens_de_titulo(titulo)
+    return bool(toks) and toks[-1] == token
+
+
+def _empieza_con_token(titulo: str, token: str) -> bool:
+    toks = _tokens_de_titulo(titulo)
+    return bool(toks) and toks[0] == token
+
+
 def _es_nombre_de_laboratorio(term: str, products: list[dict[str, Any]]) -> bool:
     """¿El término es el LABORATORIO de estos productos, y no el medicamento?
 
@@ -1373,10 +1393,38 @@ def _es_nombre_de_laboratorio(term: str, products: list[dict[str, Any]]) -> bool
         for p in products
     ]
     labs = [x for x in labs if x]
-    if len(labs) < 2:
+    if len(labs) >= 2:
+        iguales = sum(1 for x in labs if x == t)
+        if iguales / len(labs) >= 0.8:
+            return True
+
+    # SIN CAMPO `laboratorio` EN EL PAYLOAD: se decide por la POSICIÓN del término en el
+    # título. El CRM (/api/bot/products) devuelve solo {id, nombre, precio, precioBs,
+    # disponible} y en el catálogo real (`products-providers`) el laboratorio NO tiene
+    # campo propio: 'Brand' guarda cosas como 'MEDICINAS' y el laboratorio aparece como
+    # ÚLTIMA palabra del título —
+    #     'ACETAMINOFEN 500 MG X 10 TAB CALOX'
+    #     'LOSARTAN POTASICO 50MG TAB X 30 ( CALOX)'
+    #     'AMLODIPINA TAB 5MG X 10 -CALOX-'
+    # Por eso la comprobación anterior (por campo) nunca disparaba en producción: se había
+    # validado con productos sintéticos que sí traían `laboratorio`.
+    #
+    # La regla: el término es el LABORATORIO si cierra la mayoría de los títulos y NO los
+    # abre. Un fármaco siempre abre el título ('ACETAMINOFEN 500 MG … CALOX'), así que
+    # 'acetaminofen' no puede pasar la primera condición y 'calox' no puede pasar la
+    # segunda.
+    titulos = [
+        _titulo_normalizado(p.get("producto") or p.get("nombre") or p.get("title"))
+        for p in products
+    ]
+    titulos = [x for x in titulos if x]
+    if len(titulos) < 3:
         return False
-    iguales = sum(1 for x in labs if x == t)
-    return iguales / len(labs) >= 0.8
+    cierra = sum(1 for x in titulos if _termina_con_token(x, t))
+    abre = sum(1 for x in titulos if _empieza_con_token(x, t))
+    if cierra / len(titulos) >= 0.8 and abre / len(titulos) <= 0.4:
+        return True
+    return False
 
 
 def _nucleo_ausente(term: str, products: list[dict[str, Any]]) -> str | None:
@@ -1543,6 +1591,11 @@ class ToolRuntime:
         # Lo usa el turno para escalar a humano de forma determinista (no depender
         # de que el LLM llame handoff).
         self.med_not_found = False
+        # true si el último `buscar_medicamento` descartó el término por ser el
+        # LABORATORIO de los productos (CALOX, GENVEN...), no un medicamento. El turno lo
+        # usa para IGNORAR ese término en silencio: no es un "no disponible", es que el
+        # cliente nunca nombró un fármaco.
+        self.es_laboratorio = False
         # Si se llamó ver_carrito este turno, aquí queda el texto determinista del
         # resumen (cada producto con cantidad y subtotal en USD y Bs, y el total).
         # turn.py lo usa para reemplazar lo que haya generado el LLM, garantizando
@@ -1867,6 +1920,10 @@ class ToolRuntime:
 
     async def _buscar_medicamento(self, args: dict[str, Any]) -> dict[str, Any]:
         nombre = str(args.get("nombre") or "").strip()
+        # Se resetean en CADA búsqueda: si no, el flag de la búsqueda anterior
+        # ('calox' era un laboratorio) se arrastra al siguiente medicamento de la misma
+        # receta y lo saltaría en silencio.
+        self.es_laboratorio = False
         if not nombre:
             return {"ok": False, "error": "nombre_vacio", "detalle": "indica qué medicamento buscas"}
         # Guarda anti-saludo: si el LLM llamó buscar_medicamento con un término
@@ -2069,6 +2126,7 @@ class ToolRuntime:
             )
             products = []
             self.med_not_found = True
+            self.es_laboratorio = True
 
         # EL FÁRMACO QUE EL CLIENTE NOMBRÓ NO ESTÁ EN LA LISTA (pero la lista NO está
         # vacía, así que ninguno de los caminos de abajo se activaría).
@@ -2334,6 +2392,7 @@ class ToolRuntime:
                 )
             if alternativas:
                 self.med_not_found = False
+                self.es_laboratorio = False
                 self.last_term = nombre
                 self.last_product = alternativas[0]
                 self.last_products = alternativas
