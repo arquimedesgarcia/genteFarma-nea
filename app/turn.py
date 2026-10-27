@@ -5482,10 +5482,12 @@ def _envase_pedido_en_linea(linea: str) -> str:
     pedido = _pedido_de_envase(linea)
     if pedido:
         return pedido
-    m = _RE_X_ENVASE.search((linea or "").strip().lower())
-    if not m:
-        return ""
-    return m.group(1).lstrip("0") or m.group(1)
+    # La forma 'X N' se resuelve con `_envase_de_nombre`, que ya sabe que la 'x' final
+    # del nombre NO es separador ('evigax 125 mg' → 125 es DOSIS, no 125 cajas) y que
+    # un número con unidad de peso/volumen tampoco es envase. Antes había aquí una
+    # segunda copia del parseo, sin esas salvaguardas: el mismo texto se leía bien por
+    # un camino y mal por el otro (caso conv 7, provider 05).
+    return _envase_de_nombre(linea)
 
 
 # Regex de la DOSIS escrita ANTES del envase: en "<nombre> <n> x <m>", el número que
