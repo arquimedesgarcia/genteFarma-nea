@@ -1347,6 +1347,206 @@ def _correccion_por_largo_plausible(escrito: str, candidato: str) -> bool:
     return len(candidato) >= len(escrito) - 1
 
 
+# ── FORMA FARMACÉUTICA: suspensión, tabletas, gotas, crema… ───────────────────────
+# El cliente pide "apiret en suspensión" y el catálogo devuelve SEIS APIRET: dos tabletas,
+# dos granulados en sobre, una solución oral y un frasco sin forma escrita. La forma es tan
+# parte del pedido como la dosis, y hasta ahora solo se usaba para traducir unidades.
+#
+# Caso real (provider 05, 2026-10-27): "Me indica precio apiret en suspensión" → 6 opciones
+# mezcladas, la que pidió en el puesto 6.
+_FORMA_CANONICA: dict[str, str] = {
+    # líquidos orales
+    "suspension": "suspensión", "suspensión": "suspensión", "susp": "suspensión",
+    "jarabe": "jarabe", "jarabes": "jarabe", "jbe": "jarabe", "jarb": "jarabe",
+    "jarab": "jarabe",
+    "solucion": "solución oral", "solución": "solución oral",
+    "solucion oral": "solución oral", "solución oral": "solución oral",
+    "sol oral": "solución oral",
+    "gotas": "gotas", "gotitas": "gotas", "gtas": "gotas", "gts": "gotas",
+    "elixir": "elixir", "emulsion": "emulsión", "emulsión": "emulsión",
+    # sólidos orales
+    "tableta": "tabletas", "tabletas": "tabletas", "tab": "tabletas", "tabs": "tabletas",
+    "comprimido": "tabletas", "comprimidos": "tabletas", "comp": "tabletas",
+    "gragea": "tabletas", "grageas": "tabletas",
+    "capsula": "cápsulas", "cápsula": "cápsulas", "capsulas": "cápsulas",
+    "cápsulas": "cápsulas", "cap": "cápsulas", "caps": "cápsulas",
+    # polvos
+    "polvo": "polvo", "granulado": "polvo", "granulados": "polvo",
+    "granulada": "polvo", "sobre": "polvo", "sobres": "polvo", "sachet": "polvo",
+    # tópicos
+    "crema": "crema", "cremas": "crema", "pomada": "crema",
+    "unguento": "ungüento", "ungüento": "ungüento",
+    "gel": "gel", "locion": "loción", "loción": "loción",
+    # otros
+    "ampolla": "inyectable", "ampollas": "inyectable", "inyectable": "inyectable",
+    "vial": "inyectable",
+    "ovulo": "óvulos", "óvulo": "óvulos", "ovulos": "óvulos", "óvulos": "óvulos",
+    "supositorio": "supositorios", "supositorios": "supositorios",
+    "spray": "spray", "aerosol": "spray",
+    "colirio": "gotas oftálmicas", "colirios": "gotas oftálmicas",
+}
+
+# La FAMILIA es lo que se compara: quien pide 'suspensión' también acepta el jarabe y la
+# solución oral (es el mismo líquido pediátrico), pero no una tableta.
+_FAMILIA_DE_FORMA: dict[str, str] = {
+    "suspensión": "liquida", "jarabe": "liquida", "solución oral": "liquida",
+    "gotas": "liquida", "elixir": "liquida", "emulsión": "liquida", "líquido": "liquida",
+    "tabletas": "solida", "cápsulas": "solida",
+    "polvo": "polvo",
+    "crema": "topica", "ungüento": "topica", "gel": "topica", "loción": "topica",
+    "inyectable": "inyectable",
+    "óvulos": "vaginal", "supositorios": "vaginal",
+    "spray": "spray",
+    "gotas oftálmicas": "oftalmica",
+}
+
+
+def _normalizar_forma(texto: str) -> str:
+    return _normalizar_tildes((texto or "").lower())
+
+
+def _forma_pedida(texto: str) -> tuple[str | None, str | None]:
+    """(familia, etiqueta) de la forma que pide el cliente; (None, None) si no pide ninguna.
+
+    'apiret en suspensión' → ('liquida', 'suspensión'). Se busca la palabra MÁS LARGA
+    primero para que 'solución oral' gane a 'sol' y 'gotas oftálmicas' a 'gotas'.
+    """
+    t = _normalizar_forma(texto)
+    if not t:
+        return None, None
+    if re.search(r"\b(gotas|gtas|gts|colirio|colirios)\b", t) and re.search(
+        r"\b(oftalmic\w*|ocular\w*|ojos?)\b", t
+    ):
+        return "oftalmica", "gotas oftálmicas"
+    for palabra in sorted(_FORMA_CANONICA, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(palabra)}\b", t):
+            etiqueta = _FORMA_CANONICA[palabra]
+            return _FAMILIA_DE_FORMA.get(etiqueta), etiqueta
+    return None, None
+
+
+def _etiqueta_de_forma(titulo: str) -> str | None:
+    """Qué forma es este producto, leída de su TÍTULO. None si el título no lo dice."""
+    t = _normalizar_forma(titulo)
+    if not t:
+        return None
+    if re.search(r"\b(gotas|gtas|gts)\b", t) and re.search(
+        r"\b(oftalmic\w*|ocular\w*|colirio)\b", t
+    ):
+        return "gotas oftálmicas"
+    pruebas = (
+        (r"\bsusp", "suspensión"),
+        (r"\b(jarabe|jarabes|jbe|jarb|jarab)\b", "jarabe"),
+        (r"\b(solucion|sol\s*oral|solucion\s*oral)\b", "solución oral"),
+        (r"\b(gotas|gtas|gts)\b", "gotas"),
+        # SIN `\b` a la izquierda: el catálogo pega la forma al número
+        # ('APIRET 500MGX10TAB', 'AMOXICILINA 500MGX20CAPS') y ahí no hay frontera de
+        # palabra. Se exige que no venga precedido de una LETRA para no leer 'ESTABLE'.
+        (r"(?:^|[^a-z])(tab|tabs|tableta|tabletas|comp|comprimido|comprimidos|gragea|"
+         r"grageas)\b", "tabletas"),
+        (r"(?:^|[^a-z])(cap|caps|capsula|capsulas)\b", "cápsulas"),
+        (r"\b(sobre|sobres|granulado|granulados|granulada|polvo|sachet)\b", "polvo"),
+        (r"\b(crema|cremas)\b", "crema"),
+        (r"\b(unguento|pomada)\b", "ungüento"),
+        (r"\bgel\b", "gel"),
+        (r"\b(ampolla|ampollas|inyectable|vial)\b", "inyectable"),
+        (r"\b(supositorio|supositorios|ovulo|ovulos)\b", "supositorios"),
+        (r"\b(spray|aerosol)\b", "spray"),
+        (r"\b(elixir)\b", "elixir"),
+    )
+    for patron, etiqueta in pruebas:
+        if re.search(patron, t):
+            return etiqueta
+    # Un VOLUMEN en ml y ninguna forma sólida: es líquido aunque el título esté roto
+    # ('APIRET 180ML75ML 60ML OFTALMI').
+    if re.search(r"\d+\s*ml\b", t):
+        return "líquido"
+    return None
+
+
+def _titulo_de_producto(p: dict[str, Any]) -> str:
+    return str(p.get("producto") or p.get("nombre") or p.get("title") or "")
+
+
+def _termino_sin_forma(termino: str) -> str:
+    """El término sin la palabra de la forma ('apiret suspensión' → 'apiret').
+
+    Se comparan también PARES de palabras, porque hay formas de dos palabras
+    ('sol oral', 'gotas oftalmicas') que se perderían al ir palabra a palabra.
+    """
+    _CONECTORES = {
+        "en", "de", "del", "la", "el", "los", "las", "un", "una", "unos", "unas",
+        "con", "para", "por", "y", "o", "su", "mi", "que", "al",
+    }
+    palabras = [w for w in re.split(r"\s+", (termino or "").strip()) if w]
+    fuera: list[str] = []
+    i = 0
+    while i < len(palabras):
+        actual = _normalizar_forma(palabras[i]).strip(" -.,;:()[]")
+        par = actual
+        if i + 1 < len(palabras):
+            par = f"{actual} {_normalizar_forma(palabras[i + 1]).strip(' -.,;:()[]')}"
+        if par in _FORMA_CANONICA:
+            i += 2
+            continue
+        if actual in _FORMA_CANONICA:
+            i += 1
+            continue
+        fuera.append(palabras[i])
+        i += 1
+    # los conectores que quedaban colgando al quitar la forma ('apiret EN', 'de la')
+    while fuera and _normalizar_forma(fuera[-1]).strip(" -.,;:()[]") in _CONECTORES:
+        fuera.pop()
+    while fuera and _normalizar_forma(fuera[0]).strip(" -.,;:()[]") in _CONECTORES:
+        fuera.pop(0)
+    return " ".join(fuera).strip() or (termino or "")
+
+
+def _filtrar_por_forma(
+    productos: list[dict[str, Any]], familia: str | None
+) -> list[dict[str, Any]]:
+    """Los productos de esa familia de forma. Si no hay NINGUNO, devuelve la lista entera.
+
+    Nunca se queda sin ofrecer: negar el medicamento porque la forma no está sería peor
+    que mostrar otras presentaciones — pero entonces el aviso lo dice (ver `_aviso_forma`).
+    """
+    if not familia or not productos:
+        return list(productos or [])
+    dentro = [
+        p for p in productos
+        if _FAMILIA_DE_FORMA.get(_etiqueta_de_forma(_titulo_de_producto(p)) or "") == familia
+    ]
+    return dentro or list(productos)
+
+
+def _aviso_forma(
+    productos: list[dict[str, Any]], termino: str, etiqueta_pedida: str | None
+) -> str:
+    """Aviso cuando la forma pedida no está entre los productos que se van a mostrar."""
+    if not etiqueta_pedida or not productos:
+        return ""
+    etiquetas = {_etiqueta_de_forma(_titulo_de_producto(p)) for p in productos}
+    if etiqueta_pedida in etiquetas:
+        return ""
+    droga = _termino_sin_forma(termino).upper()
+    # 'líquido' es el cajón de los títulos rotos: no se anuncia como presentación.
+    otras = sorted({e for e in etiquetas if e and e != "líquido" and e != etiqueta_pedida})
+    if otras:
+        return f"⚠️ No tengo {droga} en {etiqueta_pedida}. Lo tengo en: {', '.join(otras)}."
+    return f"⚠️ No tengo {droga} en {etiqueta_pedida}."
+
+
+def _aplicar_forma(
+    productos: list[dict[str, Any]], termino: str
+) -> tuple[list[dict[str, Any]], str]:
+    """(productos acotados a la forma pedida, aviso si esa forma no está)."""
+    familia, etiqueta = _forma_pedida(termino)
+    if not familia or not productos:
+        return list(productos or []), ""
+    filtrados = _filtrar_por_forma(productos, familia)
+    return filtrados, _aviso_forma(filtrados, termino, etiqueta)
+
+
 def _titulo_normalizado(valor: object) -> str:
     """Título de producto listo para comparar: sin tildes, minúsculas, sin signos en los bordes."""
     texto = _normalizar_tildes(str(valor or "").lower())
@@ -1596,6 +1796,10 @@ class ToolRuntime:
         # usa para IGNORAR ese término en silencio: no es un "no disponible", es que el
         # cliente nunca nombró un fármaco.
         self.es_laboratorio = False
+        # Aviso cuando la FORMA pedida (suspensión, gotas, crema…) no está entre los
+        # productos: el turno lo antepone a la respuesta para que el cliente sepa que le
+        # estamos ofreciendo otra presentación.
+        self.aviso_forma = ""
         # Si se llamó ver_carrito este turno, aquí queda el texto determinista del
         # resumen (cada producto con cantidad y subtotal en USD y Bs, y el total).
         # turn.py lo usa para reemplazar lo que haya generado el LLM, garantizando
@@ -1924,6 +2128,7 @@ class ToolRuntime:
         # ('calox' era un laboratorio) se arrastra al siguiente medicamento de la misma
         # receta y lo saltaría en silencio.
         self.es_laboratorio = False
+        self.aviso_forma = ""
         if not nombre:
             return {"ok": False, "error": "nombre_vacio", "detalle": "indica qué medicamento buscas"}
         # Guarda anti-saludo: si el LLM llamó buscar_medicamento con un término
@@ -2480,6 +2685,15 @@ class ToolRuntime:
                 ),
                 "busqueda": nombre,
             }
+        # ACOTAR A LA FORMA QUE PIDIÓ (suspensión, tabletas, gotas, crema…). Va aquí, en
+        # el punto único de la búsqueda, para que TODOS los caminos lo hereden: el LLM
+        # cuando redacta la lista y los backstops cuando la sustituyen.
+        products, self.aviso_forma = _aplicar_forma(products, nombre)
+        if self.aviso_forma:
+            logger.info(
+                "buscar_medicamento: '%s' — %d productos tras acotar a la forma · %s",
+                nombre, len(products), self.aviso_forma,
+            )
         # Recordar el primer producto (para el backstop de carrito).
         self.last_product = products[0]
         # Lista completa de productos consultados (para el backstop de
@@ -2501,11 +2715,21 @@ class ToolRuntime:
         # cancela: ahora SÍ hay productos que ofrecer.
         self._cancelar_handoff_por_no_disponible()
         await self._log_med_query(nombre, products, added_to_cart=False)
+        instrucciones = self._formatear_instrucciones_busqueda(products, nombre)
+        if self.aviso_forma:
+            # El LLM tiene que DECIRLO: si no, el cliente ve una lista bajo el nombre de
+            # la presentación que pidió, que es el fallo que se está corrigiendo.
+            instrucciones = (
+                "EMPIEZA tu respuesta EXACTAMENTE con esta línea, tal cual: "
+                + self.aviso_forma
+                + "\nDespués, la lista de lo que sí hay.\n\n"
+                + instrucciones
+            )
         return {
             "ok": True,
             "products": products,
             "provider": data.get("provider"),
-            "instrucciones": self._formatear_instrucciones_busqueda(products, nombre),
+            "instrucciones": instrucciones,
         }
 
     async def _buscar_por_principio_activo(self, nombre: str) -> list[dict[str, Any]]:
