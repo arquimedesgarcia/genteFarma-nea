@@ -5438,8 +5438,8 @@ def _lista_con_aviso(
         if ausente
         else ""
     )
-    avisos_lista = _avisos_de_lista(productos, resto or term)
-    cuerpo = _formatear_lista_productos(productos, resto or term)
+    avisos_lista, titulo_lista = _avisos_de_lista(productos, resto or term)
+    cuerpo = _formatear_lista_productos(productos, titulo_lista)
     if ausente:
         cuerpo = _aviso_no_lo_tengo(term, ausente) + "\n\n" + cuerpo
     if avisos_lista:
@@ -5447,8 +5447,29 @@ def _lista_con_aviso(
     return cuerpo + cierre
 
 
-def _avisos_de_lista(productos: list[dict[str, Any]], term: str) -> str:
-    """Avisos que van ENCIMA de una lista: concentración y envase pedidos que no están.
+def _titulo_sin_dosis(termino: str, dosis: str) -> str:
+    """Quita del TÍTULO la concentración que el catálogo no tiene.
+
+    Sin esto el mensaje se contradice: avisa de que no hay 600 mg y el encabezado de la
+    lista sigue diciendo 'ACETAMINOFEN 600 MG' sobre productos de 500 y 650.
+    """
+    m = re.match(r"(\d+(?:[.,]\d+)?)\s*([a-z]+)", (dosis or "").strip().lower())
+    if not m or not termino:
+        return termino
+    patron = re.compile(
+        rf"\b{re.escape(m.group(1))}\s*{re.escape(m.group(2))}\b", re.IGNORECASE
+    )
+    limpio = re.sub(r"\s{2,}", " ", patron.sub("", termino)).strip(" ,-")
+    return limpio or termino
+
+
+def _avisos_de_lista(productos: list[dict[str, Any]], term: str) -> tuple[str, str]:
+    """Avisos que van ENCIMA de una lista y el término que debe usar el TÍTULO.
+
+    Devuelve `(avisos, termino_del_titulo)`. Los avisos son los que pueden aplicar:
+    concentración pedida que no está (`_aviso_dosis_agotada`) y envase pedido que no está
+    (`_aviso_envase_agotado`). Cuando la concentración falta, el título pierde esa
+    concentración: si no, el mensaje avisa del NO y a la vez encabeza con lo que pidió.
 
     POR QUÉ AQUÍ: `_lista_con_aviso` es el punto único de los seis backstops que
     reemplazan el texto del LLM por la lista real. Si el aviso se añade en el camino de la
@@ -5459,15 +5480,21 @@ def _avisos_de_lista(productos: list[dict[str, Any]], term: str) -> str:
     mg bajo el título "ACETAMINOFEN 600 MG", sin decir que el de 600 no existe.
     """
     if not productos or not term:
-        return ""
+        return "", term
     partes: list[str] = []
+    titulo = term
     dosis = _extraer_dosis(term)
     if dosis:
-        partes.append(_aviso_dosis_agotada(productos, dosis))
+        aviso = _aviso_dosis_agotada(productos, dosis)
+        if aviso:
+            partes.append(aviso)
+            titulo = _titulo_sin_dosis(term, dosis)
     envase = _envase_pedido_en_linea(term)
     if envase:
-        partes.append(_aviso_envase_agotado(productos, envase))
-    return " ".join(p for p in partes if p)
+        aviso = _aviso_envase_agotado(productos, envase)
+        if aviso:
+            partes.append(aviso)
+    return " ".join(p for p in partes if p), titulo
 
 
 # Concentración escrita en el título de un producto: '650 MG', '120MG/5ML', '1 G'.
