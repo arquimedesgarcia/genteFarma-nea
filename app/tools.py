@@ -1537,10 +1537,16 @@ def _aviso_forma(
 
 
 def _aplicar_forma(
-    productos: list[dict[str, Any]], termino: str
+    productos: list[dict[str, Any]],
+    termino: str,
+    forma: tuple[str | None, str | None] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """(productos acotados a la forma pedida, aviso si esa forma no está)."""
-    familia, etiqueta = _forma_pedida(termino)
+    """(productos acotados a la forma pedida, aviso si esa forma no está).
+
+    `forma` permite pasar la familia ya resuelta desde el mensaje del cliente, porque el
+    LLM suele buscar solo con el fármaco ('omeprazol' en vez de 'omeprazol en cápsulas').
+    """
+    familia, etiqueta = forma or _forma_pedida(termino)
     if not familia or not productos:
         return list(productos or []), ""
     filtrados = _filtrar_por_forma(productos, familia)
@@ -2688,7 +2694,9 @@ class ToolRuntime:
         # ACOTAR A LA FORMA QUE PIDIÓ (suspensión, tabletas, gotas, crema…). Va aquí, en
         # el punto único de la búsqueda, para que TODOS los caminos lo hereden: el LLM
         # cuando redacta la lista y los backstops cuando la sustituyen.
-        products, self.aviso_forma = _aplicar_forma(products, nombre)
+        products, self.aviso_forma = _aplicar_forma(
+            products, nombre, self._forma_del_pedido(nombre)
+        )
         if self.aviso_forma:
             logger.info(
                 "buscar_medicamento: '%s' — %d productos tras acotar a la forma · %s",
@@ -2731,6 +2739,30 @@ class ToolRuntime:
             "provider": data.get("provider"),
             "instrucciones": instrucciones,
         }
+
+    def _forma_del_pedido(self, nombre: str) -> tuple[str | None, str | None]:
+        """La forma que pidió el cliente para ESTE medicamento.
+
+        Primero en el término y, si ahí no está (el LLM busca solo con el fármaco), en la
+        línea del mensaje del cliente donde aparece el medicamento. Se mira línea a línea
+        para no aplicar la forma de otro medicamento de una lista.
+        """
+        familia, etiqueta = _forma_pedida(nombre)
+        if familia:
+            return familia, etiqueta
+        texto = self.texto_cliente or ""
+        if not texto:
+            return None, None
+        clave = _normalizar_tildes((nombre or "").lower()).split()
+        if not clave:
+            return None, None
+        for linea in re.split(r"[\n;,]|\s+y\s+", texto):
+            if clave[0] not in _normalizar_tildes(linea.lower()):
+                continue
+            familia, etiqueta = _forma_pedida(linea)
+            if familia:
+                return familia, etiqueta
+        return None, None
 
     async def _buscar_por_principio_activo(self, nombre: str) -> list[dict[str, Any]]:
         """Si la marca no está en el catálogo, pide al LLM el PRINCIPIO ACTIVO

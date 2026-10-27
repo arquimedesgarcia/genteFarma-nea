@@ -527,6 +527,9 @@ async def run_turn(
     # --- LLM con tools ----------------------------------------------------
     # provider_id y farmacia ya se calcularon arriba (para el bloque de farmacia).
     runtime = ToolRuntime(ctx, conv, str(crm_conv_id), profile=profile, provider_id=provider_id)
+    # El mensaje del cliente, para que las tools puedan leer de ahí lo que el LLM quitó del
+    # término de búsqueda (la FORMA: 'omeprazol en cápsulas' → término 'omeprazol').
+    runtime.texto_cliente = user_text
     # Cargar el último producto consultado persistido en el turno anterior
     # (para el backstop de carrito cuando el cliente responde una cantidad).
     # Defensivo: asyncpg puede devolver JSONB como str si el codec no se aplicó.
