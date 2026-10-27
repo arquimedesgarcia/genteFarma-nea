@@ -1923,12 +1923,18 @@ async def _tool_loop(
                             or _dosis_sin_unidad(med)
                             or _extraer_dosis(med)
                         )
+                        aviso_dosis = ""
                         if dosis_pedida:
                             antes = len(prods)
+                            # El aviso se calcula ANTES de filtrar, sobre la lista completa:
+                            # necesita saber qué concentraciones HAY para poder decir
+                            # "lo tengo en". Es el hermano del aviso de envase.
+                            aviso_dosis = _aviso_dosis_agotada(prods, dosis_pedida)
                             prods = _filtrar_por_dosis(prods, dosis_pedida)
                             logger.info(
-                                "receta: '%s' dosis %s → %d de %d productos",
+                                "receta: '%s' dosis %s → %d de %d productos%s",
                                 med, dosis_pedida, len(prods), antes,
+                                f' · aviso: {aviso_dosis}' if aviso_dosis else "",
                             )
                         # FILTRAR POR EL ENVASE (cuántas tabletas trae la caja).
                         # El motor del catálogo ignora los números igual que ignoraba la
@@ -1979,8 +1985,13 @@ async def _tool_loop(
                         )
                         if prods:
                             grupos.append((titulo, prods))
-                            if aviso_envase:
-                                avisos[titulo.strip().upper()] = aviso_envase
+                            # Los dos avisos van juntos si los dos aplican: la
+                            # concentración pedida no está Y el envase tampoco.
+                            _avisos_titulo = " ".join(
+                                a for a in (aviso_dosis, aviso_envase) if a
+                            )
+                            if _avisos_titulo:
+                                avisos[titulo.strip().upper()] = _avisos_titulo
                             # ¿PIDIÓ ALGO QUE NO TENGO? El motor del catálogo se cae al OR
                             # cuando la búsqueda exacta no da nada, así que una marca que no
                             # existe desaparece en SILENCIO y el cliente recibe otras marcas
@@ -5431,6 +5442,99 @@ def _lista_con_aviso(
         + _formatear_lista_productos(productos, resto or term)
         + cierre
     )
+
+
+# Concentración escrita en el título de un producto: '650 MG', '120MG/5ML', '1 G'.
+# La unidad es de DOSIS o peso; nunca TAB/CAP, que son envase.
+_RE_CONCENTRACION_DE_NOMBRE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(mg|mcg|g|gr|ml|cc|ui)\b"
+    r"(?:\s*/\s*(\d+(?:[.,]\d+)?)\s*(ml|cc|g|gr)\b)?",
+    re.IGNORECASE,
+)
+
+
+def _concentracion_de_nombre(nombre: object) -> str:
+    """La concentración de un título de producto: 'ACETAMINOFEN 120MG/5ML X 120ML' → '120 mg/5 ml'.
+
+    Se salta los números de ENVASE: los que van tras la 'x' ('X 10 TAB', 'X 120ML') no
+    son concentración. Conserva la forma con volumen cuando la hay, porque '120 mg/5 ml'
+    de un jarabe no se puede comparar con '500 mg' de una tableta.
+    """
+    texto = str(nombre or "")
+    for m in _RE_CONCENTRACION_DE_NOMBRE.finditer(texto):
+        previo = texto[max(0, m.start() - 3): m.start()].strip().lower()
+        if previo.endswith("x"):
+            continue
+        num = m.group(1).replace(",", ".")
+        unidad = m.group(2).lower()
+        base = f"{num} {unidad}"
+        if m.group(3):
+            base += f"/{m.group(3).replace(',', '.')} {m.group(4).lower()}"
+        return base
+    return ""
+
+
+def _aviso_dosis_agotada(products: list[dict[str, Any]], dosis: str) -> str:
+    """Aviso cuando el cliente pidió una CONCENTRACIÓN que el catálogo no tiene.
+
+    POR QUÉ HACE FALTA: `_filtrar_por_dosis` tiene el mismo fallback que el de envase —
+    si nada coincide, devuelve la lista completa para no negar el medicamento. Pero sin
+    este aviso el cliente pide 'Acetaminofen de 600 mg' y recibe una lista de 650 y 500 mg
+    bajo el título 'ACETAMINOFEN 600MG': cree que le están ofreciendo lo que pidió. Es el
+    fallo de «re-listar sin decir el NO», el mismo que ya se arregló para el envase.
+
+    Caso real (conv 7, provider 05, 2026-10-27):
+        "Acetaminofen de 600mg" → 11 productos de 650, 500, 120, 150 y 180 mg, sin aviso.
+
+    Devuelve '' si la concentración pedida SÍ está, o si no se puede leer ninguna del
+    catálogo (en ese caso no hay nada cierto que prometer).
+    """
+    if not dosis or not products:
+        return ""
+    objetivo = dosis.replace(",", ".").strip()
+    m = re.match(r"(\d+(?:\.\d+)?)", objetivo)
+    if not m:
+        return ""
+    num = m.group(1)
+    solidos: list[str] = []
+    liquidos: list[str] = []
+    for p in products:
+        titulo = str(p.get("producto") or p.get("nombre") or p.get("title") or "")
+        conc = _concentracion_de_nombre(titulo)
+        if not conc:
+            continue
+        es_liquido = "/" in conc or re.search(
+            r"\b(?:jbe|jarabe|susp|suspension|suspensión|gotas|gts|solucion|solución)\b",
+            titulo,
+            re.IGNORECASE,
+        )
+        destino = liquidos if es_liquido else solidos
+        if conc not in destino:
+            destino.append(conc)
+    if not solidos and not liquidos:
+        return ""
+    vistos = {c.split()[0].replace(",", ".") for c in solidos + liquidos}
+    if num in vistos:
+        return ""
+
+    def orden(lista: list[str]) -> list[str]:
+        try:
+            return sorted(lista, key=lambda c: float(c.split()[0].replace(",", ".")))
+        except (ValueError, IndexError):
+            return lista
+
+    solidos, liquidos = orden(solidos), orden(liquidos)
+    # La pedida se muestra con unidad si el cliente la escribió; si no, con la unidad de
+    # la primera alternativa disponible (es la familia del mismo fármaco).
+    referencia = (solidos or liquidos)[0]
+    pedida = objetivo if re.search(r"[a-z]", objetivo) else f"{num} {referencia.split()[1]}"
+    if solidos and liquidos:
+        detalle = (
+            f"{', '.join(solidos)}. También en jarabe/gotas: {', '.join(liquidos)}"
+        )
+    else:
+        detalle = ", ".join(solidos or liquidos)
+    return f"⚠️ No tengo de {pedida}. Lo tengo en: {detalle}."
 
 
 def _aviso_envase_agotado(products: list[dict[str, Any]], envase: str) -> str:
