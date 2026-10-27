@@ -5277,15 +5277,41 @@ def _lista_con_aviso(
     El título pasa sin el token ausente, para no prometer lo que la lista no trae.
     """
     ausente = _nucleo_ausente(term, productos)
-    if not ausente:
-        return _formatear_lista_productos(productos, term) + cierre
-    resto = " ".join(w for w in term.split() if w.lower() != ausente.lower()).strip()
-    return (
-        _aviso_no_lo_tengo(term, ausente)
-        + "\n\n"
-        + _formatear_lista_productos(productos, resto or term)
-        + cierre
+    resto = (
+        " ".join(w for w in term.split() if w.lower() != ausente.lower()).strip()
+        if ausente
+        else ""
     )
+    avisos_lista = _avisos_de_lista(productos, resto or term)
+    cuerpo = _formatear_lista_productos(productos, resto or term)
+    if ausente:
+        cuerpo = _aviso_no_lo_tengo(term, ausente) + "\n\n" + cuerpo
+    if avisos_lista:
+        cuerpo = avisos_lista + "\n\n" + cuerpo
+    return cuerpo + cierre
+
+
+def _avisos_de_lista(productos: list[dict[str, Any]], term: str) -> str:
+    """Avisos que van ENCIMA de una lista: concentración y envase pedidos que no están.
+
+    POR QUÉ AQUÍ: `_lista_con_aviso` es el punto único de los seis backstops que
+    reemplazan el texto del LLM por la lista real. Si el aviso se añade en el camino de la
+    receta pero no aquí, el mismo mensaje se responde distinto según qué backstop salte.
+
+    Caso real (conv 7, provider 05, 2026-10-27): "Acetaminofen de 600mg" no está en el
+    catálogo, y la respuesta salió por el backstop de omisión con 11 productos de 650/500
+    mg bajo el título "ACETAMINOFEN 600 MG", sin decir que el de 600 no existe.
+    """
+    if not productos or not term:
+        return ""
+    partes: list[str] = []
+    dosis = _extraer_dosis(term)
+    if dosis:
+        partes.append(_aviso_dosis_agotada(productos, dosis))
+    envase = _envase_pedido_en_linea(term)
+    if envase:
+        partes.append(_aviso_envase_agotado(productos, envase))
+    return " ".join(p for p in partes if p)
 
 
 # Concentración escrita en el título de un producto: '650 MG', '120MG/5ML', '1 G'.
