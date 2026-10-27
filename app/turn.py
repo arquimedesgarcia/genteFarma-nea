@@ -36,9 +36,11 @@ from app.tools import (
     ToolRuntime,
     active_tool_schemas,
     _dosis_sin_unidad,
+    _aviso_forma,
     _es_nombre_de_laboratorio,
     _es_solo_saludo,
     _extraer_dosis,
+    _forma_pedida,
     _formatear_lista_productos,
     _fmt_ve,
     _limpiar_termino_medicamento,
@@ -49,6 +51,7 @@ from app.tools import (
     _VIAS_ADMINISTRACION,
     _sin_frase_de_indicacion,
     _termino_es_medicamento_plausible,
+    _termino_sin_forma,
     _titulo_normalizado,
     _tokens_de_titulo,
     _PALABRAS_FUNCIONALES,
@@ -731,6 +734,15 @@ async def run_turn(
             runtime.last_products_term or runtime.last_term or "",
             "\n\n" + MENSAJE_SUGERIDO_CARRITO,
         )
+
+    # AVISO DE FORMA: si el cliente pidió una presentación (suspensión, gotas, tabletas) y
+    # la que hay es otra, la respuesta tiene que DECIRLO aunque el LLM redacte su propia
+    # versión. Los productos llegan ya acotados por la tool; este aviso es lo que impide que
+    # la lista se lea como "esto es lo que pediste".
+    _aviso_forma_rt = getattr(runtime, "aviso_forma", "") or ""
+    if farmacia and final_text and _aviso_forma_rt and _aviso_forma_rt not in final_text:
+        logger.info("backstop forma: antepongo el aviso — %s", _aviso_forma_rt)
+        final_text = _aviso_forma_rt + "\n\n" + final_text
 
     # Backstop de bloque de carrito: SIEMPRE que se consultaron productos
     # (last_products) y el texto final es una lista de presentaciones (no un
@@ -1840,10 +1852,14 @@ async def _tool_loop(
                         # la respuesta y el cliente no sabría qué producto se le está
                         # ofreciendo. El encabezado identifica el grupo; debe ser el nombre
                         # con el que el producto existe.
-                        titulo = (
-                            runtime.corregido_a.upper() if runtime.corregido_a
-                            else med.upper()
-                        )
+                        # LA FORMA PEDIDA, EN EL TÍTULO. Si el cliente pidió "apiret en
+                        # suspensión" y no hay suspensión, el aviso lo dice y el encabezado
+                        # no puede seguir prometiéndola (misma regla que con la dosis).
+                        aviso_forma_receta = getattr(runtime, "aviso_forma", "") or ""
+                        _base_titulo = runtime.corregido_a or med
+                        if aviso_forma_receta:
+                            _base_titulo = _termino_sin_forma(_base_titulo)
+                        titulo = _base_titulo.upper()
                         # EL TÍTULO NO LLEVA NI LA PALABRA DE LA CAJA NI EL LABORATORIO.
                         # Caso real (conv 7, provider 05, 2026-10-27): la foto de
                         # 'Fexofenadina Clorhidrato CALOX' se leyó como
@@ -1860,7 +1876,9 @@ async def _tool_loop(
                             # Los dos avisos van juntos si los dos aplican: la
                             # concentración pedida no está Y el envase tampoco.
                             _avisos_titulo = " ".join(
-                                a for a in (aviso_dosis, aviso_envase) if a
+                                a for a in (
+                                    aviso_forma_receta, aviso_dosis, aviso_envase
+                                ) if a
                             )
                             if _avisos_titulo:
                                 avisos[titulo.strip().upper()] = _avisos_titulo
@@ -5311,6 +5329,16 @@ def _lista_con_aviso(
         else ""
     )
     avisos_lista, titulo_lista = _avisos_de_lista(productos, resto or term)
+    # La FORMA pedida (suspensión, tabletas, gotas…) también se avisa aquí: es el punto
+    # único de los seis backstops. Los productos llegan ya acotados por la tool.
+    _fam_f, _etq_f = _forma_pedida(resto or term)
+    aviso_forma_lista = _aviso_forma(productos, resto or term, _etq_f) if _fam_f else ""
+    if aviso_forma_lista:
+        avisos_lista = " ".join(
+            a for a in (aviso_forma_lista, avisos_lista) if a
+        )
+        if _etq_f and _etq_f in titulo_lista.lower():
+            titulo_lista = _termino_sin_forma(titulo_lista)
     cuerpo = _formatear_lista_productos(productos, titulo_lista)
     if ausente:
         cuerpo = _aviso_no_lo_tengo(term, ausente) + "\n\n" + cuerpo
