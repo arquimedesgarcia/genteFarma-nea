@@ -3486,7 +3486,27 @@ def _cantidad_pedida(texto: str) -> int:
 
 
 # El "X N" del título del producto: 'BRASARTAN CTDN 80MG/12.5X10 FARMA' → '10'.
+#
+# La 'x' tiene que ser un token SUELTO. Antes la regex no miraba lo que había a su
+# izquierda, así que la 'x' final del nombre del fármaco se tomaba como separador y
+# la DOSIS pasaba a ser tamaño de envase: en
+#     "evigax 125 mg, ... milax 120 gr"
+# `_envase_de_nombre('evigax 125 mg')` devolvía '125' y 'milax 120 gr' devolvía '120',
+# y el cliente leía
+#     ⚠️ No tengo envase de 125 unidades. Lo tengo en: 10 unidades, 20 unidades.
+# sobre un medicamento de 125 mg. Caso real (conv 7, provider 05).
 _RE_X_ENVASE = re.compile(r"x\s*0*(\d{1,3})\b")
+
+# Unidades que, justo ANTES de la 'x', indican forma compacta de envase:
+# 'DOL PLUS TAB 650MGX10' → 10 cajas. Sin esto, la 'x' pegada a una letra siempre
+# se descartaría y se perderían los envases escritos sin espacio.
+_RE_UNIDAD_ANTES_DE_X = re.compile(r"(?:mg|mgs|gr|grs|g|kg|ml|cc|mcg|ug|ui)$")
+
+# Unidades que convierten el número en DOSIS o peso, nunca en envase:
+# 'MILAX POLVO X 360 GRAMOS' o 'EVIGAX X 120 GR' no piden 360 ni 120 cajas.
+_RE_UNIDAD_DOSIS_TRAS_NUM = re.compile(
+    r"^\s*(?:mg|mgs|gr|grs|g|kg|ml|cc|mcg|ug|ui|gramos?|mililitros?|miligramos?)\b"
+)
 
 
 def _pedido_de_envase(texto: str) -> str:
@@ -3515,9 +3535,26 @@ def _pedido_de_envase(texto: str) -> str:
 
 
 def _envase_de_nombre(nombre: object) -> str:
-    """El tamaño de envase del título de un producto: '... X 30 CAP' → '30'."""
-    m = _RE_X_ENVASE.search(str(nombre or "").lower())
-    return (m.group(1).lstrip("0") or m.group(1)) if m else ""
+    """El tamaño de envase del título de un producto: '... X 30 CAP' → '30'.
+
+    Dos trampas, las dos medidas en el caso conv 7 (provider 05):
+
+    - La 'x' puede ser la ÚLTIMA LETRA del nombre, no un separador: en
+      'evigax 125 mg' y 'milax 120 gr' la dosis (125, 120) se leía como envase y el
+      cliente recibía "No tengo envase de 125 unidades". Se descarta la 'x' que va
+      pegada a una letra, salvo forma compacta tras una unidad ('650MGX10' → 10).
+    - Si el número lleva unidad de peso/volumen no es un envase: 'MILAX POLVO X 360
+      GRAMOS' son gramos, no 360 cajas.
+    """
+    texto = str(nombre or "").lower()
+    for m in _RE_X_ENVASE.finditer(texto):
+        antes = texto[: m.start()]
+        if antes and antes[-1].isalpha() and not _RE_UNIDAD_ANTES_DE_X.search(antes):
+            continue
+        if _RE_UNIDAD_DOSIS_TRAS_NUM.match(texto[m.end():]):
+            continue
+        return m.group(1).lstrip("0") or m.group(1)
+    return ""
 
 
 def _termino_sin_envase(termino: str, env: str) -> str:
