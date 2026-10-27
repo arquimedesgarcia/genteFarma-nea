@@ -41,6 +41,7 @@ from app.tools import (
     _es_nombre_de_laboratorio,
     _es_solo_saludo,
     _extraer_dosis,
+    _filtrar_por_forma,
     _forma_pedida,
     _formatear_lista_productos,
     _fmt_ve,
@@ -5488,12 +5489,21 @@ def _lista_con_aviso(
     # La FORMA pedida (suspensión, tabletas, gotas…) también se avisa aquí: es el punto
     # único de los seis backstops. Los productos llegan ya acotados por la tool.
     _fam_f, _etq_f = _forma_pedida(resto or term)
+    # Se acota TAMBIÉN aquí (no solo avisar): la tool ya devuelve los productos filtrados,
+    # así que esto es idempotente — pero deja el punto único de los backstops correcto por
+    # sí mismo, sin depender de que quien llama lo haya hecho antes.
+    if _fam_f and productos:
+        productos = _filtrar_por_forma(productos, _fam_f)
     aviso_forma_lista = _aviso_forma(productos, resto or term, _etq_f) if _fam_f else ""
     if aviso_forma_lista:
         avisos_lista = " ".join(
             a for a in (aviso_forma_lista, avisos_lista) if a
         )
-        if _etq_f and _etq_f in titulo_lista.lower():
+        # El encabezado pierde la forma que se acaba de negar. La comparación va sin
+        # tildes: el término y el título del cliente no tienen por qué coincidir en
+        # acentos ('APIRET SUSPENSION' vs etiqueta 'suspensión').
+        _etq_norm = _normalizar_tildes((_etq_f or "").lower())
+        if _etq_norm and _etq_norm in _normalizar_tildes((titulo_lista or "").lower()):
             titulo_lista = _termino_sin_forma(titulo_lista)
     cuerpo = _formatear_lista_productos(productos, titulo_lista)
     if ausente:
