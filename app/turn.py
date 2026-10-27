@@ -2351,6 +2351,19 @@ _FILLER = {
     # tampoco es un medicamento. MEDIDO: 'costo' → 0; 'porf' → 2 (ambos por el "POR").
     "porf", "porfa", "porfavor", "porfis", "favorcito",
     "costo", "costos", "costar", "costaria", "costarían", "costaban",
+    # ENVASE NO ES EL MEDICAMENTO. "quiero una caja de eszoz" se convertía en el
+    # término 'caja eszoz' y el cliente leía
+    #     ⚠️ No disponibles en el catálogo: CAJA ESZOZ
+    # — el envase presentado como si fuera el nombre del fármaco. Caso real (conv 7,
+    # provider 05): "quiero una caja de eszoz, leprit, bumetin, evigax 125 mg, milax
+    # 120 gr, bargonil 10 gr". `_PALABRAS_FUNCIONALES` de tools.py YA tenía 'caja' y
+    # 'cajas'; esta lista es su gemela y no las tenía, así que el camino de
+    # `_extraer_termino_medicamento` (que mira ESTA) las dejaba pasar.
+    # Ojo: la cantidad y el envase se siguen leyendo del texto CRUDO en
+    # `_pedido_de_envase` (que no usa `_FILLER`), así que quitarlas aquí no pierde
+    # ni "3 cajas" ni el filtro de envase.
+    "caja", "cajas", "cajita", "cajitas", "blister", "blisters",
+    "frasco", "frascos", "pomo", "pomos", "paquete", "paquetes",
     "me", "le", "la", "de", "el", "los", "las", "para", "que", "con",
     "una", "un", "en", "y", "o", "a", "si", "no", "como", "cuanto", "es",
     "son", "tiene", "tienen", "hay", "está", "estan", "disponible",
