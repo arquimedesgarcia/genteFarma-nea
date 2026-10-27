@@ -1391,7 +1391,10 @@ _FORMA_CANONICA: dict[str, str] = {
 _FAMILIA_DE_FORMA: dict[str, str] = {
     "suspensión": "liquida", "jarabe": "liquida", "solución oral": "liquida",
     "gotas": "liquida", "elixir": "liquida", "emulsión": "liquida", "líquido": "liquida",
-    "tabletas": "solida", "cápsulas": "solida",
+    # TABLETAS y CÁPSULAS son familias DISTINTAS: quien pide cápsulas no quiere que le
+    # ofrezcan la tableta del mismo fármaco (medido con 'omeprazol en capsulas' → la tableta
+    # salía la primera). Si no hay cápsulas, el fallback ofrece la lista completa CON aviso.
+    "tabletas": "tabletas", "cápsulas": "capsulas",
     "polvo": "polvo",
     "crema": "topica", "ungüento": "topica", "gel": "topica", "loción": "topica",
     "inyectable": "inyectable",
