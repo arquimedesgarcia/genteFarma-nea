@@ -36,6 +36,7 @@ from app.tools import (
     ToolRuntime,
     active_tool_schemas,
     _dosis_sin_unidad,
+    _es_nombre_de_laboratorio,
     _es_solo_saludo,
     _extraer_dosis,
     _formatear_lista_productos,
@@ -1841,6 +1842,17 @@ async def _tool_loop(
                             runtime.corregido_a.upper() if runtime.corregido_a
                             else med.upper()
                         )
+                        # EL TÍTULO NO LLEVA NI LA PALABRA DE LA CAJA NI EL LABORATORIO.
+                        # Caso real (conv 7, provider 05, 2026-10-27): la foto de
+                        # 'Fexofenadina Clorhidrato CALOX' se leyó como
+                        # 'Medicamento Fexofenadina Clorhidrato Calox' y el encabezado de la
+                        # lista salió así, con 'MEDICAMENTO' delante y la marca detrás.
+                        # 'Medicamento Genérico' es texto de la caja, y CALOX es el
+                        # laboratorio: se comprueba contra los productos devueltos, que son
+                        # los que confirman que ese token cierra los títulos (ver
+                        # `_es_nombre_de_laboratorio`). Nunca se quita el fármaco.
+                        if prods:
+                            titulo = _titulo_de_lista(titulo, prods)
                         if prods:
                             grupos.append((titulo, prods))
                             # Los dos avisos van juntos si los dos aplican: la
@@ -5383,6 +5395,44 @@ def _concentracion_de_nombre(nombre: object) -> str:
             base += f"/{m.group(3).replace(',', '.')} {m.group(4).lower()}"
         return base
     return ""
+
+
+# Palabras que la CAJA imprime pero que no son el nombre del medicamento.
+# 'Medicamento Genérico' ocupa una línea entera de la caja y el OCR la devuelve pegada al
+# nombre ('Medicamento Fexofenadina Clorhidrato Calox'). Caso real 2026-10-27.
+_PALABRAS_DE_CAJA = {
+    "medicamento", "medicamentos", "generico", "genericos", "generica", "genericas",
+    "medicamento generico", "medicamento genericos",
+}
+
+
+def _titulo_de_lista(titulo: str, productos: list[dict[str, Any]]) -> str:
+    """Encabezado de la lista sin el texto de la caja ni el laboratorio.
+
+    Caso real (conv 7, provider 05, 2026-10-27): la foto de una caja de
+    `Fexofenadina Clorhidrato CALOX` se leyó como `Medicamento Fexofenadina Clorhidrato
+    Calox`, y el encabezado salió tal cual: 'MEDICAMENTO' delante ('Medicamento Genérico'
+    es texto de la caja) y la marca detrás.
+
+    El laboratorio NO se detecta por una lista de marcas: se confirma contra los productos
+    devueltos con `_es_nombre_de_laboratorio`, que exige que ese token CIERRE la mayoría de
+    los títulos. Así 'CALOX' se quita y 'FEXOFENADINA' nunca se toca, porque el fármaco abre
+    el título, no lo cierra. Nunca se deja el título vacío ni con una sola palabra.
+    """
+    palabras = [w for w in re.split(r"\s+", (titulo or "").strip()) if w]
+    if not palabras:
+        return titulo
+    limpio = [
+        w for w in palabras
+        if _normalizar_tildes(w.lower()).strip(" -.,;:()[]") not in _PALABRAS_DE_CAJA
+    ]
+    if not limpio:
+        return titulo
+    if len(limpio) > 2:
+        ultimo = _normalizar_tildes(limpio[-1].lower()).strip(" -.,;:()[]")
+        if ultimo and _es_nombre_de_laboratorio(ultimo, productos):
+            limpio = limpio[:-1]
+    return " ".join(limpio).strip() or titulo
 
 
 def _aviso_dosis_agotada(products: list[dict[str, Any]], dosis: str) -> str:
