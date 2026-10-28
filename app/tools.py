@@ -2458,9 +2458,26 @@ class ToolRuntime:
                 "buscar_medicamento: '%s' es un LABORATORIO (no un medicamento) — "
                 "descarto los %d productos de esa marca", nombre, len(products),
             )
-            products = []
-            self.med_not_found = True
             self.es_laboratorio = True
+            # `med_not_found` NO se marca: no es un "no disponible" (el cliente no nombró
+            # ningún fármaco) y marcarlo dispara el handoff determinista.
+            self.med_not_found = False
+            self.last_products = []
+            self.last_options = []
+            # RETURN INMEDIATO: sin esto, la cascada de "sin resultados" que viene después
+            # intenta variantes por typo y RESUCITA el catálogo de la marca. Medido:
+            #   'calox' es un LABORATORIO — descarto los 20 productos de esa marca
+            #   'calox' sin resultados — encontrado con la variante 'salox' (20 productos)
+            return {
+                "ok": False,
+                "error": "solo_laboratorio",
+                "detalle": (
+                    "Ese término es el LABORATORIO que aparece en la caja, no el medicamento: "
+                    "esa marca fabrica decenas de fármacos distintos. NO busques en el catálogo "
+                    "y NO muestres productos de esa marca. Pide al cliente el NOMBRE del "
+                    "medicamento que va antes de la marca."
+                ),
+            }
 
         # EL FÁRMACO QUE EL CLIENTE NOMBRÓ NO ESTÁ EN LA LISTA (pero la lista NO está
         # vacía, así que ninguno de los caminos de abajo se activaría).
