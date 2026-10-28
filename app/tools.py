@@ -2544,7 +2544,13 @@ class ToolRuntime:
                     # TOPTEAR), pero 'sensodyne'→'sensitive' puntúa 0.78 y lo único que
                     # consigue es tapar el aviso de que SENSODYNE no está, cambiándolo por
                     # una pasta de otra marca. Se exige variante de escritura.
-                    if nucle_buscar == nucleo or ratio_t >= _UMBRAL_NUCLEO_MISMO_FARMACO:
+                    # SOLO CUANDO EL NÚCLEO ERA UN TYPO. Si la palabra ausente EXISTE tal
+                    # cual en el catálogo, buscar solo por ella no corrige nada: CAMBIA DE
+                    # TEMA. Caso real (provider 32, 2026-10-27): "tiras reactivas para el
+                    # glucómetro" → 3 tiras encontradas, el núcleo 'glucometro' no estaba en
+                    # ellas, y el agente buscaba SOLO por 'glucometro' → el cliente preguntó
+                    # por tiras y recibió glucómetros.
+                    if nucle_buscar != nucleo and ratio_t >= _UMBRAL_NUCLEO_MISMO_FARMACO:
                         data_n = await self._ctx.crm.get_products(
                             self._provider_id, q=nucle_buscar, limit=20
                         )
