@@ -1403,7 +1403,16 @@ _FORMA_CANONICA: dict[str, str] = {
     "ampolla": "inyectable", "ampollas": "inyectable", "inyectable": "inyectable",
     "vial": "inyectable",
     "ovulo": "óvulos", "óvulo": "óvulos", "ovulos": "óvulos", "óvulos": "óvulos",
+    # Abreviaturas que el catálogo pega al número de envase: 'METRONIDAZOL 500MG X 10OVU'
+    # son ÓVULOS (reportado en provider 32, 2026-10-28: el agente negó los óvulos que sí
+    # existían). Igual con SUP (supositorios), AMP (ampolla), SOB (sobre), CRM (crema).
+    "ovu": "óvulos", "ovul": "óvulos", "ovus": "óvulos",
     "supositorio": "supositorios", "supositorios": "supositorios",
+    "sup": "supositorios", "supo": "supositorios",
+    "amp": "inyectable", "amps": "inyectable",
+    "sob": "polvo", "sobs": "polvo",
+    "crm": "crema", "pom": "crema", "loc": "loción",
+    "oft": "gotas oftálmicas",
     "spray": "spray", "aerosol": "spray",
     "colirio": "gotas oftálmicas", "colirios": "gotas oftálmicas",
 }
@@ -1491,8 +1500,13 @@ def _etiqueta_de_forma(titulo: str) -> str | None:
         (r"\b(crema|cremas)\b", "crema"),
         (r"\b(unguento|pomada)\b", "ungüento"),
         (r"\bgel\b", "gel"),
-        (r"\b(ampolla|ampollas|inyectable|vial)\b", "inyectable"),
-        (r"\b(supositorio|supositorios|ovulo|ovulos)\b", "supositorios"),
+        (r"\b(ampolla|ampollas|inyectable|vial)\b|(?:^|[^a-z])amp[s]?\b", "inyectable"),
+        # ÓVULOS ≠ SUPOSITORIOS: antes los dos devolvían "supositorios" y la etiqueta
+        # mentía. Sin `\b` a la izquierda porque la abreviatura va pegada al envase
+        # ('X 10OVU', 'X 10OVULOS'); se exige que no la preceda una LETRA.
+        (r"(?:^|[^a-z])(ovu|ovul|ovus|ovulo|ovulos)\b", "óvulos"),
+        (r"\b(supositorio|supositorios)\b|(?:^|[^a-z])sup[s]?\b", "supositorios"),
+        (r"(?:^|[^a-z])sob[s]?\b|\b(sobre|sobres)\b", "polvo"),
         (r"\b(spray|aerosol)\b", "spray"),
         (r"\b(elixir)\b", "elixir"),
     )
@@ -2843,6 +2857,25 @@ class ToolRuntime:
             products, nombre, self._forma_del_pedido(nombre)
         )
         if self.aviso_forma:
+            # La forma pedida no está con ese nombre, pero puede estar bajo una MARCA
+            # ('metronidazol óvulos' → OVUMET 500MG X 10OVU). Se suman esas
+            # presentaciones y el aviso dice de dónde salen.
+            por_marca = await self._marcas_en_la_forma(nombre, self._forma_del_pedido(nombre))
+            if por_marca:
+                familia_ped, etiqueta_ped = self._forma_del_pedido(nombre)
+                droga = _termino_sin_forma(nombre).upper()
+                nombres = ", ".join(
+                    _titulo_de_producto(p).split(" X ")[0][:38] for p in por_marca
+                )
+                products = list(products) + por_marca
+                self.aviso_forma = (
+                    f"⚠️ No tengo {droga} en {etiqueta_ped} con ese nombre. "
+                    f"En {etiqueta_ped} tengo: {nombres}."
+                )
+                logger.info(
+                    "buscar_medicamento: '%s' — %d presentación(es) de la forma pedida "
+                    "encontradas por marca", nombre, len(por_marca),
+                )
             logger.info(
                 "buscar_medicamento: '%s' — %d productos tras acotar a la forma · %s",
                 nombre, len(products), self.aviso_forma,
@@ -2908,6 +2941,105 @@ class ToolRuntime:
             if familia:
                 return familia, etiqueta
         return None, None
+
+    async def _marcas_comerciales_de(self, principio: str) -> list[str]:
+        """Marcas comerciales conocidas de un principio activo (para buscarlas en catálogo).
+
+        Devuelve [] si el modelo no sabe o falla: el silencio es preferible a inventar una
+        marca. Las marcas NO se ofrecen por sí solas — `_marcas_en_la_forma` exige que la
+        marca exista de verdad en el catálogo y en la forma pedida.
+        """
+        principio = (principio or "").strip().lower()
+        if len(principio) < 4:
+            return []
+        try:
+            reply = await self._ctx.llm.complete(
+                [
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Enumera hasta 5 MARCAS COMERCIALES de '{principio}' que se "
+                            "vendan en farmacias de Venezuela (por ejemplo, para "
+                            "'metronidazol' podría ser 'Ovumet'). Una por línea, SOLO el "
+                            "nombre de la marca, sin dosis, sin presentación y sin "
+                            "explicaciones. Si no conoces ninguna, responde exactamente "
+                            "'NINGUNA'."
+                        ),
+                    }
+                ],
+                tools=None,
+            )
+            crudo = (reply.content or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("marcas de '%s': el LLM falló (%s)", principio, exc)
+            return []
+        if not crudo or "ninguna" in crudo.lower()[:40]:
+            return []
+        marcas: list[str] = []
+        for linea in crudo.splitlines():
+            limpio = re.sub(r"^[\s\-*•\d.)]+", "", linea).strip(" \"'.,;:")
+            limpio = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ ]+", "", limpio).strip()
+            # Solo la marca: si la línea trae explicación ("Ovumet - óvulos de ..."), se
+            # queda la primera palabra significativa.
+            palabras = [w for w in limpio.split() if len(w) >= 4]
+            if not palabras:
+                continue
+            marca = palabras[0]
+            if marca.lower() in {"marca", "generico", "genérico", "ejemplo", "para", "como"}:
+                continue
+            if marca.lower() not in {m.lower() for m in marcas}:
+                marcas.append(marca)
+        logger.info("marcas comerciales de '%s': %s", principio, marcas[:5])
+        return marcas[:5]
+
+    async def _marcas_en_la_forma(
+        self, nombre: str, forma: tuple[str | None, str | None] | None
+    ) -> list[dict[str, Any]]:
+        """Productos de la MISMA forma pedida que son el fármaco bajo una marca comercial.
+
+        Se verifica en el catálogo: la marca tiene que aparecer en el título y el título
+        tiene que ser de la forma pedida (óvulos, crema…). Máximo 3, sin repetir.
+        """
+        if not self._provider_id:
+            return []
+        familia, _etiqueta = forma or (None, None)
+        if not familia:
+            return []
+        principio = _termino_sin_forma(nombre).strip().lower()
+        if not principio:
+            return []
+        marcas = await self._marcas_comerciales_de(principio)
+        if not marcas:
+            return []
+        dentro: list[dict[str, Any]] = []
+        vistos: set[str] = set()
+        for marca in marcas:
+            try:
+                data = await self._ctx.crm.get_products(
+                    self._provider_id, q=marca, limit=10
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("marca '%s': fallo consultando el catálogo (%s)", marca, exc)
+                continue
+            for p in data.get("products") or []:
+                titulo = _titulo_de_producto(p)
+                titulo_n = _normalizar_tildes(titulo.lower())
+                if _normalizar_tildes(marca.lower()) not in titulo_n:
+                    continue
+                if _FAMILIA_DE_FORMA.get(_etiqueta_de_forma(titulo) or "") != familia:
+                    continue
+                clave = str(p.get("id") or titulo)
+                if clave in vistos:
+                    continue
+                vistos.add(clave)
+                dentro.append(p)
+                logger.info(
+                    "marca del principio activo en la forma pedida: '%s' (%s) → %s",
+                    principio, familia, titulo[:50],
+                )
+            if len(dentro) >= 3:
+                break
+        return dentro[:3]
 
     async def _buscar_por_principio_activo(self, nombre: str) -> list[dict[str, Any]]:
         """Si la marca no está en el catálogo, pide al LLM el PRINCIPIO ACTIVO
