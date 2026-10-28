@@ -1408,13 +1408,25 @@ def _normalizar_forma(texto: str) -> str:
     return _normalizar_tildes((texto or "").lower())
 
 
+def _sin_crema_dental(texto: str) -> str:
+    """Quita 'crema dental' antes de buscar una FORMA.
+
+    'CREMA DENTAL' es el NOMBRE del producto (pasta de dientes), no la forma
+    farmacéutica: tratarla como crema tópica hacía que "crema dental sensodyne" se acotara a
+    cremas, avisara "No tengo DENTAL SENSODYNE en crema" y dejara el título en 'DENTAL'.
+    Caso real (provider 19, 2026-10-27).
+    """
+    t = _normalizar_forma(texto)
+    return re.sub(r"\bcremas?\s+dental(es)?\b|\bcremas?\s+dentifric[ao]s?\b", " ", t)
+
+
 def _forma_pedida(texto: str) -> tuple[str | None, str | None]:
     """(familia, etiqueta) de la forma que pide el cliente; (None, None) si no pide ninguna.
 
     'apiret en suspensión' → ('liquida', 'suspensión'). Se busca la palabra MÁS LARGA
     primero para que 'solución oral' gane a 'sol' y 'gotas oftálmicas' a 'gotas'.
     """
-    t = _normalizar_forma(texto)
+    t = _sin_crema_dental(texto)
     if not t:
         return None, None
     if re.search(r"\b(gotas|gtas|gts|colirio|colirios)\b", t) and re.search(
@@ -1433,6 +1445,11 @@ def _etiqueta_de_forma(titulo: str) -> str | None:
     t = _normalizar_forma(titulo)
     if not t:
         return None
+    if re.search(r"\bcremas?\s+dental(es)?\b", t) and not re.search(
+        r"\b(tab|tabs|tableta|tabletas|caps|capsula|capsulas|sobre|granulado)\b", t
+    ):
+        # Pasta de dientes: producto, no forma farmacéutica. Sin familia a propósito.
+        return "crema dental"
     if re.search(r"\b(gotas|gtas|gts)\b", t) and re.search(
         r"\b(oftalmic\w*|ocular\w*|colirio)\b", t
     ):
@@ -2146,6 +2163,30 @@ class ToolRuntime:
         # un error grave (el cliente saludó y le respondemos con 19 productos).
         # Se devuelve un resultado que le dice al LLM que responda con un
         # saludo, sin tocar el catálogo.
+        # ¿EL TÉRMINO ES UNA PREGUNTA DE PRECIO, NO UN MEDICAMENTO?
+        # Caso real (provider 19, 2026-10-27): "Buenas tardes tiene disponible crema dental
+        # sensodyne y que costo porf" → el LLM buscó 'costo porf' y el matcher difuso lo
+        # apoyó en 'POR': AMPICILINA "POR 1 AMPOLLA" y ANTILAX "POR 10 TABLETAS" aparecieron
+        # como si fueran lo que el cliente pidió. `_limpiar_termino_medicamento` ya sabe que
+        # 'costo' y 'porf' son palabras funcionales; si al limpiarlo no queda NADA, no hay
+        # medicamento que buscar. No se marca `med_not_found` (no es un "no disponible": el
+        # cliente no nombró ningún fármaco).
+        if not _limpiar_termino_medicamento(nombre).strip():
+            logger.info(
+                "buscar_medicamento: '%s' son solo palabras funcionales (precio/cortesía) — "
+                "no busco en catálogo",
+                nombre,
+            )
+            return {
+                "ok": False,
+                "error": "sin_medicamento",
+                "detalle": (
+                    "El mensaje no nombra ningún medicamento: es una pregunta de precio o "
+                    "cortesía. NO busques en el catálogo y NO inventes productos: si el "
+                    "cliente ya recibió una lista de opciones, responde con el precio de lo "
+                    "que acabas de listar."
+                ),
+            }
         if _es_solo_saludo(nombre):
             logger.info(
                 "buscar_medicamento: término '%s' es solo saludo — no busco en catálogo",
