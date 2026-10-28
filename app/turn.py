@@ -1203,6 +1203,44 @@ async def _tool_loop(
     # condicionado a esa bandera nunca dispararía. Es el mismo error que tuvo el paso de
     # entrega. Los pasos obligatorios se resuelven ANTES del modelo.
     if farmacia:
+        # ¿PREGUNTA SI EL EQUIPO VIENE CON LOS MATERIALES?
+        # El catálogo no guarda el contenido de la caja (ver `_EQUIPOS_CONSUMIBLES`), así
+        # que no se puede asegurar. Lo que sí se puede es ofrecer los insumos que se venden
+        # aparte — que es lo que haría un humano de mostrador, en vez de un "no tengo
+        # información" seco seguido de un handoff.
+        if (
+            _pregunta_por_contenido(user_text)
+            and farmacia
+            and (familia := _familia_de_equipo(
+                f"{runtime.last_term or ''} {runtime.last_product.get('producto') if isinstance(runtime.last_product, dict) else ''}"
+            ))
+            and not _trae_medicamento_propio(user_text, runtime.last_term or "")
+        ):
+            consumibles: list[dict[str, Any]] = []
+            for insumo in _EQUIPOS_CONSUMIBLES[familia]:
+                data_ins = await runtime.execute("buscar_medicamento", {"nombre": insumo})
+                consumibles.extend((data_ins or {}).get("products") or [])
+            # Dedupe por nombre y ordenar por precio, como el resto de listas.
+            vistos: set[str] = set()
+            limpios: list[dict[str, Any]] = []
+            for p in consumibles:
+                clave = str(p.get("producto") or p.get("nombre") or "").strip().upper()
+                if clave and clave not in vistos:
+                    vistos.add(clave)
+                    limpios.append(p)
+            producto_ctx = (
+                runtime.last_product.get("producto")
+                if isinstance(runtime.last_product, dict)
+                else ""
+            ) or runtime.last_term or "el aparato"
+            logger.info(
+                "guard contenido: pregunta por el contenido de '%s' (%s) — ofrezco %d insumo(s)",
+                producto_ctx, familia, len(limpios),
+            )
+            texto = _respuesta_contenido_equipo(str(producto_ctx), limpios)
+            await _send(ctx, runtime._conv.id, runtime._crm_conv_id, texto)
+            return None  # turno atendido: no dejar que el LLM reescriba
+
         env_pedido = _pedido_de_envase(user_text)
         # EL MENSAJE NO DEBE TRAER SU PROPIO MEDICAMENTO.
         #
@@ -5541,6 +5579,65 @@ def _cierra_siempre_los_titulos(token: str, productos: list[dict[str, Any]]) -> 
             if toks[-1] != token:
                 return False
     return apariciones >= 1
+
+
+# ── ¿EL EQUIPO VIENE CON LOS MATERIALES? ──────────────────────────────────────────
+# El catálogo no guarda el CONTENIDO de la caja: en `products-providers` el doc de un
+# glucómetro solo trae ProductTitle ("GLUCOMETRO GLM-78 X 1UND GLUCARE"), precio y stock.
+# Así que el agente no puede asegurar qué incluye — pero sí puede ofrecer los CONSUMIBLES
+# que vende por separado, que es lo que hace un humano de mostrador.
+#
+# Caso real (provider 32, 2026-10-27):
+#   "Digo q si el Glucómetro viene con todos los materiales o solo el aparato"
+_EQUIPOS_CONSUMIBLES: dict[str, tuple[str, ...]] = {
+    "glucometro": ("tiras reactivas", "lancetas"),
+    "glucometros": ("tiras reactivas", "lancetas"),
+}
+
+_RE_PREGUNTA_CONTENIDO = re.compile(
+    r"\b(viene\s+con|vienen\s+con|incluye|incluyen|trae|traen|contiene|contienen|"
+    r"completo|completa|kit|accesorios?|materiales?|aditamentos?|"
+    r"solo\s+el\s+aparato|sola\s+la\s+maquina|unicamente\s+el\s+aparato)\b",
+    re.IGNORECASE,
+)
+
+
+def _pregunta_por_contenido(texto: str) -> bool:
+    """¿El cliente pregunta qué INCLUYE el producto (caja/kit/accesorios)?"""
+    return bool(_RE_PREGUNTA_CONTENIDO.search(_normalizar_tildes((texto or "").lower())))
+
+
+def _familia_de_equipo(nombre: str) -> str | None:
+    """Familia de equipo del término/producto, si es un aparato con consumibles."""
+    n = _normalizar_tildes((nombre or "").lower())
+    for familia in _EQUIPOS_CONSUMIBLES:
+        if re.search(rf"\b{re.escape(familia)}\b", n):
+            return familia
+    return None
+
+
+def _respuesta_contenido_equipo(producto: str, consumibles: list[dict[str, Any]]) -> str:
+    """Respuesta humana a «¿el aparato viene con los materiales?».
+
+    Honesta en lo que el catálogo NO dice (el contenido de la caja) y ÚTIL en lo que sí
+    sabe (los insumos que se venden aparte). Un mostrador contesta exactamente así.
+    """
+    nombre = (producto or "el aparato").strip().upper()
+    partes = [
+        f"Te cuento: en el catálogo el {nombre} figura como una unidad y no detalla qué "
+        "trae la caja, así que no puedo confirmarte si viene con todos los materiales. "
+        "Si quieres, se lo consulto a la farmacia. 🙏"
+    ]
+    if consumibles:
+        partes.append("")
+        partes.append("Lo que sí tengo por separado:")
+        # Se reutiliza el formateador canónico y se descarta su encabezado: aquí ya lo
+        # pone la frase de arriba.
+        bloque = _formatear_lista_productos(consumibles, "_")
+        partes.append(bloque.split("\n", 1)[1] if "\n" in bloque else bloque)
+        partes.append("")
+        partes.append("¿Te los agrego al pedido?")
+    return "\n".join(partes)
 
 
 def _titulo_de_lista(titulo: str, productos: list[dict[str, Any]]) -> str:
