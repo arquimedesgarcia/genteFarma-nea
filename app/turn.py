@@ -1212,6 +1212,16 @@ async def _tool_loop(
             user_text, runtime.last_term, runtime.last_product
         )
         if farmacia and familia:
+            # El nombre del EQUIPO se toma ANTES de buscar: `buscar_medicamento` pisa
+            # `last_term`/`last_product` con el consumible, y la frase acababa diciendo
+            # "en el catálogo el LANCETAS … figura como una unidad".
+            producto_ctx = str(runtime.last_term or "").strip()
+            if not producto_ctx and isinstance(runtime.last_product, dict):
+                producto_ctx = str(
+                    runtime.last_product.get("producto")
+                    or runtime.last_product.get("nombre")
+                    or ""
+                ).strip()
             consumibles: list[dict[str, Any]] = []
             for insumo in _EQUIPOS_CONSUMIBLES[familia]:
                 data_ins = await runtime.execute("buscar_medicamento", {"nombre": insumo})
@@ -1224,11 +1234,7 @@ async def _tool_loop(
                 if clave and clave not in vistos:
                     vistos.add(clave)
                     limpios.append(p)
-            producto_ctx = (
-                runtime.last_product.get("producto")
-                if isinstance(runtime.last_product, dict)
-                else ""
-            ) or runtime.last_term or "el aparato"
+            producto_ctx = producto_ctx or "el aparato"
             logger.info(
                 "guard contenido: pregunta por el contenido de '%s' (%s) — ofrezco %d insumo(s)",
                 producto_ctx, familia, len(limpios),
