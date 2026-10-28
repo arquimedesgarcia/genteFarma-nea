@@ -1364,6 +1364,14 @@ async def _tool_loop(
         # que no se puede asegurar. Lo que sí se puede es ofrecer los insumos que se venden
         # aparte — que es lo que haría un humano de mostrador, en vez de un "no tengo
         # información" seco seguido de un handoff.
+        # ¿PIDE UNA FOTO DEL PRODUCTO? Se acusa recibo con una frase humana y NO se
+        # inventa que la enviamos ni se busca "fotos" en el catálogo. Si el cliente está
+        # ENVIANDO una imagen (hay OCR en el turno), esto no aplica.
+        if _pide_foto(user_text) and not _texto_ocr_completo(user_text):
+            logger.info("guard foto: el cliente pide una foto — acuso recibo")
+            await _send(ctx, runtime._conv.id, runtime._crm_conv_id, RESPUESTA_FOTO)
+            return None  # turno atendido: no dejar que el LLM reescriba
+
         familia = _familia_de_pregunta_contenido(
             user_text, runtime.last_term, runtime.last_product
         )
@@ -2659,6 +2667,10 @@ _FILLER = {
     # palabras identifica un fármaco por sí sola.
     # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
     "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    # FOTO/IMAGEN: pedir una foto no es pedir un producto. Buscar 'fotos' en el catálogo
+    # devolvía cualquier cosa (caso real provider 32: "Me puede enviar unas fotos" →
+    # "Actualmente no tenemos linternas"). Hay guard propio (`_pide_foto`).
+    "foto", "fotos", "fotografia", "fotografias", "imagen", "imagenes", "selfie",
     "plaquita", "plaquitas", "tirita", "tiritas",
     "aparato", "aparatos", "equipo", "maquina", "maquinita",
     "estuche", "maletin", "cargador", "cable", "bateria", "baterias",
@@ -5772,6 +5784,41 @@ def _familia_de_equipo(nombre: str) -> str | None:
         if re.search(rf"\b{re.escape(familia)}\b", n):
             return familia
     return None
+
+
+# ── ¿EL CLIENTE PIDE UNA FOTO DEL PRODUCTO? ───────────────────────────────────────
+# El agente NO puede enviar fotos desde el catálogo (los productos del tenant no traen
+# imagen utilizable), así que decir "aquí tienes la foto" es una alucinación; y buscar
+# "fotos" en el catálogo devuelve cualquier cosa (FOTORRETIN, linternas).
+#
+# Caso real (provider 32, 2026-10-27):
+#   "Tendrás una foto"            → "Aquí tienes la foto del producto Atamel…" (falsa)
+#   "Me puede enviar unas fotos"  → "Actualmente no tenemos linternas en nuestro catálogo"
+_RE_PIDE_FOTO = re.compile(
+    r"\b(?:"
+    r"puede[sn]?|podrias?|podrian|podria|tendras|tendra|tienes|tiene[n]?|"
+    r"enviar|envias|envies|enviame|enviarme|mandar|mandas|mandame|mandarme|"
+    r"dame|necesito|quisiera|quiero|solicito|solicitar|consigo|hay"
+    r")\b[^.?!]{0,45}\b(?:foto|fotos|fotografia|imagen|imagenes)\b"
+    r"|\b(?:foto|fotos|imagen|imagenes)\b[^.?!]{0,25}\?",
+    re.IGNORECASE,
+)
+
+RESPUESTA_FOTO = (
+    "¡Con gusto! En un momento le enviaremos la foto del producto solicitado. 🙌\n"
+    "Si mientras tanto quiere, le confirmo precio y disponibilidad de lo que está viendo."
+)
+
+
+def _pide_foto(texto: str) -> bool:
+    """¿El cliente pide una FOTO/imagen del producto? (no cuando él la envía)."""
+    t = _normalizar_tildes((texto or "").lower())
+    if not t:
+        return False
+    # 'foto' tiene que aparecer; el patrón exige además un verbo de petición o pregunta.
+    if "foto" not in t and "imagen" not in t and "fotografia" not in t:
+        return False
+    return bool(_RE_PIDE_FOTO.search(t))
 
 
 def _familia_de_pregunta_contenido(
