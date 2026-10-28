@@ -32,6 +32,13 @@ import re
 # Palabras funcionales/relleno: nunca son señal de relevancia. Un término que
 # solo tiene palabras de esta lista no puede validar ningún producto.
 _FUNCIONALES = {
+    # RÓTULOS DEL CAMPO que el OCR devuelve pegados al contenido
+    # ('nombre del medicamento fexofenadina clorhidrato calox'). Sin esto se cuelan como
+    # token de fármaco: el núcleo ausente salía 'nombre'/'medicamento' y una lectura con
+    # solo la marca se daba por completa. Caso real provider 32, 2026-10-27.
+    "nombre", "nombres", "rotulo", "etiqueta", "descripcion", "presentacion",
+    "medicamento", "medicamentos",
+
     "de", "la", "el", "los", "las", "un", "una", "unos", "unas", "y", "o", "u",
     "para", "por", "con", "sin", "que", "como", "cuanto", "cuanta", "cual",
     "cuales", "tiene", "tienen", "tengo", "hay", "es", "son", "esta", "estan",
@@ -415,6 +422,26 @@ def _es_sufijo_comercial(palabra: str) -> bool:
 
 
 
+# ── SALES DEL PRINCIPIO ACTIVO: 'clorhidrato' no es un medicamento ────────────────
+# 'CLORHIDRATO' lo comparten decenas de fármacos distintos (betahistina, metformina,
+# bromexina, loperamida, fexofenadina…). Buscar SOLO por la sal devuelve un catálogo al azar.
+#
+# Caso real (provider 05, 2026-10-27): el OCR de una caja de 'Fexofenadina Clorhidrato
+# CALOX' devolvió solo 'CLORHIDRATO' y el agente cotizó betahistina, metformina, bromexina y
+# loperamida como si fueran lo que el cliente pidió.
+#
+# NO están en la lista 'sodico', 'potasico', 'cloruro' ni 'bicarbonato': esos SÍ pueden ser
+# el nombre de un producto ('cloruro de sodio', 'bicarbonato de sodio').
+_SALES_FARMACEUTICAS = {
+    "clorhidrato", "hidrocloruro", "hidroclorhidrato", "diclorhidrato", "bromhidrato",
+    "maleato", "succinato", "fumarato", "tartrato", "bitartrato", "citrato",
+    "fosfato", "difosfato", "sulfato", "nitrato", "acetato", "benzoato",
+    "estearato", "valerato", "propionato", "dipropionato", "mesilato", "besilato",
+    "tosilato", "oxalato", "lactato", "gluconato",
+    "monohidrato", "dihidrato", "trihidrato", "anhidro", "anhidra",
+    "micronizado", "micronizada",
+}
+
 def tokens_farmaco(termino: str) -> list[str]:
     """Tokens del término que DEBEN identificar un fármaco.
 
@@ -431,6 +458,13 @@ def tokens_farmaco(termino: str) -> list[str]:
     out: list[str] = []
     for w in tokens_senal(termino, _MIN_LEN_SENAL):
         if w in _PRESENTACION_AUDIENCIA:
+            continue
+        # La SAL tampoco identifica un fármaco: 'clorhidrato' lo comparten betahistina,
+        # metformina, bromexina, loperamida… Sin esto, el núcleo ausente de
+        # 'fexofenadina clorhidrato 120 mg' era 'clorhidrato' y la recuperación buscaba por
+        # la sal (medido en producción, provider 32, 2026-10-27:
+        # "busco SOLO por el núcleo 'clorhidrato'").
+        if w in _SALES_FARMACEUTICAS:
             continue
         # ¿es una presentación mal escrita? Se compara por prefijo/Levenshtein contra
         # las formas conocidas, no por igualdad exacta.

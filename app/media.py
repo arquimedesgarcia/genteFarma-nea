@@ -13,11 +13,53 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import re
 
 from dataclasses import dataclass
 
+# Prompt de la SEGUNDA lectura: pide las dos líneas que identifican el medicamento y
+# prohíbe explícitamente el laboratorio y las etiquetas de la caja.
+PROMPT_OCR_ENFOCADO = (
+    "Mira la caja del medicamento. Devuelve SOLO dos cosas, en una línea:\n"
+    "1) el NOMBRE del medicamento: el texto más grande de la caja, normalmente dos "
+    "palabras (p. ej. \"Fexofenadina Clorhidrato\", \"Amoxicilina Trihidrato\").\n"
+    "2) la concentración con su unidad (p. ej. \"120 mg\", \"250 mg/5 ml\").\n"
+    "NO incluyas: el laboratorio (CALOX, GENVEN, OFTALMI...), la categoría "
+    "(\"Antialérgico\", \"Antibiótico\", \"Analgésico\"), la vía (\"Vía Oral\"), "
+    "\"Medicamento Genérico\", ni la presentación (\"10 Tabletas Recubiertas\").\n"
+    "Si no distingues el nombre del medicamento, responde NO_APLICA."
+)
+
+_RE_DOSIS_EN_TEXTO = re.compile(
+    r"\d+\s*(?:mg|ml|mcg|g|gr|ui)\b|\d+\s*mg\s*/\s*\d+\s*ml", re.IGNORECASE
+)
+
+
+def _lectura_incompleta(texto: str) -> bool:
+    """¿La lectura se dejó el nombre del medicamento?
+
+    Incompleta = no trae dosis (mg/ml) y no deja más de una palabra que pueda ser fármaco.
+    'nombre del medicamento calox' → incompleta (0 dosis, 1 token).
+    'fexofenadina clorhidrato 120 mg' → completa.
+    'fexofenadina clorhidrato calox' → completa (2 tokens, aunque no traiga dosis).
+    """
+    if not texto:
+        return False
+    if _RE_DOSIS_EN_TEXTO.search(texto):
+        return False
+    return len(tokens_farmaco(texto)) <= 1
+
+
+def _mejor_lectura(nueva: str, vieja: str) -> bool:
+    """¿La segunda lectura es mejor? Más tokens de fármaco, o iguales y con dosis."""
+    t_nueva, t_vieja = len(tokens_farmaco(nueva)), len(tokens_farmaco(vieja))
+    if t_nueva != t_vieja:
+        return t_nueva > t_vieja
+    return bool(_RE_DOSIS_EN_TEXTO.search(nueva)) and not _RE_DOSIS_EN_TEXTO.search(vieja)
+
+
 from app.state import AppContext, InboundMessage
-from app.relevancia import parece_ocr_sin_medicamento
+from app.relevancia import parece_ocr_sin_medicamento, tokens_farmaco
 
 logger = logging.getLogger("nea.media")
 
@@ -156,6 +198,25 @@ async def _image(ctx: AppContext, msg: InboundMessage) -> MediaPart:
             ocr_text[:80],
         )
         ocr_text = ""
+    # SEGUNDA LECTURA ENFOCADA. El OCR a veces devuelve solo el rótulo y la marca
+    # ('nombre del medicamento calox'), perdiendo la línea del principio activo — la que
+    # el cliente SÍ ve en la caja. Medido en provider 32 (2026-10-27): de cinco pasadas de
+    # la misma foto, dos perdieron 'Fexofenadina'. Pedirle "extrae el texto" no lo arregla;
+    # pedirle EXACTAMENTE el nombre y la dosis, sí.
+    if ocr_text and _lectura_incompleta(ocr_text) and ocr is not None:
+        try:
+            enfocado = (await ocr(data, mime_clean, PROMPT_OCR_ENFOCADO)).strip()
+        except Exception:
+            enfocado = ""
+        if enfocado and parece_ocr_sin_medicamento(enfocado):
+            enfocado = ""
+        if enfocado and _mejor_lectura(enfocado, ocr_text):
+            logger.info(
+                "media image: segunda lectura enfocada mejoró el OCR (%r → %r)",
+                ocr_text[:60], enfocado[:60],
+            )
+            ocr_text = enfocado
+
     extra = ""
     if ocr_text:
         extra = (

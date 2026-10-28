@@ -2594,6 +2594,13 @@ _FILLER = {
     # PRESTOBARBA: falsos positivos del matcher difuso, o sea el bug que se quiere evitar.
     "cotizar", "cotizame", "cotizacion", "cotizaciones", "cotizarlos",
     "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
+    # RÓTULOS DEL CAMPO: el OCR devuelve '**Nombre del medicamento:** Fexofenadina
+    # Clorhidrato CALOX' y el término quedaba 'nombre del fexofenadina clorhidrato calox'.
+    # Con solo la marca ('nombre del medicamento calox') el término era 'nombre del calox' y
+    # el detector de laboratorio no lo reconocía (veía tres palabras). Son TRES listas
+    # duplicadas: aquí, en tools._PALABRAS_FUNCIONALES y en relevancia._FUNCIONALES — hay
+    # que tocar las tres. Caso real provider 32, 2026-10-27.
+    "nombre", "nombres", "rotulo", "etiqueta", "descripcion", "presentacion",
     # 'resumen' NO es un medicamento. En "dame el resumen de esto y le agregas 3 cajas
     # de glymar" el troceador lo tomaba como un producto más y el cliente leía
     # "⚠️ No disponibles en el catálogo: RESUMEN".
