@@ -1931,6 +1931,17 @@ async def _tool_loop(
                         # esa marca (20 productos: acetaminofén, amlodipina, albendazol...).
                         # Se ignora en SILENCIO: no es un "no disponible" — el cliente nunca
                         # nombró un fármaco CALOX.
+                        # EL TÉRMINO ERA LA SAL DEL PRINCIPIO ACTIVO ('clorhidrato').
+                        # No es un medicamento ni un "no disponible": se ignora en silencio.
+                        # Caso real (2026-10-27): el OCR de una caja de FEXOFENADINA CLORHIDRATO
+                        # devolvió solo 'CLORHIDRATO' y se cotizaron betahistina, metformina,
+                        # bromexina y loperamida.
+                        if getattr(runtime, "es_sal", False):
+                            logger.info(
+                                "receta: '%s' es solo la SAL del principio activo — se ignora "
+                                "(sin aviso de no disponible)", med,
+                            )
+                            continue
                         if getattr(runtime, "es_laboratorio", False):
                             logger.info(
                                 "receta: '%s' es el LABORATORIO de los productos, no un "
