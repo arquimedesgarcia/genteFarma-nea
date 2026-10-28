@@ -162,8 +162,15 @@ class OpenAiLlm:
             return False
         return True
 
-    async def ocr_image(self, data: bytes, mime: str = "image/jpeg") -> str:
+    async def ocr_image(
+        self, data: bytes, mime: str = "image/jpeg", prompt: str | None = None
+    ) -> str:
         """Extrae el texto de una imagen (medicamento/receta) con visión.
+
+        `prompt` permite un SEGUNDO intento ENFOCADO cuando la primera lectura se dejó el
+        nombre del medicamento (ver `media.py`): en vez de "extrae el texto", se le pide
+        exactamente el nombre y la dosis.
+        
 
         Usa el mismo modelo del chat (gpt-4o-mini tiene visión). Devuelve el
         texto extraído; vacío/fallo → LlmExhausted (media lo degrada honesto).
@@ -194,7 +201,7 @@ class OpenAiLlm:
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": (
+                                    "text": prompt if prompt else (
                                         "Extrae el texto legible de esta imagen, en "
                                         "texto plano.\n"
                                         "Si la imagen es de un MEDICAMENTO (caja, "

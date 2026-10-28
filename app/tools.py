@@ -16,6 +16,7 @@ from typing import Any
 
 from app.crm import CrmConflict, CrmError, SlotTaken
 from app.relevancia import (
+    _SALES_FARMACEUTICAS,
     _norm,
     _token_cabeza_farmaco,
     es_relevante,
@@ -1582,25 +1583,6 @@ def _aplicar_forma(
     return filtrados, _aviso_forma(filtrados, termino, etiqueta)
 
 
-# ── SALES DEL PRINCIPIO ACTIVO: 'clorhidrato' no es un medicamento ────────────────
-# 'CLORHIDRATO' lo comparten decenas de fármacos distintos (betahistina, metformina,
-# bromexina, loperamida, fexofenadina…). Buscar SOLO por la sal devuelve un catálogo al azar.
-#
-# Caso real (provider 05, 2026-10-27): el OCR de una caja de 'Fexofenadina Clorhidrato
-# CALOX' devolvió solo 'CLORHIDRATO' y el agente cotizó betahistina, metformina, bromexina y
-# loperamida como si fueran lo que el cliente pidió.
-#
-# NO están en la lista 'sodico', 'potasico', 'cloruro' ni 'bicarbonato': esos SÍ pueden ser
-# el nombre de un producto ('cloruro de sodio', 'bicarbonato de sodio').
-_SALES_FARMACEUTICAS = {
-    "clorhidrato", "hidrocloruro", "hidroclorhidrato", "diclorhidrato", "bromhidrato",
-    "maleato", "succinato", "fumarato", "tartrato", "bitartrato", "citrato",
-    "fosfato", "difosfato", "sulfato", "nitrato", "acetato", "benzoato",
-    "estearato", "valerato", "propionato", "dipropionato", "mesilato", "besilato",
-    "tosilato", "oxalato", "lactato", "gluconato",
-    "monohidrato", "dihidrato", "trihidrato", "anhidro", "anhidra",
-    "micronizado", "micronizada",
-}
 
 
 def _es_solo_sal(termino: str) -> bool:
