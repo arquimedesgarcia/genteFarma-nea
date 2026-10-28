@@ -1407,6 +1407,8 @@ _FORMA_CANONICA: dict[str, str] = {
     # son ÓVULOS (reportado en provider 32, 2026-10-28: el agente negó los óvulos que sí
     # existían). Igual con SUP (supositorios), AMP (ampolla), SOB (sobre), CRM (crema).
     "ovu": "óvulos", "ovul": "óvulos", "ovus": "óvulos",
+    # "X 10VU" es una OVU truncada (METRONIDAZOL 500MG X 10VU COLMED, provider 32).
+    "vu": "óvulos",
     "supositorio": "supositorios", "supositorios": "supositorios",
     "sup": "supositorios", "supo": "supositorios",
     "amp": "inyectable", "amps": "inyectable",
@@ -1504,7 +1506,7 @@ def _etiqueta_de_forma(titulo: str) -> str | None:
         # ÓVULOS ≠ SUPOSITORIOS: antes los dos devolvían "supositorios" y la etiqueta
         # mentía. Sin `\b` a la izquierda porque la abreviatura va pegada al envase
         # ('X 10OVU', 'X 10OVULOS'); se exige que no la preceda una LETRA.
-        (r"(?:^|[^a-z])(ovu|ovul|ovus|ovulo|ovulos)\b", "óvulos"),
+        (r"(?:^|[^a-z])(ovu|ovul|ovus|vu|ovulo|ovulos)\b", "óvulos"),
         (r"\b(supositorio|supositorios)\b|(?:^|[^a-z])sup[s]?\b", "supositorios"),
         (r"(?:^|[^a-z])sob[s]?\b|\b(sobre|sobres)\b", "polvo"),
         (r"\b(spray|aerosol)\b", "spray"),
@@ -1780,7 +1782,13 @@ def _formatear_lista_productos(
     # Ordenar por precio USD de menor a mayor (estable).
     ordenados = sorted(
         products,
-        key=lambda p: (p.get("precio") if isinstance(p.get("precio"), (int, float)) else 0),
+        # Los productos SIN precio van al final: no pueden encabezar la lista (el
+        # catálogo del provider 32 trae ProductPrice=0 en algunos SKU y salían primeros
+        # con "$—").
+        key=lambda p: (
+            p.get("precio") if isinstance(p.get("precio"), (int, float)) and p.get("precio") > 0
+            else float("inf")
+        ),
     )
     lineas = [titulo.strip().upper()]
     for i, p in enumerate(ordenados, 1):
