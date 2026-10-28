@@ -5489,6 +5489,8 @@ def _lista_con_aviso(
         _etq_norm = _normalizar_tildes((_etq_f or "").lower())
         if _etq_norm and _etq_norm in _normalizar_tildes((titulo_lista or "").lower()):
             titulo_lista = _termino_sin_forma(titulo_lista)
+    # El encabezado no puede prometer un nombre que ningún producto lleva.
+    titulo_lista = _titulo_por_marcas(productos, titulo_lista)
     cuerpo = _formatear_lista_productos(productos, titulo_lista)
     if ausente:
         cuerpo = _aviso_no_lo_tengo(term, ausente) + "\n\n" + cuerpo
@@ -5511,6 +5513,30 @@ def _titulo_sin_dosis(termino: str, dosis: str) -> str:
     )
     limpio = re.sub(r"\s{2,}", " ", patron.sub("", termino)).strip(" ,-")
     return limpio or termino
+
+
+def _titulo_por_marcas(productos: list[dict[str, Any]], term: str) -> str:
+    """Encabezado con la MARCA real cuando NINGÚN producto lleva el nombre pedido.
+
+    Mismo principio que el título sin dosis: el mensaje no puede encabezar con algo que
+    acaba de negar. Caso real (provider 32, 2026-10-28): «Metronidazol ovulos» → aviso
+    "No tengo METRONIDAZOL en óvulos con ese nombre" y debajo el encabezado
+    "METRONIDAZOL OVULOS", cuando el único producto era OVUMET. Encabeza OVUMET.
+    """
+    if not productos or not term:
+        return term
+    nucleo = ((_termino_sin_forma(term) or term).split() or [""])[0].lower()
+    titulos = [str(p.get("producto") or p.get("nombre") or "") for p in productos]
+    if not nucleo or any(
+        _normalizar_tildes(nucleo) in _normalizar_tildes(x.lower()) for x in titulos if x
+    ):
+        return term  # algún producto sí lleva el nombre: el encabezado está bien
+    marcas: list[str] = []
+    for x in titulos:
+        primera = (x.split() or [""])[0].strip(" -.,:;()[]")
+        if len(primera) >= 3 and primera.upper() not in marcas:
+            marcas.append(primera.upper())
+    return " / ".join(marcas[:2]) if marcas else term
 
 
 def _avisos_de_lista(productos: list[dict[str, Any]], term: str) -> tuple[str, str]:
