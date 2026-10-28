@@ -86,6 +86,54 @@ class MediaPart:
     image_data_uri: str | None = None
 
 
+# ── RECETA ESCRITA A MANO ─────────────────────────────────────────────────────────
+# Una receta manuscrita NO se transcribe: la tasa de acierto es baja y el agente acaba
+# cotizando fármacos que nadie recetó. Caso real (provider 32, 2026-10-28): receta
+# manuscrita de ISTRILAB ("Amonicilina… Budicort gotas… Nistatina… Vit D3…").
+#
+# El OCR marca su respuesta con `MANUSCRITA`; ese marcador se convierte en esta nota y
+# `turn._receta_manuscrita()` responde con el aviso al auxiliar, sin consultar nada.
+MARCA_MANUSCRITA = (
+    "[RECETA ESCRITA A MANO — NO la transcribas ni la interpretes: la letra a mano no se "
+    "lee con fiabilidad y podrías cotizar un medicamento equivocado. NO busques nada en el "
+    "catálogo con lo que se ve en ella.]"
+)
+
+MARCA_DUDOSA = (
+    "[RECETA DE LECTURA DUDOSA — NO la transcribas ni la interpretes: algún nombre o dosis "
+    "puede leerse de otra manera y podrías cotizar un medicamento equivocado. NO busques "
+    "nada en el catálogo con lo que se ve en ella.]"
+)
+
+# Señales de que el OCR es una RECETA (y no la foto de un producto suelto): solo cuando
+# parece receta se paga la llamada de legibilidad.
+_RE_SENAL_RECETA = re.compile(
+    r"\b(rp|receta|indicaciones|paciente|fecha|dx|gotas|susp|jarabe|s\s*/\s*f|"
+    r"cada\s+\d+\s*(?:h|hrs|horas|d[ií]as)|por\s+\d+\s+d[ií]as|tabletas?|c[aá]psulas?)\b",
+    re.IGNORECASE,
+)
+
+
+def parece_receta(ocr_text: str) -> bool:
+    """¿El texto del OCR parece una receta (varias líneas de medicamentos)?"""
+    t = (ocr_text or "").strip()
+    if not t:
+        return False
+    if _RE_SENAL_RECETA.search(t):
+        return True
+    lineas = [ln.strip(" -–•*·.:") for ln in t.splitlines() if ln.strip()]
+    candidatas = [
+        ln for ln in lineas
+        if len(ln) >= 4 and re.match(r"^[A-Za-zÁÉÍÓÚÑáéíóúñ][\w\s./%+-]{3,}$", ln)
+    ]
+    # Sin palabras propias de receta, se exige además VARIAS dosis: una caja de producto
+    # trae su nombre y su mg, pero no una lista de fármacos con concentraciones distintas.
+    dosis = sum(
+        1 for ln in lineas if re.search(r"\d+\s*(?:mg|ml|mcg|g|ui)\b", ln, re.IGNORECASE)
+    )
+    return len(candidatas) >= 3 and dosis >= 2
+
+
 def _caption_line(msg: InboundMessage, junto_a: str) -> str:
     if msg.media_caption:
         return f' Nota del lead junto a {junto_a}: "{msg.media_caption}".'
@@ -173,12 +221,36 @@ async def _image(ctx: AppContext, msg: InboundMessage) -> MediaPart:
     # texto (nombre, dosis, presentación) para que el backstop anti-alucinación
     # pueda consultar el catálogo con un término real. Nunca rompe el turno.
     ocr_text = ""
+    manuscrita = False
     ocr = getattr(ctx.llm, "ocr_image", None)
     if ocr is not None:
         try:
             ocr_text = (await ocr(data, mime_clean)).strip()
         except Exception:
             logger.warning("media image: OCR no disponible/falló — imagen va sola")
+    # PUERTA DE LEGIBILIDAD: si el OCR parece una RECETA se comprueba que se pueda leer
+    # con seguridad. Una receta manuscrita no se transcribe: medido con la receta de
+    # ISTRILAB del provider 32, el OCR inventó "Nifedipino" y "Pancreatina" que no estaban
+    # en el papel. Esta llamada extra solo se paga cuando el texto parece receta.
+    dudosa = False
+    if ocr_text and parece_receta(ocr_text):
+        comprobar = getattr(ctx.llm, "lectura_dudosa", None)
+        if comprobar is not None:
+            try:
+                dudosa = bool(await comprobar(data, mime_clean))
+            except Exception:
+                dudosa = True  # no se pudo comprobar → no se arriesga
+        if dudosa:
+            preg = getattr(ctx.llm, "es_manuscrita", None)
+            if preg is not None:
+                try:
+                    manuscrita = bool(await preg(data, mime_clean))
+                except Exception:
+                    manuscrita = False
+            logger.info(
+                "media image: receta de LECTURA DUDOSA (manuscrita=%s) — no se transcribe: %r",
+                manuscrita, ocr_text[:60],
+            )
     # OCR que NO describe un medicamento: el cliente mandó otra cosa (un
     # COMPROBANTE DE PAGO, una foto de un producto no medicinal). El prompt del OCR
     # asume que la imagen ES un medicamento, así que ante un pago el modelo
@@ -203,7 +275,7 @@ async def _image(ctx: AppContext, msg: InboundMessage) -> MediaPart:
     # el cliente SÍ ve en la caja. Medido en provider 32 (2026-10-27): de cinco pasadas de
     # la misma foto, dos perdieron 'Fexofenadina'. Pedirle "extrae el texto" no lo arregla;
     # pedirle EXACTAMENTE el nombre y la dosis, sí.
-    if ocr_text and _lectura_incompleta(ocr_text) and ocr is not None:
+    if ocr_text and not dudosa and _lectura_incompleta(ocr_text) and ocr is not None:
         try:
             enfocado = (await ocr(data, mime_clean, PROMPT_OCR_ENFOCADO)).strip()
         except Exception:
@@ -218,6 +290,19 @@ async def _image(ctx: AppContext, msg: InboundMessage) -> MediaPart:
             ocr_text = enfocado
 
     extra = ""
+    if dudosa:
+        # No se transcribe ni se consulta: el turno responde con el aviso al auxiliar.
+        extra = (
+            " " + (MARCA_MANUSCRITA if manuscrita else MARCA_DUDOSA)
+            + " El cliente espera que un auxiliar humano lea la receta."
+        )
+        return MediaPart(
+            text=(
+                "[El lead mandó una imagen — la tienes adjunta, puedes verla."
+                f"{caption}{extra}]"
+            ),
+            image_data_uri=uri,
+        )
     if ocr_text:
         extra = (
             f" OCR de la imagen: \"{ocr_text}\"."

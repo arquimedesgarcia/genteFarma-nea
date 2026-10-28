@@ -1208,6 +1208,21 @@ async def _tool_loop(
         # que no se puede asegurar. Lo que sí se puede es ofrecer los insumos que se venden
         # aparte — que es lo que haría un humano de mostrador, en vez de un "no tengo
         # información" seco seguido de un handoff.
+        # RECETA A MANO O ILEGIBLE: no se transcribe ni se cotiza. Se avisa que un
+        # auxiliar atiende y se registra el handoff para que un humano la lea.
+        tipo_receta = _receta_ilegible(user_text)
+        if tipo_receta:
+            logger.info(
+                "guard receta ilegible (%s): aviso al auxiliar + handoff", tipo_receta
+            )
+            texto_receta = (
+                RESPUESTA_RECETA_MANUSCRITA if tipo_receta == "mano"
+                else RESPUESTA_RECETA_DUDOSA
+            )
+            await _send(ctx, runtime._conv.id, runtime._crm_conv_id, texto_receta)
+            await _safe_handoff(ctx, str(runtime._crm_conv_id), "modelo")
+            return None  # turno atendido: no se consulta el catálogo
+
         # ¿PIDE UNA FOTO DEL PRODUCTO? Se acusa recibo con una frase humana y NO se
         # inventa que la enviamos ni se busca "fotos" en el catálogo. Si el cliente está
         # ENVIANDO una imagen (hay OCR en el turno), esto no aplica.
@@ -5655,6 +5670,41 @@ RESPUESTA_FOTO = (
     "¡Con gusto! En un momento le enviaremos la foto del producto solicitado. 🙌\n"
     "Si mientras tanto quiere, le confirmo precio y disponibilidad de lo que está viendo."
 )
+
+
+# ── RECETA ESCRITA A MANO ─────────────────────────────────────────────────────────
+# La letra a mano NO se lee con fiabilidad: el OCR adivina nombres y el agente acaba
+# cotizando fármacos que nadie recetó. Caso real (provider 32, 2026-10-28): receta
+# manuscrita de ISTRILAB ("Amonicilina… Broncef… Budicort gotas… Nistatina… Vit D3…").
+#
+# Regla del usuario: cuando la receta es manuscrita, NO se traduce — se avisa que un
+# auxiliar atiende. El marcador lo pone `media.MARCA_MANUSCRITA` cuando el OCR declara
+# que el texto es manuscrito.
+RESPUESTA_RECETA_MANUSCRITA = (
+    "Recibí tu receta. 🙏 Como está escrita a mano, prefiero no interpretarla antes que "
+    "darte un medicamento equivocado.\n"
+    "En un momento un auxiliar te atiende y te la cotiza. ✅"
+)
+
+RESPUESTA_RECETA_DUDOSA = (
+    "Recibí tu receta. 🙏 No logro leerla con seguridad y prefiero no arriesgarme a darte "
+    "un medicamento equivocado.\n"
+    "En un momento un auxiliar te atiende y te la cotiza. ✅"
+)
+
+
+def _receta_ilegible(user_text: str) -> str | None:
+    """Tipo de receta que NO se transcribe: 'mano', 'dudosa' o None.
+
+    El marcador lo pone `media` cuando el OCR parece receta y la comprobación de
+    legibilidad dice que no se puede leer con seguridad.
+    """
+    t = user_text or ""
+    if "RECETA ESCRITA A MANO" in t:
+        return "mano"
+    if "RECETA DE LECTURA DUDOSA" in t:
+        return "dudosa"
+    return None
 
 
 def _pide_foto(texto: str) -> bool:

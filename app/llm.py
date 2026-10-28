@@ -162,6 +162,74 @@ class OpenAiLlm:
             return False
         return True
 
+    PROMPT_DUDOSA = (
+        "Mira la imagen: es una receta médica o la foto de un medicamento. Responde SOLO "
+        "una palabra.\n"
+        "LEGIBLE: puedes leer con seguridad el nombre de cada medicamento y su dosis.\n"
+        "DUDOSA: hay letra escrita a mano, tachaduras, abreviaturas o mala calidad que "
+        "hacen que algún nombre o dosis pueda leerse de otra manera.\n"
+        "Si UNA sola palabra o dosis te deja en duda, responde DUDOSA.\n"
+        "Responde únicamente LEGIBLE o DUDOSA."
+    )
+
+    PROMPT_MANUSCRITA = (
+        "Mira la imagen y responde SOLO una palabra.\n"
+        "MANUSCRITA: lo importante está escrito a mano por una persona — trazos de "
+        "bolígrafo o lápiz, letra irregular, tinta. Típico de una receta en papel.\n"
+        "IMPRESA: el texto es de imprenta o etiqueta de fábrica — caja, blíster o frasco "
+        "de un medicamento, letras alineadas y uniformes, o una receta de computadora.\n"
+        "Responde únicamente MANUSCRITA o IMPRESA."
+    )
+
+    async def _clasifica(self, data: bytes, mime: str, prompt: str) -> str:
+        """Una palabra del modelo sobre la imagen ('' si falla)."""
+        from app.media import MAX_IMAGE_BYTES  # import tardío, evita ciclo
+
+        if len(data) > MAX_IMAGE_BYTES:
+            return ""
+        import base64
+
+        uri = f"data:{mime};base64,{base64.b64encode(data).decode()}"
+        try:
+            resp = await self._client.chat.completions.create(
+                model=self._model,
+                temperature=0.0,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": uri}},
+                        ],
+                    }
+                ],
+            )
+            choices = getattr(resp, "choices", None) or []
+            msg = getattr(choices[0], "message", None) if choices else None
+            content = getattr(msg, "content", None) or ""
+            if isinstance(content, list):
+                content = " ".join(
+                    p.get("text", "") for p in content if isinstance(p, dict)
+                )
+            return str(content).strip().upper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clasificación de imagen: fallo (%s)", exc)
+            return ""
+
+    async def lectura_dudosa(self, data: bytes, mime: str = "image/jpeg") -> bool:
+        """¿La receta NO se puede leer con seguridad? Ante el fallo, DUDOSA (conservador)."""
+        texto = await self._clasifica(data, mime, self.PROMPT_DUDOSA)
+        logger.info("lectura_dudosa: el modelo dijo %r", texto[:40])
+        if not texto:
+            return True  # no se pudo comprobar → no se arriesga
+        return "DUDOSA" in texto
+
+    async def es_manuscrita(self, data: bytes, mime: str = "image/jpeg") -> bool:
+        """¿El texto está escrito a mano? Solo elige el TEXTO del mensaje, no la puerta."""
+        texto = await self._clasifica(data, mime, self.PROMPT_MANUSCRITA)
+        logger.info("es_manuscrita: el modelo dijo %r", texto[:40])
+        return "MANUSCRITA" in texto and "IMPRESA" not in texto
+
     async def ocr_image(
         self, data: bytes, mime: str = "image/jpeg", prompt: str | None = None
     ) -> str:
