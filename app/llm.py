@@ -180,6 +180,14 @@ class OpenAiLlm:
             try:
                 resp = await self._client.chat.completions.create(
                     model=self._model,
+                    # DETERMINISMO EN EL OCR. Sin fijar la temperatura el proveedor usa su
+                    # valor por defecto (~1.0) y la MISMA foto devuelve lecturas distintas:
+                    # medido con la caja de FEXOFENADINA CLORHIDRATO CALOX, dos pasadas
+                    # dieron 'FEXOFENADINA CLORHIDRATO' y una tercera inventó
+                    # 'LIMOLAX LIMONADA PURGANTE' (un producto que existe en el catálogo
+                    # pero no está en la foto). Un OCR que varía convierte cualquier
+                    # revisión en una lotería.
+                    temperature=0.0,
                     messages=[
                         {
                             "role": "user",

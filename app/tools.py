@@ -317,9 +317,13 @@ def _termino_es_medicamento_plausible(term: str) -> bool:
         return False
     # Una VÍA DE ADMINISTRACIÓN no es un medicamento: 'intraarticular' describe cómo se usa
     # lo ya nombrado. Sin esto, "Es intraarticular" se cotizaba como producto (KENACORT).
+    #
+    # Una SAL tampoco: 'clorhidrato' lo comparten decenas de fármacos (betahistina,
+    # metformina, bromexina, loperamida…). Cotizarla devuelve un catálogo al azar.
     if all(
         w in _VIAS_ADMINISTRACION
         or w in _CATEGORIAS_TERAPEUTICAS
+        or w in _SALES_FARMACEUTICAS
         or w in _PALABRAS_FUNCIONALES
         for w in palabras
     ):
@@ -1573,6 +1577,42 @@ def _aplicar_forma(
     return filtrados, _aviso_forma(filtrados, termino, etiqueta)
 
 
+# ── SALES DEL PRINCIPIO ACTIVO: 'clorhidrato' no es un medicamento ────────────────
+# 'CLORHIDRATO' lo comparten decenas de fármacos distintos (betahistina, metformina,
+# bromexina, loperamida, fexofenadina…). Buscar SOLO por la sal devuelve un catálogo al azar.
+#
+# Caso real (provider 05, 2026-10-27): el OCR de una caja de 'Fexofenadina Clorhidrato
+# CALOX' devolvió solo 'CLORHIDRATO' y el agente cotizó betahistina, metformina, bromexina y
+# loperamida como si fueran lo que el cliente pidió.
+#
+# NO están en la lista 'sodico', 'potasico', 'cloruro' ni 'bicarbonato': esos SÍ pueden ser
+# el nombre de un producto ('cloruro de sodio', 'bicarbonato de sodio').
+_SALES_FARMACEUTICAS = {
+    "clorhidrato", "hidrocloruro", "hidroclorhidrato", "diclorhidrato", "bromhidrato",
+    "maleato", "succinato", "fumarato", "tartrato", "bitartrato", "citrato",
+    "fosfato", "difosfato", "sulfato", "nitrato", "acetato", "benzoato",
+    "estearato", "valerato", "propionato", "dipropionato", "mesilato", "besilato",
+    "tosilato", "oxalato", "lactato", "gluconato",
+    "monohidrato", "dihidrato", "trihidrato", "anhidro", "anhidra",
+    "micronizado", "micronizada",
+}
+
+
+def _es_solo_sal(termino: str) -> bool:
+    """¿El término es SOLO la sal del principio activo ('clorhidrato', 'maleato sodico')?
+
+    Si al termino no le queda ninguna palabra que nombre un fármaco, no hay nada que buscar.
+    """
+    tokens = [
+        w.strip(" -.,;:()[]")
+        for w in _normalizar_tildes((termino or "").lower()).split()
+        if w.strip(" -.,;:()[]")
+    ]
+    if not tokens:
+        return False
+    return all(w in _SALES_FARMACEUTICAS for w in tokens)
+
+
 def _titulo_normalizado(valor: object) -> str:
     """Título de producto listo para comparar: sin tildes, minúsculas, sin signos en los bordes."""
     texto = _normalizar_tildes(str(valor or "").lower())
@@ -1822,6 +1862,9 @@ class ToolRuntime:
         # usa para IGNORAR ese término en silencio: no es un "no disponible", es que el
         # cliente nunca nombró un fármaco.
         self.es_laboratorio = False
+        # true si el término era SOLO la sal del principio activo ('clorhidrato'): no es un
+        # medicamento y no debe aparecer en la lista de "no disponibles".
+        self.es_sal = False
         # Aviso cuando la FORMA pedida (suspensión, gotas, crema…) no está entre los
         # productos: el turno lo antepone a la respuesta para que el cliente sepa que le
         # estamos ofreciendo otra presentación.
@@ -2154,6 +2197,7 @@ class ToolRuntime:
         # ('calox' era un laboratorio) se arrastra al siguiente medicamento de la misma
         # receta y lo saltaría en silencio.
         self.es_laboratorio = False
+        self.es_sal = False
         self.aviso_forma = ""
         if not nombre:
             return {"ok": False, "error": "nombre_vacio", "detalle": "indica qué medicamento buscas"}
@@ -2171,7 +2215,26 @@ class ToolRuntime:
         # 'costo' y 'porf' son palabras funcionales; si al limpiarlo no queda NADA, no hay
         # medicamento que buscar. No se marca `med_not_found` (no es un "no disponible": el
         # cliente no nombró ningún fármaco).
-        if not _limpiar_termino_medicamento(nombre).strip():
+        _termino_limpio = _limpiar_termino_medicamento(nombre)
+        if _termino_limpio.strip() and _es_solo_sal(_termino_limpio):
+            logger.info(
+                "buscar_medicamento: '%s' es la SAL del principio activo, no un medicamento "
+                "— no busco en catálogo", nombre,
+            )
+            self.es_sal = True
+            self.med_not_found = False
+            return {
+                "ok": False,
+                "error": "solo_sal",
+                "detalle": (
+                    "Ese término es la SAL del principio activo (clorhidrato, maleato, "
+                    "fosfato…), no un medicamento: decenas de fármacos distintos la "
+                    "comparten. NO busques en el catálogo y NO muestres productos. Pide al "
+                    "cliente el NOMBRE del medicamento que aparece en la caja (el que va "
+                    "antes de 'clorhidrato'), o el que le recetaron."
+                ),
+            }
+        if not _termino_limpio.strip():
             logger.info(
                 "buscar_medicamento: '%s' son solo palabras funcionales (precio/cortesía) — "
                 "no busco en catálogo",
