@@ -1821,6 +1821,11 @@ class ToolRuntime:
         # foto lo tienes?") sin aportar fármaco, se busca con ESTE término y no
         # con las palabras de la pregunta (buscar "foto" trae FOTORRETIN).
         self.last_ocr_term = ""
+        # OCR del turno ANTERIOR (antes de que este turno lo pise). Vive aquí porque
+        # `_tool_loop` no ve las variables locales de `run_turn`: tenerlo como local
+        # produjo un NameError que mataba en silencio todos los turnos en los que el
+        # cliente "referencia la foto" ("gracias, ya vi la foto" → sin respuesta).
+        self.prev_last_ocr_term = ""
         # Corrección por typo: si el catálogo no encontró el término original y
         # SÍ lo encontró una variante ("diclofencao" → "diclofenaco"), se anotan
         # ambos para que la respuesta pueda confirmar la grafía al cliente en vez
