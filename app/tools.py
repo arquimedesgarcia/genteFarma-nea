@@ -192,6 +192,11 @@ _PALABRAS_FUNCIONALES = {
     "diga", "dian", "digas", "puedes", "puede", "podrias", "podria", "favor",
     "gracias", "solo", "sola", "solamente", "mas", "menos", "mucho", "mucha",
     "bueno", "buena", "bien", "porfavor", "okey", "ok", "vale", "listo",
+    # RÓTULOS DEL CAMPO: el OCR devuelve la etiqueta pegada al contenido
+    # ('nombre del medicamento fexofenadina clorhidrato calox'). Sin 'nombre' aquí, el
+    # término que llega al catálogo lleva la etiqueta y el filtro de laboratorio no
+    # reconoce la marca. Caso real (provider 32, 2026-10-27).
+    "nombre", "nombres", "rotulo", "etiqueta", "descripcion", "presentacion",
     "medicamento", "medicamentos", "consulta", "consultar", "opcion", "opciones",
     "economico", "economica", "barato", "barata", "costo", "oferta",
     # Verbos/nombres de FRASE del cliente (reclamos, garantías, entregas).
@@ -1651,9 +1656,20 @@ def _es_nombre_de_laboratorio(term: str, products: list[dict[str, Any]]) -> bool
     campo, para no decidir con un dato suelto.
     """
     tokens = [w for w in _normalizar_tildes((term or "").lower()).split() if w]
-    if len(tokens) != 1:
+    if not tokens:
         return False
-    t = tokens[0]
+    # Los tokens que NO pueden nombrar un fármaco (relleno, sal) se descartan antes de
+    # decidir: 'nombre calox' es lo mismo que 'calox'. Sin esto, el OCR que pierde el
+    # fármaco y deja 'nombre del medicamento calox' se colaba como búsqueda de marca.
+    significativos = [
+        w for w in tokens
+        if w not in _PALABRAS_FUNCIONALES and w not in _SALES_FARMACEUTICAS
+    ]
+    if len(significativos) > 1:
+        # Dos o más palabras que pueden ser fármaco: 'fexofenadina clorhidrato calox' es
+        # fármaco + marca, NO una marca sola.
+        return False
+    t = significativos[0] if significativos else tokens[-1]
     labs = [
         _normalizar_tildes(str(p.get("laboratorio") or "").strip().lower())
         for p in products

@@ -1914,6 +1914,10 @@ async def _tool_loop(
                     )
                     grupos: list[tuple[str, list[dict[str, Any]]]] = []
                     no_disponibles: list[str] = []
+                    # Términos que se descartaron por no ser un medicamento (solo la marca
+                    # del laboratorio o solo la sal). Si no queda ningún grupo, la respuesta
+                    # correcta es pedir el nombre de la caja.
+                    terminos_descartados: list[str] = []
                     avisos: dict[str, str] = {}
                     # Productos que el cliente pidió AGREGAR explícitamente y que se
                     # pueden añadir sin preguntar: cantidad dicha por él + un único
@@ -1941,6 +1945,7 @@ async def _tool_loop(
                                 "receta: '%s' es solo la SAL del principio activo — se ignora "
                                 "(sin aviso de no disponible)", med,
                             )
+                            terminos_descartados.append(med)
                             continue
                         if getattr(runtime, "es_laboratorio", False):
                             logger.info(
@@ -1948,6 +1953,7 @@ async def _tool_loop(
                                 "medicamento — se ignora (sin aviso de no disponible)",
                                 med,
                             )
+                            terminos_descartados.append(med)
                             continue
                         # FILTRAR POR LA DOSIS QUE PIDIÓ EL CLIENTE.
                         #
@@ -2164,6 +2170,26 @@ async def _tool_loop(
                             receta_final,
                         )
                         return None  # turno atendido: no dejar que el LLM reescriba
+                    if not no_disponibles and terminos_descartados:
+                        # LA IMAGEN NO DEJÓ NINGÚN MEDICAMENTO QUE BUSCAR.
+                        # O el OCR leyó solo la marca ('nombre del medicamento calox') o solo
+                        # la sal ('clorhidrato'). Cotizar eso devuelve un catálogo al azar, así
+                        # que lo honesto es pedir el nombre tal como está en la caja.
+                        # Caso real (provider 32, 2026-10-27): la foto de una FEXOFENADINA
+                        # CLORHIDRATO CALOX se respondió con 20 productos de la marca CALOX.
+                        logger.info(
+                            "receta: la imagen no dejó ningún medicamento buscable "
+                            "(descartados: %s) — pido el nombre", terminos_descartados,
+                        )
+                        await _send(
+                            ctx,
+                            runtime._conv.id,
+                            runtime._crm_conv_id,
+                            "No consigo leer el nombre del medicamento en la imagen. 🙏\n"
+                            "¿Me lo escribes como aparece en la caja? "
+                            "(por ejemplo: FEXOFENADINA CLORHIDRATO 120 MG)",
+                        )
+                        return None  # turno atendido
                 ocr_term = _extraer_termino_ocr(user_text)
                 # Guardar el término del OCR para el turno SIGUIENTE: el cliente
                 # suele preguntar después "¿el producto de la foto lo tienes?"
