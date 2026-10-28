@@ -46,6 +46,10 @@ _FUNCIONALES = {
     # palabras identifica un fármaco por sí sola.
     # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
     "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    # FOTO/IMAGEN: pedir una foto no es pedir un producto. Buscar 'fotos' en el catálogo
+    # devolvía cualquier cosa (caso real provider 32: "Me puede enviar unas fotos" →
+    # "Actualmente no tenemos linternas"). Hay guard propio (`_pide_foto`).
+    "foto", "fotos", "fotografia", "fotografias", "imagen", "imagenes", "selfie",
     "plaquita", "plaquitas", "tirita", "tiritas",
     "aparato", "aparatos", "equipo", "maquina", "maquinita",
     "estuche", "maletin", "cargador", "cable", "bateria", "baterias",
