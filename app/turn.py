@@ -1364,14 +1364,10 @@ async def _tool_loop(
         # que no se puede asegurar. Lo que sí se puede es ofrecer los insumos que se venden
         # aparte — que es lo que haría un humano de mostrador, en vez de un "no tengo
         # información" seco seguido de un handoff.
-        if (
-            _pregunta_por_contenido(user_text)
-            and farmacia
-            and (familia := _familia_de_equipo(
-                f"{runtime.last_term or ''} {runtime.last_product.get('producto') if isinstance(runtime.last_product, dict) else ''}"
-            ))
-            and not _trae_medicamento_propio(user_text, runtime.last_term or "")
-        ):
+        familia = _familia_de_pregunta_contenido(
+            user_text, runtime.last_term, runtime.last_product
+        )
+        if farmacia and familia:
             consumibles: list[dict[str, Any]] = []
             for insumo in _EQUIPOS_CONSUMIBLES[familia]:
                 data_ins = await runtime.execute("buscar_medicamento", {"nombre": insumo})
@@ -5770,6 +5766,36 @@ def _familia_de_equipo(nombre: str) -> str | None:
         if re.search(rf"\b{re.escape(familia)}\b", n):
             return familia
     return None
+
+
+def _familia_de_pregunta_contenido(
+    user_text: str, last_term: str | None, last_product: Any
+) -> str | None:
+    """Familia del equipo si el cliente pregunta por el CONTENIDO de ESE equipo.
+
+    Devuelve None si no aplica. El caso «el cliente repite el mismo aparato» NO es una
+    consulta nueva: `_trae_medicamento_propio` devuelve True porque el mensaje nombra un
+    producto ('Digo q si el Glucómetro viene con todos los materiales…'), y sin esta
+    excepción el guard no disparaba nunca.
+    """
+    if not _pregunta_por_contenido(user_text):
+        return None
+    en_ctx = str(last_term or "")
+    if isinstance(last_product, dict):
+        en_ctx = f"{en_ctx} {last_product.get('producto') or last_product.get('nombre') or ''}"
+    familia = _familia_de_equipo(en_ctx)
+    if not familia:
+        return None
+    # Si además pide OTRO medicamento, manda el flujo normal: no se puede dejar su
+    # petición sin atender por contestar la duda del aparato.
+    for term in _medicamentos_enumerados(user_text):
+        if (
+            term
+            and _termino_es_medicamento_plausible(term)
+            and _familia_de_equipo(term) != familia
+        ):
+            return None
+    return familia
 
 
 def _respuesta_contenido_equipo(producto: str, consumibles: list[dict[str, Any]]) -> str:
