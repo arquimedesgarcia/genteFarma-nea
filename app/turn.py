@@ -1398,6 +1398,9 @@ async def _tool_loop(
                 if clave and clave not in vistos:
                     vistos.add(clave)
                     limpios.append(p)
+            if _familia_de_equipo(producto_ctx) != familia:
+                # El contexto no habla del equipo: se usa la palabra del propio cliente.
+                producto_ctx = familia
             producto_ctx = producto_ctx or "el aparato"
             logger.info(
                 "guard contenido: pregunta por el contenido de '%s' (%s) — ofrezco %d insumo(s)",
@@ -5836,7 +5839,10 @@ def _familia_de_pregunta_contenido(
     en_ctx = str(last_term or "")
     if isinstance(last_product, dict):
         en_ctx = f"{en_ctx} {last_product.get('producto') or last_product.get('nombre') or ''}"
-    familia = _familia_de_equipo(en_ctx)
+    # El equipo puede estar en el contexto (el turno anterior) o nombrado en el propio
+    # mensaje: "¿el glucómetro viene con las tiras?" tiene que funcionar también como
+    # primera consulta, sin un turno previo que lo haya listado.
+    familia = _familia_de_equipo(en_ctx) or _familia_de_equipo(user_text)
     if not familia:
         return None
     # Si además pide OTRO medicamento, manda el flujo normal: no se puede dejar su
