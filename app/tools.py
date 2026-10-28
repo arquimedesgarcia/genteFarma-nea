@@ -510,6 +510,11 @@ _CATEGORIAS_TERAPEUTICAS = {
     "broncodilatador", "antiemetico", "antiulceroso", "antiacne", "antimicotico",
     "multivitaminico", "vitaminico", "suplemento", "suplementos", "generico",
     "generica", "genericos", "genericas",
+    # ANTICONCEPTIVOS: categoría completa. Caso real (provider 32, 2026-10-28): el cliente
+    # escribió "anticonceptivas" y el agente lo buscó en el catálogo; el matcher difuso lo
+    # apoyó en cualquier cosa y la respuesta acabó en "⚠️ No disponibles: ANTICONCEPTIVAS".
+    "anticonceptivo", "anticonceptiva", "anticonceptivos", "anticonceptivas",
+    "anticoncepcion", "anticoncepción",
 }
 
 
@@ -2340,6 +2345,38 @@ class ToolRuntime:
                     "realmente pide: si preguntó por un producto, búscalo con su NOMBRE; "
                     "si solo saludó, saluda y pregunta qué medicamento necesita. "
                     "NUNCA muestres lista de productos."
+                ),
+            }
+        # CATEGORÍA TERAPÉUTICA SOLA ("anticonceptivas", "antibióticos"): no es un producto.
+        # El cliente necesita que le PREGUNTEN cuál, no que le digan que no está.
+        _palabras_cat = [
+            _normalizar_tildes(w.strip(" -.,;:()[]").lower())
+            for w in (nombre or "").split()
+            if w.strip(" -.,;:()[]")
+        ]
+        if (
+            _palabras_cat
+            and any(w in _CATEGORIAS_TERAPEUTICAS for w in _palabras_cat)
+            and all(
+                w in _CATEGORIAS_TERAPEUTICAS
+                or w in _VIAS_ADMINISTRACION
+                or w in _PALABRAS_FUNCIONALES
+                for w in _palabras_cat
+            )
+        ):
+            logger.info(
+                "buscar_medicamento: '%s' es una CATEGORÍA, no un producto — pregunto cuál",
+                nombre,
+            )
+            return {
+                "ok": False,
+                "error": "solo_categoria",
+                "detalle": (
+                    f"El cliente pidió una CATEGORÍA ('{nombre}'), no un producto concreto. "
+                    "NO digas que no lo tienes ni que no está en el catálogo: no has buscado "
+                    "nada. Pregúntale con naturalidad qué marca o nombre exacto necesita "
+                    "(una sola pregunta, corta) y ofrécele ayuda para encontrarlo. "
+                    "NUNCA muestres listas de productos."
                 ),
             }
         if not _termino_es_medicamento_plausible(nombre) and not nombre_sustantivo:
