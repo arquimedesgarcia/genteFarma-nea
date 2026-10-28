@@ -547,7 +547,7 @@ async def run_turn(
     runtime.last_ocr_term = (
         conv.last_ocr_term if isinstance(conv.last_ocr_term, str) else ""
     )
-    prev_last_ocr_term = runtime.last_ocr_term
+    runtime.prev_last_ocr_term = runtime.last_ocr_term
     # Lista de opciones persistida del turno anterior (para resolver
     # "quiero X cajas de la opción Z").
     if isinstance(conv.last_options, list):
@@ -2369,7 +2369,7 @@ async def _tool_loop(
                 # tengo el producto de la foto" mostrando ese oftálmico. Se usa
                 # el término del OCR de la imagen que el cliente SÍ mandó.
                 if _parece_referencia_sin_farmaco(user_text):
-                    anterior = runtime.last_ocr_term or prev_last_ocr_term
+                    anterior = runtime.last_ocr_term or runtime.prev_last_ocr_term
                     if anterior:
                         logger.info(
                             "referencia a imagen: buscando con el OCR previo '%s' "
