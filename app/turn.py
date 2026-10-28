@@ -5823,8 +5823,7 @@ _RE_PIDE_FOTO = re.compile(
 )
 
 RESPUESTA_FOTO = (
-    "¡Con gusto! En un momento le enviaremos la foto del producto solicitado. 🙌\n"
-    "Si mientras tanto quiere, le confirmo precio y disponibilidad de lo que está viendo."
+    "¡Con gusto! En un momento le enviaremos la foto del producto solicitado. 🙌"
 )
 
 
