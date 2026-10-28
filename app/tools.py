@@ -198,6 +198,18 @@ _PALABRAS_FUNCIONALES = {
     # término que llega al catálogo lleva la etiqueta y el filtro de laboratorio no
     # reconoce la marca. Caso real (provider 32, 2026-10-27).
     "nombre", "nombres", "rotulo", "etiqueta", "descripcion", "presentacion",
+    # ACCESORIOS Y CONSUMIBLES DE UN EQUIPO, NO MEDICAMENTOS. Caso real (provider 32,
+    # 2026-10-27): "¿el Glucómetro HLM-78 viene con las plaquitas, el lápiz y la pulla o
+    # solo el aparato?" → el troceador sacó ['lapiz', 'pulla aparato'] y el cliente recibió
+    # 20 LÁPICES de cejas y labiales, más "no disponibles: PULLA APARATO". Ninguna de estas
+    # palabras identifica un fármaco por sí sola.
+    # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
+    "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    "plaquita", "plaquitas", "tirita", "tiritas",
+    "aparato", "aparatos", "equipo", "maquina", "maquinita",
+    "estuche", "maletin", "cargador", "cable", "bateria", "baterias",
+    "adaptador", "funda", "repuesto", "repuestos",
+
     "medicamento", "medicamentos", "consulta", "consultar", "opcion", "opciones",
     "economico", "economica", "barato", "barata", "costo", "oferta",
     # Verbos/nombres de FRASE del cliente (reclamos, garantías, entregas).
