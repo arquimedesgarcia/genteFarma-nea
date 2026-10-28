@@ -1784,6 +1784,17 @@ async def _tool_loop(
                         # Caso real (2026-10-27): el OCR de una caja de FEXOFENADINA CLORHIDRATO
                         # devolvió solo 'CLORHIDRATO' y se cotizaron betahistina, metformina,
                         # bromexina y loperamida.
+                        # ¿EL TÉRMINO ES UNA FRASE, NO UN MEDICAMENTO?
+                        # Una PREGUNTA sobre un producto ("¿el Glucómetro HLM-78 viene con las
+                        # plaquitas de la sangre...?") troceada por líneas produce términos que
+                        # no son medicamentos. Buscarlos devuelve basura o productos que no
+                        # vienen al caso; la regla es no responder con algo incoherente.
+                        if not _termino_es_medicamento_plausible(med):
+                            logger.info(
+                                "receta: '%s' no parece un medicamento (frase/pregunta) — no "
+                                "busco en el catálogo", med,
+                            )
+                            continue
                         if getattr(runtime, "es_sal", False):
                             logger.info(
                                 "receta: '%s' es solo la SAL del principio activo — se ignora "
@@ -2445,6 +2456,18 @@ _FILLER = {
     # duplicadas: aquí, en tools._PALABRAS_FUNCIONALES y en relevancia._FUNCIONALES — hay
     # que tocar las tres. Caso real provider 32, 2026-10-27.
     "nombre", "nombres", "rotulo", "etiqueta", "descripcion", "presentacion",
+    # ACCESORIOS Y CONSUMIBLES DE UN EQUIPO, NO MEDICAMENTOS. Caso real (provider 32,
+    # 2026-10-27): "¿el Glucómetro HLM-78 viene con las plaquitas, el lápiz y la pulla o
+    # solo el aparato?" → el troceador sacó ['lapiz', 'pulla aparato'] y el cliente recibió
+    # 20 LÁPICES de cejas y labiales, más "no disponibles: PULLA APARATO". Ninguna de estas
+    # palabras identifica un fármaco por sí sola.
+    # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
+    "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    "plaquita", "plaquitas", "tirita", "tiritas",
+    "aparato", "aparatos", "equipo", "maquina", "maquinita",
+    "estuche", "maletin", "cargador", "cable", "bateria", "baterias",
+    "adaptador", "funda", "repuesto", "repuestos",
+
     # 'resumen' NO es un medicamento. En "dame el resumen de esto y le agregas 3 cajas
     # de glymar" el troceador lo tomaba como un producto más y el cliente leía
     # "⚠️ No disponibles en el catálogo: RESUMEN".
