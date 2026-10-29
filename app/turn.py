@@ -769,6 +769,21 @@ async def run_turn(
     # la que hay es otra, la respuesta tiene que DECIRLO aunque el LLM redacte su propia
     # versión. Los productos llegan ya acotados por la tool; este aviso es lo que impide que
     # la lista se lea como "esto es lo que pediste".
+    # AVISO DE CONCENTRACIÓN: si el cliente pidió una dosis y NINGÚN producto la tiene, el
+    # mensaje lo dice SIEMPRE (aunque el LLM redacte su propia versión). Hermano del aviso
+    # de forma. Caso real (provider 32, 2026-10-29): "RIVAROXABAN DE 20mg" se respondió con
+    # dos presentaciones de 15 mg sin una sola palabra de que la de 20 no existe.
+    if farmacia and final_text and runtime.last_products:
+        _term_cli = _extraer_termino_medicamento(
+            _texto_cliente_sin_marcadores(user_text) or user_text or ""
+        ) or ""
+        _dosis_cli = _extraer_dosis(_term_cli) if _term_cli else ""
+        if _dosis_cli:
+            _aviso_d = _aviso_dosis_agotada(runtime.last_products, _dosis_cli)
+            if _aviso_d and _aviso_d not in final_text:
+                logger.info("backstop dosis: antepongo el aviso — %s", _aviso_d)
+                final_text = _aviso_d + "\n\n" + final_text
+
     _aviso_forma_rt = getattr(runtime, "aviso_forma", "") or ""
     if farmacia and final_text and _aviso_forma_rt and _aviso_forma_rt not in final_text:
         logger.info("backstop forma: antepongo el aviso — %s", _aviso_forma_rt)
@@ -4343,6 +4358,35 @@ def _titulo_sin_dosis_negada(texto: str) -> str:
     """
     m = _RE_AVISO_DOSIS_NEGADA.search(texto or "")
     if not m:
+        # CASO 2: sin aviso previo, pero el encabezado lleva una concentración que NINGÚN
+        # producto de la lista tiene. Caso real (provider 32, 2026-10-29): el LLM tituló
+        # "RIVAROXABAN 20 MG" sobre dos presentaciones de 15 mg, sin avisar de nada.
+        lineas_txt = (texto or "").splitlines()
+        # El texto de los PRODUCTOS son las líneas de la lista (💊 / precio). Todo lo demás
+        # es encabezado o prosa.
+        productos = " ".join(
+            ln for ln in lineas_txt if _RE_LINEA_DE_LISTA.search(ln.strip())
+        ).lower().replace(" ", "")
+        if not productos:
+            return texto
+        for i, ln in enumerate(lineas_txt):
+            s = ln.strip()
+            if not s or _RE_LINEA_DE_LISTA.search(s):
+                continue
+            dosis_enc = _RE_DOSIS_ENVASE.findall(s)
+            if not dosis_enc:
+                continue  # esta línea no lleva concentración: es prosa
+            for num, unidad in dosis_enc:
+                num_n = num.replace(",", ".")
+                clave = f"{num_n}{unidad.lower()}"
+                if clave not in productos:
+                    logger.info(
+                        "título sin dosis inexistente: quito %s %s de %r",
+                        num, unidad, s[:40],
+                    )
+                    lineas_txt[i] = _RE_DOSIS_ENVASE.sub("", s).strip(" -–,:.*")
+                    return "\n".join(lineas_txt)
+            return texto  # la primera línea con dosis SÍ existe en la lista
         return texto
     dosis = m.group(1).strip()
     num = (re.match(r"[\d.,]+", dosis) or re.match(r"", dosis)).group(0)
