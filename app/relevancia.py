@@ -31,12 +31,36 @@ import re
 
 # Palabras funcionales/relleno: nunca son señal de relevancia. Un término que
 # solo tiene palabras de esta lista no puede validar ningún producto.
+# VOCATIVO / CARIÑO: el cliente saluda y llama al agente "mi amor", "corazón", "cariño".
+# Caso real (provider 32, 2026-10-29): "Buenas tardes!! Mi amor que precio tiene la
+# nitrofurantoina de 50mg y la vitamina C" → el agente buscó 'AMOR NITROFURANTOINA 50MG',
+# avisó "No tengo NITROFURANTOINA. De AMOR 50MG hay esto" y cotizó TE AMO PRESERV. 3PCS.
+VOCATIVOS_R = {
+    "amor", "cariño", "carino", "corazon", "corazón", "bebe", "bebé", "preciosa",
+    "precioso", "linda", "lindo", "hermosa", "hermoso", "bonita", "bonito",
+    "principe", "príncipe", "reina", "rey", "amiga", "amigo", "senora", "señora",
+    "senor", "señor", "doctor", "doctora", "licenciada", "licenciado", "jefe", "jefa",
+    "vecina", "vecino", "pana", "panita", "compatriota",
+}
+# INTENCIÓN DE COMPRA: no es un medicamento.
+INTENCION_COMPRA_R = {
+    "quiero", "queria", "quería", "quisiera", "querer", "querría", "querria",
+    "deseo", "deseamos", "llevo", "llevare", "llevaré", "llevaria", "llevaría",
+    "apartame", "apártame", "separame", "sepárame", "encargame", "encárgame",
+}
+# REFERENCIA A LA LISTA ANTERIOR: 'de la opción 9', 'la número 3'.
+REFERENCIA_LISTA_R = {
+    "opcion", "opción", "opciones", "opcioncita", "numerito",
+}
+
 _FUNCIONALES = {
     # RÓTULOS DEL CAMPO que el OCR devuelve pegados al contenido
     # ('nombre del medicamento fexofenadina clorhidrato calox'). Sin esto se cuelan como
     # token de fármaco: el núcleo ausente salía 'nombre'/'medicamento' y una lectura con
     # solo la marca se daba por completa. Caso real provider 32, 2026-10-27.
     "nombre", "nombres", "rotulo", "etiqueta", "descripcion", "presentacion",
+    # Vocativo, intención de compra y referencia a la lista (gemelos de tools/turn).
+    *VOCATIVOS_R, *INTENCION_COMPRA_R, *REFERENCIA_LISTA_R,
     "medicamento", "medicamentos",
 
     # ACCESORIOS Y CONSUMIBLES DE UN EQUIPO, NO MEDICAMENTOS. Caso real (provider 32,
@@ -222,6 +246,32 @@ _VERBOS_Y_DISCURSO = {
 #     menos, 'hasta'≈'pasta' y 'todo'≈'dove' vuelven a colarse — exactamente el
 #     bug que esto cierra. Con 5+, los typos reales pasan ('omeprasol'≈'omeprazol').
 _MIN_LEN_SENAL = 4
+
+# LA LETRA DE LA VITAMINA ES PARTE DEL NOMBRE. Caso real (provider 32, 2026-10-29):
+# "la vitamina C" se reducía a 'vitamina' (una letra se descarta por corta) y el cliente
+# recibía 20 productos de Vitamina E, K, B12, colágeno… y hasta LIMPIADOR FACIAL.
+_VITAMINAS = {"a", "b", "c", "d", "e", "k"}
+_RE_VITAMINA_EN_TERMINO = re.compile(r"\bvitamin|\bmultivit|\bcomplejo\s+b\b", re.IGNORECASE)
+
+
+def _es_letra_de_vitamina(w: str, termino: str = "") -> bool:
+    """¿Es la letra de una vitamina ('vitamina c', 'vit d')?"""
+    return w in _VITAMINAS and bool(_RE_VITAMINA_EN_TERMINO.search(termino or ""))
+
+
+def _relevante_letra_de_vitamina(w: str, nombre: str) -> bool:
+    """La letra solo vale si el producto es de ESA vitamina.
+
+    Sin esto, 'c' casaría con cualquier 'C' del título (VITAMINA E 400UI X 10CAP).
+    """
+    n = _norm(nombre)
+    if re.search(rf"\bvitaminas?\s*[-/]?\s*{w}\b", n):
+        return True
+    if re.search(rf"\bvit\s*[-/]?\s*{w}\b", n):
+        return True
+    # 'C' suelta como palabra completa (p. ej. 'VITAMINA C + ZINC').
+    return bool(re.search(rf"(?:^|\s){w}(?:\s|$)", n))
+
 _MIN_LEN_ENTRADA = 3
 _MIN_LEN_TYPO = 5
 
@@ -322,9 +372,10 @@ def tokens_senal(termino: str, min_len: int | None = None) -> list[str]:
         if _RE_DOSIS_TOKEN.fullmatch(w):
             continue
         if len(w) < umbral or w.isdigit():
-            # EXCEPCIÓN: los CÓDIGOS del nombre ('d3', 'k2', 'b12') son cortos pero
+            # EXCEPCIÓN 1: los CÓDIGOS del nombre ('d3', 'k2', 'b12') son cortos pero
             # identifican el producto. Ver `_es_codigo_del_nombre`.
-            if not _es_codigo_del_nombre(w):
+            # EXCEPCIÓN 2: la LETRA de la vitamina ('vitamina c').
+            if not (_es_codigo_del_nombre(w) or _es_letra_de_vitamina(w, termino)):
                 continue
         if w in _FUNCIONALES:
             continue
@@ -349,6 +400,17 @@ def es_relevante(termino: str, nombre_producto: str) -> bool:
     hay = _norm(nombre_producto)
     hay_tokens = hay.split()
     hay_set = set(hay_tokens)
+    # LA LETRA DE LA VITAMINA SE EXIGE. Buscando 'vitamina c', el producto VITAMINA E
+    # comparte 'vitamina' y entraba en la lista (20 productos de E, K, B12 y colágeno
+    # para quien pidió C). Con la letra pedida, ese producto queda fuera.
+    letras = [w for w in senales if w in _VITAMINAS]
+    if letras:
+        if not all(_relevante_letra_de_vitamina(w, hay) for w in letras):
+            return False
+        resto = [w for w in senales if w not in _VITAMINAS]
+        if not resto:
+            return True
+        return any(_coincide_token(w, hay, hay_tokens, hay_set) for w in resto)
     for w in senales:
         if w in hay_set:
             return True
@@ -371,6 +433,24 @@ def es_relevante(termino: str, nombre_producto: str) -> bool:
                     and not _difiere_por_sal(w, t)):
                 if _levenshtein(w, t) <= _MAX_DIST:
                     return True
+    return False
+
+
+def _coincide_token(w: str, hay: str, hay_tokens: list[str], hay_set: set[str]) -> bool:
+    """¿Este token del término aparece en el nombre del producto? (cuerpo de `es_relevante`)"""
+    if w in hay_set:
+        return True
+    for t in hay_tokens:
+        if (len(t) >= _MIN_LEN_SENAL - 1 and (t.startswith(w) or w.startswith(t))
+                and not _difiere_por_sal(w, t)):
+            return True
+    if len(w) >= 6 and w in hay:
+        return True
+    for t in hay_tokens:
+        if (len(t) >= _MIN_LEN_TYPO and abs(len(t) - len(w)) <= _MAX_DIST
+                and not _difiere_por_sal(w, t)):
+            if _levenshtein(w, t) <= _MAX_DIST:
+                return True
     return False
 
 
