@@ -6081,6 +6081,11 @@ def _aviso_no_lo_tengo(term: str, ausente: str) -> str:
     """
     if not term or not ausente:
         return ""
+    # La LETRA de la vitamina no es "algo que no tengo": 'vitamina c' producía
+    #     ⚠️ No tengo C. De VITAMINA hay esto:
+    # encima de una lista de VITAMINA C (provider 32, 2026-10-29).
+    if len(ausente.strip()) < 2 or _es_letra_de_vitamina(ausente.strip().lower(), term):
+        return ""
     resto = " ".join(w for w in term.split() if w.lower() != ausente.lower())
     if resto.strip():
         return f"⚠️ No tengo {ausente.upper()}. De {resto.upper()} hay esto:"
