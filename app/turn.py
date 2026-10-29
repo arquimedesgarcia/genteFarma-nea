@@ -5332,6 +5332,31 @@ def _lineas_candidatas_medicamento(ocr: str) -> list[str]:
     ]
 
 
+_RE_DOSIS_ENVASE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(mg|mcg|gr|g|ml|ui)\b", re.IGNORECASE
+)
+
+
+def _dosis_unica_del_envase(lineas: list[str]) -> str:
+    """La concentración del envase SI hay UNA sola ('20 mg').
+
+    Caso real (provider 32, 2026-10-29): la foto del RIVAROXABAN 20 mg devolvía la lista de
+    15 mg SIN decir que la de 20 no está — porque el término de la caja se quedaba en
+    'rivaroxaban' y la dosis que el cliente veía en la caja se perdía. Con la dosis en el
+    término, `_aviso_dosis_agotada` avisa: "No tengo de 20 mg. Lo tengo en: 15 mg".
+
+    Si hay VARIAS concentraciones (combinaciones tipo '400 mg - 57 mg/5 ml') se devuelve ''
+    para no ensuciar el término.
+    """
+    vistas: list[str] = []
+    for linea in lineas:
+        for m in _RE_DOSIS_ENVASE.finditer(linea or ""):
+            valor = f"{m.group(1).replace(',', '.')} {m.group(2).lower()}"
+            if valor not in vistas:
+                vistas.append(valor)
+    return vistas[0] if len(vistas) == 1 else ""
+
+
 async def _medicamentos_de_ocr(
     ocr: str, buscar: Any
 ) -> tuple[list[str], str]:
@@ -5422,7 +5447,11 @@ async def _medicamentos_de_ocr(
                             _limpiar_etiquetas_ocr(completo).lower(),
                         )
                     )
-                    return [term_caja or term], (
+                    base = term_caja or term
+                    dosis_env = _dosis_unica_del_envase(lineas)
+                    if dosis_env and dosis_env not in base:
+                        base = f"{base} {dosis_env}"
+                    return [base], (
                         "caja (un producto cubre los componentes del envase)"
                     )
 
@@ -5462,7 +5491,11 @@ async def _medicamentos_de_ocr(
             if prods_completo and todas and any(
                 all(es_relevante(w, p) for w in todas) for p in prods_completo
             ):
-                return [term_completo], (
+                dosis_env = _dosis_unica_del_envase(lineas)
+                base = term_completo
+                if dosis_env and dosis_env not in base:
+                    base = f"{base} {dosis_env}"
+                return [base], (
                     "caja (el envase se llama con todos los componentes)"
                 )
 
