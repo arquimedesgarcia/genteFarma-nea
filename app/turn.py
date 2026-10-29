@@ -5218,9 +5218,52 @@ async def _medicamentos_de_ocr(
                         "caja (un producto cubre los componentes del envase)"
                     )
 
+    # ANTES DE RENDIRSE: ¿el envase se llama con TODOS los componentes juntos?
+    # La búsqueda por el primer nombre devuelve solo la monoterapia (medido: 'amoxicilina'
+    # trae 19 presentaciones sueltas y NINGUNA de la combinación, que es lo que había en la
+    # foto), así que la cobertura no encuentra producto. Si el nombre completo SÍ existe en
+    # el catálogo, entonces el envase es UN producto.
+    # Los componentes con PALABRA (≥5 letras) son los que pueden formar parte del nombre;
+    # '60 ml' o '400 mg - 57 mg/5 ml' son volumen/dosis y solo ensucian la búsqueda.
+    componentes_nombre = [
+        c for c in lineas[1:]
+        if not _es_linea_descriptiva(c) and re.findall(r"[a-záéíóúüñ]{5,}", c.lower())
+    ]
+    if term and componentes_nombre:
+        completo = " ".join([nombre] + componentes_nombre)
+        term_completo = " ".join(
+            re.findall(r"[a-záéíóúüñ0-9]+", _limpiar_etiquetas_ocr(completo).lower())
+        )
+        if term_completo and term_completo != term:
+            try:
+                prods_completo = await buscar(term_completo)
+            except Exception:  # noqa: BLE001
+                prods_completo = []
+            # NO basta con que la búsqueda devuelva algo (el matcher es difuso: con
+            # 'esoz leprit bumetin' devuelve productos sueltos y una RECETA de 3 se
+            # colapsaba en una). El producto tiene que cubrir TODAS las palabras de todos
+            # los componentes.
+            # Incluye TAMBIÉN las palabras del NOMBRE: si solo se exigen las del
+            # componente, 'LOSARTAN 50 MG / METFORMINA 850 MG' (dos medicamentos) se
+            # colapsaba en uno porque hay productos de metformina.
+            todas = [
+                w
+                for c in [nombre] + componentes_nombre
+                for w in re.findall(r"[a-záéíóúüñ]{5,}", c.lower())
+            ]
+            if prods_completo and todas and any(
+                all(es_relevante(w, p) for w in todas) for p in prods_completo
+            ):
+                return [term_completo], (
+                    "caja (el envase se llama con todos los componentes)"
+                )
+
     # Receta: se devuelven las líneas como medicamentos independientes, con la misma
     # lógica que ya usaba el backstop.
-    meds = _parsear_medicamentos_receta(ocr)
+    #
+    # Se reusan las líneas YA FILTRADAS: pasar el OCR crudo colaba 'POLVO SUSPENSION' y
+    # 'USO PEDIATRICO' como medicamentos (los mismos que `_es_linea_descriptiva` descarta).
+    meds = _parsear_medicamentos_receta("\n".join(lineas))
     if not meds and _parece_lista_medicamentos(ocr):
         meds = _parsear_medicamentos_receta(
             "\n".join(_lineas_lista_medicamentos(ocr))
