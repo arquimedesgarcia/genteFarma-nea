@@ -665,6 +665,9 @@ def _limpiar_termino_medicamento(term: str) -> str:
     # La FRASE de indicación se quita ANTES de tokenizar: describe PARA QUÉ sirve el
     # medicamento, no CUÁL es. 'broxol tos seca' → 'broxol' (11 productos en vez de 3 basura).
     t_sin = _sin_frase_de_indicacion(t_sin)
+    # 'de la opción 9' / 'la número 3' son una REFERENCIA A LA LISTA, no una dosis: si el
+    # '9' sobrevive, el catálogo recibe 'macrodantina vitamina c 9' y no encuentra nada.
+    t_sin = re.sub(r"\b(?:opci[oó]n|opciones|n[uú]mero)\s+\d+", " ", t_sin)
     palabras = re.findall(r"[a-z0-9]+", t_sin)
     # La forma HABLADA de la unidad ("miligramos") se traduce a su abreviatura
     # ("mg") ANTES de decidir. Sin esto el número que la precede se descarta por
