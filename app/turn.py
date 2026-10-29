@@ -2692,7 +2692,12 @@ async def _safe_handoff(ctx: AppContext, crm_conv_id: str, reason: str) -> None:
 # la consulta y el modelo conteste con datos reales, nunca inventados.
 
 _VERBOS_MEDICAMENTO = re.compile(
-    r"\b(tienen|tenéis|hay|consigo|me dan|me consigues|tienes|busco|buscando|"
+    # VERBOS DE PASE A HUMANO: pedir el pase no es pedir un medicamento. Sin esto,
+    # "Puedes por favor pasarlo al equipo" buscaba 'pasarlo' en el catálogo.
+    r"\b(pasar|pasarlo|pasarla|pasarlos|pasarlas|pasame|pásame|paseme|páseme|pasa|"
+    r"pasen|transferir|transferirlo|derivar|derivarlo|derivalo|derivelo|escalar|"
+    r"escalalo|escalelo|atender|"
+    r"atiendelo|atiéndelo|tienen|tenéis|hay|consigo|me dan|me consigues|tienes|busco|buscando|"
     r"buscar|buscas|necesito|quisiera|quiero|quería|queremos|saber|"
     r"venden|vendes|disponible|disponibles|disponen|disponemos|cuesta|cuestan|precio|"
     r"pueden conseguir|traen|consigues|conseguir|tengo|tiene|hay|mande|"
@@ -2736,6 +2741,9 @@ _FILLER = {
     "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
     "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
     "par", "pares", "trio", "docena", "mitad", "todas", "todos",
+    # EL EQUIPO / EL PERSONAL: pedir el pase no nombra un producto ("transferir a un
+    # asesor" dejaba 'asesor' como término de búsqueda).
+    "asesor", "asesora", "supervisor", "encargado", "encargada", "staff",
     # ADVERBIOS/CUANTIFICADORES del habla: 'gracias, muy amable' dejaba el término 'muy'
     # y el matcher difuso lo apoyaba en cualquier cosa.
     "muy", "tan", "bastante", "demasiado", "algo", "mucho", "mucha", "muchos", "muchas",
@@ -3374,12 +3382,27 @@ _HANDOFF_PALABRAS_PERSONA = (
     "humano", "humana", "persona", "personas", "empleado", "empleada",
     "encargado", "encargada", "gerente", "supervisor", "asesor", "vendedor",
     "alguien", "dueño", "dueña",
+    # 'el equipo' es el personal del negocio. Caso real (provider 19, 2026-10-29):
+    # "Puedes por favor pasarlo al equipo" no activaba el guard y el agente buscó
+    # 'pasarlo' en el catálogo ("⚠️ No tengo PASARLO").
+    "equipo", "staff", "farmacéutico", "farmaceutico", "químico", "quimico",
 )
 _HANDOFF_VERBOS = (
     "pasa", "pasame", "pásame", "pasen", "pasenme", "pasarme", "paselo", "pasamelo",
     "paseme", "páseme", "pasemelo", "quiero", "quisiera", "necesito", "puedo",
     "deseo", "prefiero", "hablar", "comunicar", "comunicarme", "chatear",
     "atiendanme", "atiendeme", "tratar",
+    # CON PRONOMBRE: 'pasarlo/pasarla/pasarlos al equipo' es la forma más natural de
+    # pedir el pase y no estaba.
+    "pasarlo", "pasarla", "pasarlos", "pasarlas", "pasarselo", "pasárselo", "pasarle",
+    "transferir", "transferirlo", "derivar", "derivarlo", "escalar", "escalarlo",
+    "atienda", "atender", "atiéndelo", "atiendelo",
+)
+# RAÍCES de los verbos de pase: cubren las formas con pronombre que no se pueden enumerar
+# ('derívalo', 'transferirlo', 'escalalo', 'atendedme', 'pásemelo').
+_HANDOFF_RAICES = (
+    "pas", "transfer", "deriv", "escal", "atien", "atend", "comunic", "hablar", "chate",
+    "quier", "necesit", "pued", "dese", "prefier", "tratar", "contact",
 )
 _PIDE_HUMANO = re.compile(
     r"(\bpas(?:a|ame|en|arme|elo|enme|eme|ame(?:lo)?)\b[^.]{0,25}\b(?:human|person|"
@@ -3393,7 +3416,9 @@ _PIDE_HUMANO = re.compile(
     r"\b(?:human|persona)\s+real\b|"
     r"\bhay\s+(?:alguien|una\s+persona)\s+(?:ah[íi]|disponible)\b|"
     r"\b(?:no\s+)?quiero\s+(?:un|una)\s+(?:human|person)|"
-    r"\bpasame\s+con\s+(?:alguien|el\s+encargad|el\s+due[ñn]))",
+    r"\bpasame\s+con\s+(?:alguien|el\s+encargad|el\s+due[ñn])|"
+    r"\bpas(?:a|ame|arlo|arla|arlos|arlas|en|enme|eme|elo)\b[^.]{0,30}"
+    r"\b(?:equipo|staff|personal|farmac[ée]utic\w*|auxiliar)\b)",
     re.IGNORECASE,
 )
 
@@ -3412,8 +3437,10 @@ def _pide_hablar_con_humano(texto: str) -> bool:
     t = texto.strip().lower()
     if _PIDE_HUMANO.search(t):
         return True
-    if any(p in t for p in _HANDOFF_PALABRAS_PERSONA) and any(
-        v in t for v in _HANDOFF_VERBOS
+    palabras = re.findall(r"[a-záéíóúüñ]+", t)
+    if any(p in t for p in _HANDOFF_PALABRAS_PERSONA) and (
+        any(v in t for v in _HANDOFF_VERBOS)
+        or any(w.startswith(_HANDOFF_RAICES) for w in palabras)
     ):
         # "te paso con un humano" / "voy a pasarte con alguien" es el AGENTE hablando
         # (o el historial citado), no una petición del cliente: NO cuenta.
