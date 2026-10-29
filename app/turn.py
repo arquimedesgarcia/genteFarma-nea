@@ -2236,6 +2236,16 @@ async def _tool_loop(
                         else:
                             logger.info("receta: %s no está en el catálogo", med)
                             no_disponibles.append(titulo)
+                        # ¿ESTE GRUPO YA SE LO AGREGAMOS? Si el cliente dijo "quiero la
+                        # opción 9" (de esta misma lista) y además pregunta el precio de
+                        # otra cosa, no se le repite la lista entera que acaba de ver.
+                        # El grupo ya se había añadido arriba: se quita.
+                        if grupos and _grupo_ya_en_carrito(grupos[-1][1], runtime):
+                            logger.info(
+                                "receta: '%s' ya está en el carrito por elección de opción "
+                                "— no se repite la lista", grupos[-1][0],
+                            )
+                            grupos.pop()
                     if grupos:
                         # Guardar la lista GLOBAL de opciones (en el MISMO orden
                         # que ve el cliente: medicamento por medicamento, cada
@@ -4376,6 +4386,18 @@ _RE_AVISO_DOSIS_NEGADA = re.compile(
 _RE_LINEA_DE_LISTA = re.compile(r"💊|\$|\bBs\b|^(?:👉|🛒|✅|⚠️|Ejemplo)", re.IGNORECASE)
 
 
+def _grupo_ya_en_carrito(prods: list[dict[str, Any]], runtime: Any) -> bool:
+    """¿Alguno de estos productos lo agregó el backstop por elección de opción?"""
+    skus = getattr(runtime, "backstop_added_skus", None)
+    if not skus:
+        return False
+    for p in prods or []:
+        sku = str(p.get("productId") or p.get("producto") or "")
+        if sku and sku in skus:
+            return True
+    return False
+
+
 def _con_confirmacion_carrito(texto: str, runtime: Any) -> str:
     """Antepone lo que el backstop agregó al carrito si la respuesta no lo dice.
 
@@ -4385,8 +4407,13 @@ def _con_confirmacion_carrito(texto: str, runtime: Any) -> str:
     confs = list(getattr(runtime, "cart_confirmaciones", None) or [])
     if not confs:
         return texto
-    cuerpo = (texto or "").lower()
-    if "carrito" in cuerpo and ("agreg" in cuerpo or "añad" in cuerpo or "anad" in cuerpo):
+    # OJO con la guarda: el cierre canónico dice "👉 Para agregar al carrito…", así que
+    # buscar 'carrito' + 'agreg' daba positivo SIEMPRE y la confirmación nunca se ponía.
+    if re.search(
+        r"(?i)(?:✅|he\s+agregado|agregad[oa]s?\s+al?\s+(?:carrito|pedido)|"
+        r"(?:carrito|pedido)\s+(?:actualizado|con))",
+        texto or "",
+    ):
         return texto
     if len(confs) == 1:
         cabecera = "✅ Agregado al carrito: " + confs[0].lstrip("• ")
