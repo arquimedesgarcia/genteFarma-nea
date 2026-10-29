@@ -355,6 +355,7 @@ def _termino_es_medicamento_plausible(term: str) -> bool:
         or w in _CATEGORIAS_TERAPEUTICAS
         or w in _SALES_FARMACEUTICAS
         or w in _ENFERMEDADES
+        or w in _ATRIBUTOS_NO_PRODUCTO
         or w in _PALABRAS_FUNCIONALES
         for w in palabras
     ):
@@ -558,6 +559,32 @@ _CATEGORIAS_TERAPEUTICAS = {
     "anticoncepcion", "anticoncepción",
 }
 
+
+# ATRIBUTOS Y SEGMENTOS — NO SON UN PRODUCTO.
+#
+# Describen PARA QUÉ o PARA QUIÉN es lo que el cliente busca, pero no lo nombran. En el
+# catálogo están en cientos de títulos (cintas, ganchos, gorros, pañales, cánulas), así que
+# buscar por ellos devuelve basura con total seguridad.
+#
+# Caso real (provider 32, 2026-10-29 09:46):
+#   "Una crema para cabello rizado" → 20 artículos de peluquería (cepillos, rociadores)
+#   "Para adultos"                  → pañales, cánulas nasales, preservativos, relojes
+_ATRIBUTOS_NO_PRODUCTO = frozenset({
+    # partes del cuerpo / del cabello
+    "cabello", "pelo", "piel", "cara", "rostro", "manos", "pies", "unas", "uñas", "dientes",
+    "boca", "ojos", "labios", "barba", "cuerpo", "cejas", "pestanas", "pestañas", "axilas",
+    "cuero", "cabelludo", "encías", "encias", "nuca", "espalda",
+    # segmento / a quién va dirigido
+    "adulto", "adulta", "adultos", "adultas", "nino", "nina", "ninos", "niñas", "niño",
+    "niña", "niños", "bebe", "bebes", "bebé", "bebés", "infantil", "pediatrico",
+    "pediátrico", "pediatrica", "pediátrica", "mujer", "mujeres", "hombre", "hombres",
+    "senora", "señora", "dama", "caballero", "unisex", "familiar", "junior", "senior",
+    # descriptores del tipo de cabello/piel/producto
+    "rizado", "rizada", "liso", "lisa", "ondulado", "ondulada", "graso", "grasa", "seco",
+    "seca", "mixto", "mixta", "sensible", "sensibles", "delicado", "delicada", "natural",
+    "normal", "extra", "fuerte", "suave", "humectante", "hidratante", "nutritivo",
+    "anticaspa", "antifrizz", "frizz", "brillo", "suavidad", "crecimiento",
+})
 
 # VÍA DE ADMINISTRACIÓN — NO ES UN MEDICAMENTO.
 #
@@ -2407,7 +2434,8 @@ class ToolRuntime:
                 for w in _palabras_cat
             )
             and all(
-                w in _CATEGORIAS_TERAPEUTICAS
+                len(w) < 3
+                or w in _CATEGORIAS_TERAPEUTICAS
                 or w in _VIAS_ADMINISTRACION
                 or w in _ENFERMEDADES
                 or w in _PALABRAS_FUNCIONALES
@@ -2427,6 +2455,49 @@ class ToolRuntime:
                     "nada. Pregúntale con naturalidad qué marca o nombre exacto necesita "
                     "(una sola pregunta, corta) y ofrécele ayuda para encontrarlo. "
                     "NUNCA muestres listas de productos."
+                ),
+            }
+        # DESCRIPCIÓN SIN NOMBRE ("una crema para cabello rizado", "para adultos"): el
+        # cliente pide una recomendación, no un artículo concreto. Listar es garantía de
+        # basura (pañales, cintas, rociadores). Se pregunta qué busca exactamente.
+        _palabras_atr = [
+            _normalizar_tildes(w.strip(" -.,;:()[]").lower())
+            for w in (nombre or "").split()
+            if w.strip(" -.,;:()[]")
+        ]
+        # La señal puede ser un ATRIBUTO ('cabello', 'adultos'), una ENFERMEDAD ('hongos') o
+        # una CATEGORÍA ('antibiótico'): en los tres casos describe, no nombra.
+        if _palabras_atr and any(
+            w in _ATRIBUTOS_NO_PRODUCTO
+            or w in _ENFERMEDADES
+            or w in _CATEGORIAS_TERAPEUTICAS
+            for w in _palabras_atr
+        ) and all(
+            # Los artículos y preposiciones de 1-2 letras ('el', 'la', 'de', 'y') no
+            # cuentan: 'gel para el pelo' fallaba justo por 'el'.
+            len(w) < 3
+            or w in _ATRIBUTOS_NO_PRODUCTO
+            or w in _CATEGORIAS_TERAPEUTICAS
+            or w in _VIAS_ADMINISTRACION
+            or w in _ENFERMEDADES
+            or w in _PALABRAS_FUNCIONALES
+            or w in _FORMA_CANONICA
+            for w in _palabras_atr
+        ):
+            logger.info(
+                "buscar_medicamento: '%s' describe el producto pero no lo nombra — pregunto",
+                nombre,
+            )
+            return {
+                "ok": False,
+                "error": "pide_recomendacion",
+                "detalle": (
+                    f"El cliente describe PARA QUÉ o PARA QUIÉN quiere el producto "
+                    f"('{nombre}'), pero NO nombra ninguno. NO has buscado nada y NO "
+                    "puedes listar productos: en el catálogo esas palabras están en cientos "
+                    "de artículos que no tienen nada que ver. Pregúntale, en UNA línea y con "
+                    "naturalidad, qué producto o marca busca (por ejemplo: ¿champú, crema de "
+                    "peinar, tratamiento?), y ofrécele ayuda para encontrarlo."
                 ),
             }
         if not _termino_es_medicamento_plausible(nombre) and not nombre_sustantivo:
