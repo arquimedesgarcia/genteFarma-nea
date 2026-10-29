@@ -1982,6 +1982,12 @@ async def _tool_loop(
                         # `_es_nombre_de_laboratorio`). Nunca se quita el fármaco.
                         if prods:
                             titulo = _titulo_de_lista(titulo, prods)
+                            # Y si NINGÚN producto lleva el nombre pedido (el cliente
+                            # escribió 'epirinolactona' y el catálogo tiene
+                            # ESPIRONOLACTONA), el encabezado pasa a la marca real: el
+                            # mensaje no puede encabezar con una palabra que no es la del
+                            # producto. Misma regla que `_lista_con_aviso`.
+                            titulo = _titulo_por_marcas(prods, titulo)
                         if prods:
                             grupos.append((titulo, prods))
                             # Los dos avisos van juntos si los dos aplican: la
