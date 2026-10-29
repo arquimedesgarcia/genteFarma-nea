@@ -2310,6 +2310,11 @@ class ToolRuntime:
         self.es_laboratorio = False
         self.es_sal = False
         self.aviso_forma = ""
+        # Se enciende cuando el cliente DESCRIBE el producto sin nombrarlo ('crema para
+        # cabello rizado'): el turno lo usa para no quedarse en silencio si el modelo gasta
+        # las rondas reintentando búsquedas.
+        self.pide_recomendacion = False
+        self.pide_recomendacion_intentos = 0
         # Se enciende si la respuesta salió del PRINCIPIO ACTIVO de una marca
         # ('depomedrol' → 'metilprednisolona'): ese cambio de término es legítimo y el
         # guard de "otro fármaco" no debe dispararse.
@@ -2484,10 +2489,24 @@ class ToolRuntime:
             or w in _FORMA_CANONICA
             for w in _palabras_atr
         ):
+            self.pide_recomendacion = True
+            self.pide_recomendacion_intentos += 1
             logger.info(
-                "buscar_medicamento: '%s' describe el producto pero no lo nombra — pregunto",
-                nombre,
+                "buscar_medicamento: '%s' describe el producto pero no lo nombra — pregunto "
+                "(intento %d)", nombre, self.pide_recomendacion_intentos,
             )
+            if self.pide_recomendacion_intentos >= 2:
+                # Ya intentó variantes: responder AHORA.
+                return {
+                    "ok": False,
+                    "error": "pide_recomendacion",
+                    "detalle": (
+                        "YA intentaste buscar esto más de una vez y no hay nada que buscar: el "
+                        "cliente NO ha nombrado ningún producto. NO vuelvas a llamar a "
+                        "buscar_medicamento en este turno. RESPONDE AHORA al cliente con UNA "
+                        "pregunta corta pidiéndole el producto o la marca que busca."
+                    ),
+                }
             return {
                 "ok": False,
                 "error": "pide_recomendacion",

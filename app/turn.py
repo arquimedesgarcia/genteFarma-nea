@@ -2461,6 +2461,14 @@ async def _tool_loop(
                     "content": json.dumps(result, ensure_ascii=False, default=str),
                 }
             )
+    # Si el cliente describía un producto sin nombrarlo, el silencio es lo peor que puede
+    # pasar: se manda la pregunta canónica.
+    if getattr(runtime, "pide_recomendacion", False):
+        logger.warning(
+            "turno: demasiadas rondas y el cliente describía el producto sin nombrarlo — "
+            "se manda la pregunta canónica en vez de silencio"
+        )
+        return PREGUNTA_RECOMENDACION
     logger.warning("turno: demasiadas rondas de herramientas — corto sin texto")
     return None
 
@@ -5881,6 +5889,12 @@ RESPUESTA_FOTO = (
 # Regla del usuario: cuando la receta es manuscrita, NO se traduce — se avisa que un
 # auxiliar atiende. El marcador lo pone `media.MARCA_MANUSCRITA` cuando el OCR declara
 # que el texto es manuscrito.
+PREGUNTA_RECOMENDACION = (
+    "Para buscarlo bien necesito el nombre o la marca del producto. 🙏 "
+    "¿Cuál es? (por ejemplo el champú, la crema o el tratamiento que usas)"
+)
+
+
 RESPUESTA_RECETA_MANUSCRITA = (
     "Recibí tu receta. 🙏 Como está escrita a mano, prefiero no interpretarla antes que "
     "darte un medicamento equivocado.\n"
