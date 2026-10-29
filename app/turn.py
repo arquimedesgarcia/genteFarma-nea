@@ -2003,6 +2003,12 @@ async def _tool_loop(
                             # mensaje no puede encabezar con una palabra que no es la del
                             # producto. Misma regla que `_lista_con_aviso`.
                             titulo = _titulo_por_marcas(prods, titulo)
+                            # Y si la CONCENTRACIÓN pedida no está, el encabezado la
+                            # pierde: el mensaje avisa "no tengo de 20 mg" y a la vez
+                            # encabezaba "RIVAROXABAN 20 MG" (foto del envase, provider 32,
+                            # 2026-10-29). Misma regla que `_avisos_de_lista`.
+                            if aviso_dosis and dosis_pedida:
+                                titulo = _titulo_sin_dosis(titulo, dosis_pedida)
                         if prods:
                             grupos.append((titulo, prods))
                             # Los dos avisos van juntos si los dos aplican: la
