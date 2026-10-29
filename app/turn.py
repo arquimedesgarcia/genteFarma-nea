@@ -5722,7 +5722,12 @@ _RE_SEP_LISTA = re.compile(
     # el catálogo ('VIT E 400 MG X 15 CAPS BLANDAS VIVAX').
     # Se excluye con LOOKBEHIND ('vitamina' 8 letras, 'vit' 3: longitudes fijas, válidas).
     r"|(?:(?<!vitamina)(?<!vit)\s+e\s+)"
-    r"|(?:ademas|además)",
+    r"|(?:ademas|además)"
+    # FIN DE FRASE: son DOS peticiones distintas. Caso real (provider 32, 2026-10-29):
+    #     "Precio de la macrodantina?? Voy a querer una vitamina C de la opción 9"
+    # se buscaba como UN medicamento ('macrodantina vitamina c 9') y el cliente recibía
+    # "⚠️ No tengo MACRODANTINA VITAMINA C 9".
+    r"|[?!]+",
     re.IGNORECASE,
 )
 
@@ -6929,6 +6934,9 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
         .replace("á", "a").replace("é", "e").replace("í", "i")
         .replace("ó", "o").replace("ú", "u")
     )
+    # 'de la opción 9' es una REFERENCIA A LA LISTA, no una dosis: el '9' no puede entrar
+    # en el término (el catálogo recibía 'macrodantina vitamina c 9').
+    texto = re.sub(r"\b(?:opci[oó]n|opciones|n[uú]mero)\s+\d+", " ", texto)
     palabras = re.findall(r"[a-záéíóúüñ0-9]+", texto)
     # La unidad HABLADA se normaliza ANTES de decidir ("nifedipina 30 miligramos"
     # → "nifedipina 30 mg"). Sin esto el 30 se descarta por ir seguido de una
