@@ -2584,6 +2584,10 @@ _FILLER = {
     "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
     "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
     "par", "pares", "trio", "docena", "mitad", "todas", "todos",
+    # "TIENEN A LA VENTA …" es la forma más común de preguntar si vendes algo: 'venta'
+    # no forma parte del nombre y descoloca al matcher (provider 32, 2026-10-29:
+    # 'venta aceite oregano' devolvía 5 productos de otra cosa).
+    "venta", "ventas", "vende", "vendes", "vendia", "vendían",
     # 'todo pediátrico' del final de una lista no es parte del nombre del último
     # medicamento (encabezado real: "CEFIXIMA SUSP TODO PEDIATRICO"), y 'todo' por sí solo
     # es lo que metía DESODORANTE DOVE en una consulta conversacional.
@@ -4205,11 +4209,27 @@ def _farmaco_distinto(user_text: str, runtime: Any) -> str | None:
         return None
     if _es_solo_saludo(cliente) or _es_solo_saludo(cliente.split()[0]):
         return None  # 'gracias muy amable' no es un fármaco
-    n_cli = (cliente.split() or [""])[0]
-    n_bus = (term_buscado.split() or [""])[0]
-    if not n_cli or not n_bus:
-        return None
-    ratio = difflib.SequenceMatcher(None, n_cli.lower(), n_bus.lower()).ratio()
+    # Se comparan las PALABRAS CON CONTENIDO, y basta con que UNA pareja se parezca: antes
+    # se miraba solo la primera palabra, así que 'venta aceite oregano' (el cliente dijo
+    # "tienen a la venta…") contra 'aceite oregano' daba 'venta' vs 'aceite' y el guard
+    # concluía que era OTRO fármaco cuando era el mismo producto.
+    _FUNC_COMP = set(_FILLER) | set(_VIAS_ADMINISTRACION) | set(_CATEGORIAS_TERAPEUTICAS)
+    cli_palabras = [
+        w for w in re.findall(r"[a-záéíóúüñ0-9]+", cliente.lower())
+        if len(w) >= 3 and w not in _FUNC_COMP
+    ] or (cliente.split() or [""])
+    bus_palabras = [
+        w for w in re.findall(r"[a-záéíóúüñ0-9]+", term_buscado.lower())
+        if len(w) >= 3 and w not in _FUNC_COMP
+    ] or (term_buscado.split() or [""])
+    ratio = max(
+        (
+            difflib.SequenceMatcher(None, a, b).ratio()
+            for a in cli_palabras
+            for b in bus_palabras
+        ),
+        default=0.0,
+    )
     if ratio >= 0.75:
         return None
     logger.info(
