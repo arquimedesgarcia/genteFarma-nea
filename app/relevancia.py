@@ -54,6 +54,9 @@ _FUNCIONALES = {
     "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
     "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
     "par", "pares", "trio", "docena", "mitad", "todas", "todos",
+    # EL EQUIPO / EL PERSONAL: pedir el pase no nombra un producto. 'derivalo al equipo'
+    # dejaba 'equipo' como término de búsqueda.
+    "equipo", "staff", "asesor", "asesora", "supervisor", "encargado", "encargada",
     # FOTO/IMAGEN: pedir una foto no es pedir un producto. Buscar 'fotos' en el catálogo
     # devolvía cualquier cosa (caso real provider 32: "Me puede enviar unas fotos" →
     # "Actualmente no tenemos linternas"). Hay guard propio (`_pide_foto`).

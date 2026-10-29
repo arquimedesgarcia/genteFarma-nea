@@ -215,6 +215,9 @@ _PALABRAS_FUNCIONALES = {
     "par", "pares", "trio", "docena", "mitad", "todas", "todos",
     # ADVERBIOS/CUANTIFICADORES del habla: 'gracias, muy amable' dejaba el término 'muy'
     # y el matcher difuso lo apoyaba en cualquier cosa.
+    # EL EQUIPO / EL PERSONAL: pedir el pase no nombra un producto. 'derivalo al equipo'
+    # dejaba 'equipo' como término de búsqueda.
+    "equipo", "staff", "asesor", "asesora", "supervisor", "encargado", "encargada",
     "muy", "tan", "bastante", "demasiado", "algo", "mucho", "mucha", "muchos", "muchas",
     "poco", "poca", "pocos", "pocas", "tambien", "también", "solo", "solamente",
     "plaquita", "plaquitas", "tirita", "tiritas",
