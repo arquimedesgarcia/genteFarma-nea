@@ -34,6 +34,7 @@ from app.state import (
     utcnow,
 )
 from app.tools import (
+    _es_letra_de_vitamina,
     ToolRuntime,
     active_tool_schemas,
     _dosis_sin_unidad,
@@ -2576,6 +2577,28 @@ _VERBOS_MEDICAMENTO = re.compile(
 
 # Palabras de relleno (saludos, cortesía, muletillas) que NUNCA son un
 # medicamento. Impide que el backstop busque "hola" o "buenas".
+# VOCATIVO / CARIÑO: el cliente saluda y llama al agente "mi amor", "corazón", "cariño".
+# Caso real (provider 32, 2026-10-29): "Buenas tardes!! Mi amor que precio tiene la
+# nitrofurantoina de 50mg y la vitamina C" → el agente buscó 'AMOR NITROFURANTOINA 50MG',
+# avisó "No tengo NITROFURANTOINA. De AMOR 50MG hay esto" y cotizó TE AMO PRESERV. 3PCS.
+VOCATIVOS_T = {
+    "amor", "cariño", "carino", "corazon", "corazón", "bebe", "bebé", "preciosa",
+    "precioso", "linda", "lindo", "hermosa", "hermoso", "bonita", "bonito",
+    "principe", "príncipe", "reina", "rey", "amiga", "amigo", "senora", "señora",
+    "senor", "señor", "doctor", "doctora", "licenciada", "licenciado", "jefe", "jefa",
+    "vecina", "vecino", "pana", "panita", "compatriota",
+}
+# INTENCIÓN DE COMPRA: no es un medicamento.
+INTENCION_COMPRA_T = {
+    "quiero", "queria", "quería", "quisiera", "querer", "querría", "querria",
+    "deseo", "deseamos", "llevo", "llevare", "llevaré", "llevaria", "llevaría",
+    "apartame", "apártame", "separame", "sepárame", "encargame", "encárgame",
+}
+# REFERENCIA A LA LISTA ANTERIOR: 'de la opción 9', 'la número 3'.
+REFERENCIA_LISTA_T = {
+    "opcion", "opción", "opciones", "opcioncita", "numerito",
+}
+
 _FILLER = {
     "hola", "buenas", "buen", "buenos", "buena", "dia", "dias", "tardes",
     "noches", "gracias", "por", "favor", "quisiera", "podria", "puede",
@@ -2587,6 +2610,8 @@ _FILLER = {
     # en el 27 eran CORTA UÑA/CORTAUÑA y los 3 de 'presupuesto' en el 28 eran
     # PRESTOBARBA: falsos positivos del matcher difuso, o sea el bug que se quiere evitar.
     "cotizar", "cotizame", "cotizacion", "cotizaciones", "cotizarlos",
+    # Vocativo, intención de compra y referencia a la lista (gemelos de tools).
+    *VOCATIVOS_T, *INTENCION_COMPRA_T, *REFERENCIA_LISTA_T,
     "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
     # RÓTULOS DEL CAMPO: el OCR devuelve '**Nombre del medicamento:** Fexofenadina
     # Clorhidrato CALOX' y el término quedaba 'nombre del fexofenadina clorhidrato calox'.
@@ -6915,6 +6940,11 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
     for i, w in enumerate(palabras):
         # Unidades (mg, ml, tab...) son cortas pero válidas
         if w in unidades:
+            terminos.append(w)
+            continue
+        # LA LETRA DE LA VITAMINA. 'la vitamina C' se quedaba en 'vitamina' y el cliente
+        # recibía 20 productos de Vitamina E, K, B12 y colágeno (provider 32, 2026-10-29).
+        if _es_letra_de_vitamina(w, " ".join(palabras)):
             terminos.append(w)
             continue
         if len(w) < 3:

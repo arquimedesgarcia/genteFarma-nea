@@ -17,6 +17,7 @@ from typing import Any
 from app.crm import CrmConflict, CrmError, SlotTaken
 from app.relevancia import (
     _SALES_FARMACEUTICAS,
+    _es_letra_de_vitamina,
     _norm,
     _token_cabeza_farmaco,
     es_relevante,
@@ -165,6 +166,28 @@ def _es_solo_saludo(term: str) -> bool:
 # por _termino_es_medicamento_plausible para rechazar frases enteras del
 # cliente que el backstop intenta buscar como si fueran medicamentos (p. ej.
 # 'caja cada uno', 'medicamento llega vencido cambian', 'van responder').
+# VOCATIVO / CARIÑO: el cliente saluda y llama al agente "mi amor", "corazón", "cariño".
+# Caso real (provider 32, 2026-10-29): "Buenas tardes!! Mi amor que precio tiene la
+# nitrofurantoina de 50mg y la vitamina C" → el agente buscó 'AMOR NITROFURANTOINA 50MG',
+# avisó "No tengo NITROFURANTOINA. De AMOR 50MG hay esto" y cotizó TE AMO PRESERV. 3PCS.
+VOCATIVOS = {
+    "amor", "cariño", "carino", "corazon", "corazón", "bebe", "bebé", "preciosa",
+    "precioso", "linda", "lindo", "hermosa", "hermoso", "bonita", "bonito",
+    "principe", "príncipe", "reina", "rey", "amiga", "amigo", "senora", "señora",
+    "senor", "señor", "doctor", "doctora", "licenciada", "licenciado", "jefe", "jefa",
+    "vecina", "vecino", "pana", "panita", "compatriota",
+}
+# INTENCIÓN DE COMPRA: no es un medicamento.
+INTENCION_COMPRA = {
+    "quiero", "queria", "quería", "quisiera", "querer", "querría", "querria",
+    "deseo", "deseamos", "llevo", "llevare", "llevaré", "llevaria", "llevaría",
+    "apartame", "apártame", "separame", "sepárame", "encargame", "encárgame",
+}
+# REFERENCIA A LA LISTA ANTERIOR: 'de la opción 9', 'la número 3'.
+REFERENCIA_LISTA = {
+    "opcion", "opción", "opciones", "opcioncita", "numerito",
+}
+
 _PALABRAS_FUNCIONALES = {
     # FRASE DE CONSULTA: el cliente anuncia la lista antes de enumerarla. No es un
     # medicamento y no puede encabezar el título ni la búsqueda (el cliente vería
@@ -173,6 +196,8 @@ _PALABRAS_FUNCIONALES = {
     # (PRESTOBARBA) eran falsos positivos del matcher difuso.
     "cotizar", "cotizame", "cotizacion", "cotizaciones", "cotizarlos",
     "siguiente", "siguientes", "presupuesto",
+    # Vocativo, intención de compra y referencia a la lista: NO son el nombre de nada.
+    *VOCATIVOS, *INTENCION_COMPRA, *REFERENCIA_LISTA,
     # 'resumen' no es un medicamento (ver el gemelo en turn.py::_FILLER).
     "resumen", "resumenes", "resúmenes",
     # 'costo'/'porf' tampoco: 'porf' casa con el "POR" de AMPICILINA "POR 1 AMPOLLA" y
@@ -667,7 +692,10 @@ def _limpiar_termino_medicamento(term: str) -> str:
             and w not in _VIAS_ADMINISTRACION
             and w not in _CATEGORIAS_TERAPEUTICAS
             and w not in _ENFERMEDADES
-            and (len(w) >= 3 or w.isdigit() or any(c.isdigit() for c in w)))
+            and (len(w) >= 3 or w.isdigit() or any(c.isdigit() for c in w)
+                 # LA LETRA DE LA VITAMINA: 'vitamina c' no puede quedarse en
+                 # 'vitamina' (el cliente recibiría E, K, B12 y colágeno).
+                 or _es_letra_de_vitamina(w, t_sin)))
     ]
     if not sustantivas:
         return ""
