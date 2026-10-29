@@ -1498,6 +1498,12 @@ _FORMA_CANONICA: dict[str, str] = {
     "oft": "gotas oftálmicas",
     "spray": "spray", "aerosol": "spray",
     "colirio": "gotas oftálmicas", "colirios": "gotas oftálmicas",
+    # SOLUCIÓN BUCAL. Caso real (provider 32, 2026-10-29): el cliente pidió "solución bucal",
+    # el pedido se resolvía como "solución oral" y el aviso decía "No tengo SOLUNOVAL BUCAL en
+    # solución oral" MIENTRAS listaba un SOL BUCAL. La forma bucal no estaba.
+    "bucal": "solución bucal", "bucales": "solución bucal",
+    "solucion bucal": "solución bucal", "solución bucal": "solución bucal",
+    "sol bucal": "solución bucal",
 }
 
 # La FAMILIA es lo que se compara: quien pide 'suspensión' también acepta el jarabe y la
@@ -1512,6 +1518,7 @@ _FAMILIA_DE_FORMA: dict[str, str] = {
     "polvo": "polvo",
     "crema": "topica", "ungüento": "topica", "gel": "topica", "loción": "topica",
     "inyectable": "inyectable",
+    "solución bucal": "liquida",
     "óvulos": "vaginal", "supositorios": "vaginal",
     "spray": "spray",
     "gotas oftálmicas": "oftalmica",
@@ -1583,6 +1590,8 @@ def _etiqueta_de_forma(titulo: str) -> str | None:
         (r"\b(crema|cremas)\b", "crema"),
         (r"\b(unguento|pomada)\b", "ungüento"),
         (r"\bgel\b", "gel"),
+        # 'SOL BUCAL' es solución bucal, no el cajón genérico 'líquido'.
+        (r"(?:^|[^a-z])(?:sol\s*)?bucal(?:es)?\b", "solución bucal"),
         (r"\b(ampolla|ampollas|inyectable|vial)\b|(?:^|[^a-z])amp[s]?\b", "inyectable"),
         # ÓVULOS ≠ SUPOSITORIOS: antes los dos devolvían "supositorios" y la etiqueta
         # mentía. Sin `\b` a la izquierda porque la abreviatura va pegada al envase
@@ -1667,6 +1676,13 @@ def _aviso_forma(
     etiquetas = {_etiqueta_de_forma(_titulo_de_producto(p)) for p in productos}
     if etiqueta_pedida in etiquetas:
         return ""
+    # La FAMILIA manda: "solución oral" y "líquido" son lo mismo para el cliente, y negar
+    # "en solución oral" mientras se lista un SOL BUCAL es una contradicción en dos líneas
+    # seguidas (provider 32, 2026-10-29). Solo se avisa si NINGÚN producto es de la familia.
+    # OJO: NO se relaja por FAMILIA. Quien pide "suspensión" y recibe "solución oral" tiene
+    # que oír que la suspensión no está (APIRET), y el cajón 'líquido' —títulos sin forma
+    # declarada— no prueba nada. El caso SOLUNOVAL se arregla en el vocabulario: 'bucal' es
+    # una forma propia, igual en el pedido y en el título, y ahí manda la igualdad de arriba.
     droga = _termino_sin_forma(termino).upper()
     # 'líquido' es el cajón de los títulos rotos: no se anuncia como presentación.
     otras = sorted({e for e in etiquetas if e and e != "líquido" and e != etiqueta_pedida})
