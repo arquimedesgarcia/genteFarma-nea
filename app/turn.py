@@ -2741,6 +2741,10 @@ _FILLER = {
     "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
     "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
     "par", "pares", "trio", "docena", "mitad", "todas", "todos",
+    # 'todo pediátrico' del final de una lista no es parte del nombre del último
+    # medicamento (encabezado real: "CEFIXIMA SUSP TODO PEDIATRICO"), y 'todo' por sí solo
+    # es lo que metía DESODORANTE DOVE en una consulta conversacional.
+    "todo", "toda",
     # EL EQUIPO / EL PERSONAL: pedir el pase no nombra un producto ("transferir a un
     # asesor" dejaba 'asesor' como término de búsqueda).
     "asesor", "asesora", "supervisor", "encargado", "encargada", "staff",
