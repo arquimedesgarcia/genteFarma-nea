@@ -255,8 +255,16 @@ _RE_VITAMINA_EN_TERMINO = re.compile(r"\bvitamin|\bmultivit|\bcomplejo\s+b\b", r
 
 
 def _es_letra_de_vitamina(w: str, termino: str = "") -> bool:
-    """¿Es la letra de una vitamina ('vitamina c', 'vit d')?"""
-    return w in _VITAMINAS and bool(_RE_VITAMINA_EN_TERMINO.search(termino or ""))
+    """¿Es la letra PEGADA a la palabra 'vitamina' ('vitamina c', 'vit d3')?
+
+    Tiene que ir INMEDIATAMENTE después: con solo "el término dice vitamina" se colaba la
+    preposición 'a' de "¡Voy a querer una vitamina C!" como si fuera VITAMINA A.
+    """
+    if w not in _VITAMINAS:
+        return False
+    return bool(
+        re.search(rf"\bvitaminas?\s*[-/+]?\s*{re.escape(w)}\b", termino or "", re.IGNORECASE)
+    )
 
 
 def _relevante_letra_de_vitamina(w: str, nombre: str) -> bool:
