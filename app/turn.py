@@ -5232,11 +5232,20 @@ _LINEAS_DESCRIPTIVAS = (
     "dosis", "descripción", "descripcion", "código", "codigo", "cpe",
     # texto promocional/del envase
     "antibiótico", "antibiotico", "antimicótico", "antimicotico", "antiprotozoario",
+    # ETIQUETAS DE USO: describen para quién/cómo es, no son otro medicamento.
+    # 'USO PEDIÁTRICO' salía como un grupo propio en la foto del frasco de amoxicilina
+    # (provider 32, 2026-10-29).
+    "uso pediátrico", "uso pediatrico", "uso adulto", "uso oral", "uso tópico", "uso topico",
+    "uso vaginal", "uso oftálmico", "uso oftalmico", "vía oral", "via oral",
+    "vía de administración oral", "polvo para", "polvo para suspensión",
+    "polvo para suspension", "suspensión oral", "suspension oral", "solución oral",
+    "solucion oral", "para suspensión oral", "para suspension oral",
 )
 # Una línea que empieza por una FORMA farmacéutica es presentación del mismo producto.
 _RE_SOLO_FORMA = re.compile(
     r"^\s*\d*\s*(?:óvulos?|ovulos?|supositorios?|cápsulas?|capsulas?|tabletas?|"
-    r"comprimidos?|sobres?|ampollas?|frascos?|tubos?|gotas?|crema|gel)\b",
+    r"comprimidos?|sobres?|ampollas?|frascos?|tubos?|gotas?|crema|gel|polvos?|"
+    r"suspensión|suspension|solución|solucion|jarabe|emulsión|emulsion)\b",
     re.IGNORECASE,
 )
 
@@ -5307,17 +5316,64 @@ async def _medicamentos_de_ocr(
             if not componentes:
                 return [term], "caja (el OCR solo trae el nombre)"
             # ¿algún producto del catálogo cubre TAMBIÉN los otros componentes?
+            #
+            # SOLO cuentan los componentes con palabra ÚTIL (≥5 letras) y que no sean
+            # descriptivos: así el laboratorio ('QUIM-FAR' → quim/far de 4 y 3 letras) y
+            # las etiquetas ('POLVO PARA SUSPENSIÓN ORAL', 'USO PEDIÁTRICO') no impiden
+            # reconocer la caja. Antes exigía cubrirlos TODOS y ninguna caja daba «caja».
+            # Un componente solo cuenta si puede ser OTRO medicamento: se descartan las
+            # etiquetas, las SALES ('clorhidrato', que la caja imprime bajo el nombre), las
+            # categorías ('antialérgico') y el LABORATORIO ('CALOX', 'QUIM-FAR').
+            from app.tools import (  # noqa: PLC0415
+                _PALABRAS_FUNCIONALES as _FUNC,
+                _SALES_FARMACEUTICAS as _SALES,
+                _CATEGORIAS_TERAPEUTICAS as _CATS,
+            )
+
+            def _comp_es_otro_farmaco(comp: str) -> bool:
+                # SIN TILDES: las listas guardan 'generico'/'antialergico' y la caja escribe
+                # 'Genérico'/'Antialérgico'; sin normalizar no se reconocían y la caja de una
+                # FEXOFENADINA se partía en dos medicamentos.
+                palabras = [
+                    _normalizar_tildes(w)
+                    for w in re.findall(r"[a-záéíóúüñ]{5,}", comp.lower())
+                ]
+                if not palabras:
+                    return False
+                if all(w in _SALES or w in _CATS or w in _FUNC for w in palabras):
+                    return False
+                # `_es_nombre_de_laboratorio` espera dicts con 'producto'/'laboratorio';
+                # el `buscar` de este módulo devuelve nombres. Se normaliza aquí.
+                _prods = [
+                    x if isinstance(x, dict) else {"producto": str(x)} for x in productos
+                ]
+                if _es_nombre_de_laboratorio(comp, _prods):
+                    return False
+                return True
+
+            utiles_componentes = [
+                comp for comp in componentes
+                if not _es_linea_descriptiva(comp) and _comp_es_otro_farmaco(comp)
+            ]
             for prod in productos:
-                palabras_ok = True
-                for comp in componentes:
-                    utiles = re.findall(r"[a-záéíóúüñ]{5,}", comp.lower())
-                    if not utiles:
-                        continue
-                    if not any(es_relevante(w, prod) for w in utiles):
-                        palabras_ok = False
-                        break
-                if palabras_ok:
-                    return [term], "caja (un producto cubre todos los componentes)"
+                if all(
+                    any(es_relevante(w, prod)
+                        for w in re.findall(r"[a-záéíóúüñ]{5,}", comp.lower()))
+                    for comp in utiles_componentes
+                ):
+                    # El término lleva también los componentes que el producto cubre
+                    # ('AMOXICILINA' + 'ÁCIDO CLAVULÁNICO'): buscar solo 'amoxicilina'
+                    # devuelve la monoterapia mezclada con la combinación.
+                    completo = " ".join([nombre] + utiles_componentes)
+                    term_caja = " ".join(
+                        re.findall(
+                            r"[a-záéíóúüñ0-9]+",
+                            _limpiar_etiquetas_ocr(completo).lower(),
+                        )
+                    )
+                    return [term_caja or term], (
+                        "caja (un producto cubre los componentes del envase)"
+                    )
 
     # Receta: se devuelven las líneas como medicamentos independientes, con la misma
     # lógica que ya usaba el backstop.
