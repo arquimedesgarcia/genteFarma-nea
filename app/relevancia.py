@@ -46,6 +46,8 @@ _FUNCIONALES = {
     # palabras identifica un fármaco por sí sola.
     # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
     "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    # 'tratamiento' no es un producto: el catálogo está lleno de TRATAMIENTO CAPILAR.
+    "tratamiento", "tratamientos", "tratamientos capilares",
     # CANTIDADES: 'las tres', 'los dos', 'quiero tres'. NO son medicamentos y el matcher
     # difuso los apoya en cualquier cosa (caso real: 'tres' → LITTLE TREES → 15
     # ambientadores cotizados como medicamentos, provider 32).
