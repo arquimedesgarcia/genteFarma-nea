@@ -4412,8 +4412,11 @@ def _con_confirmacion_carrito(texto: str, runtime: Any) -> str:
         return texto
     # OJO con la guarda: el cierre canónico dice "👉 Para agregar al carrito…", así que
     # buscar 'carrito' + 'agreg' daba positivo SIEMPRE y la confirmación nunca se ponía.
+    # OJO también con el ✅ suelto: el cierre canónico dice "✅ Cuando termines, escribe
+    # LISTO…", así que un ✅ cualquiera tampoco vale como confirmación.
     if re.search(
-        r"(?i)(?:✅|he\s+agregado|agregad[oa]s?\s+al?\s+(?:carrito|pedido)|"
+        r"(?i)(?:✅\s*(?:agregad|listo,?\s*agreg)|he\s+agregado|agregu[eé]\s+al|"
+        r"agregad[oa]s?\s+(?:al?\s+)?(?:carrito|pedido)|"
         r"(?:carrito|pedido)\s+(?:actualizado|con))",
         texto or "",
     ):
