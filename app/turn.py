@@ -7,6 +7,7 @@ Degradación silenciosa: cualquier fallo termina en silencio + log (y handoff
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import re
@@ -804,6 +805,13 @@ async def run_turn(
             "backstop resumen determinista: NO se aplica — el cliente además está "
             "agregando productos; se respeta el texto del LLM"
         )
+
+    # Si lo cotizado es OTRO fármaco del que pidió el cliente, se responde honesto.
+    if farmacia and final_text and runtime.last_products:
+        _otro = _farmaco_distinto(user_text, runtime)
+        if _otro:
+            final_text = _respuesta_no_es_ese_farmaco(_otro)
+            runtime.last_products = []
 
     sent = False
     if final_text and final_text.strip():
@@ -2555,12 +2563,18 @@ _FILLER = {
     # palabras identifica un fármaco por sí sola.
     # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
     "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    # 'tratamiento' no es un producto: el catálogo está lleno de TRATAMIENTO CAPILAR.
+    "tratamiento", "tratamientos", "tratamientos capilares",
     # CANTIDADES: 'las tres', 'los dos', 'quiero tres'. NO son medicamentos y el matcher
     # difuso los apoya en cualquier cosa (caso real: 'tres' → LITTLE TREES → 15
     # ambientadores cotizados como medicamentos, provider 32).
     "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
     "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
     "par", "pares", "trio", "docena", "mitad", "todas", "todos",
+    # ADVERBIOS/CUANTIFICADORES del habla: 'gracias, muy amable' dejaba el término 'muy'
+    # y el matcher difuso lo apoyaba en cualquier cosa.
+    "muy", "tan", "bastante", "demasiado", "algo", "mucho", "mucha", "muchos", "muchas",
+    "poco", "poca", "pocos", "pocas", "tambien", "también", "solo", "solamente",
     # FOTO/IMAGEN: pedir una foto no es pedir un producto. Buscar 'fotos' en el catálogo
     # devolvía cualquier cosa (caso real provider 32: "Me puede enviar unas fotos" →
     # "Actualmente no tenemos linternas"). Hay guard propio (`_pide_foto`).
@@ -4127,6 +4141,51 @@ def _quitar_repeticiones(texto: str, user_text: str, history: list[Any]) -> str:
     if _RE_CLIENTE_TELEFONO.search(cliente):
         return FALLBACK_TELEFONO
     return FALLBACK_PENDIENTE
+
+
+# ── «NO ES EL MEDICAMENTO QUE PEDISTE» ─────────────────────────────────────────────
+# Caso real (provider 32, 2026-10-28 20:59): el cliente pidió ESPIRAMICINA, el buscador no
+# devolvió nada y el modelo "asumió" ESPIRONOLACTONA y cotizó diez presentaciones del diurético
+# como si fuera el antibiótico. Dos fármacos distintos: eso no es un typo, es una dispensación
+# equivocada.
+#
+# El umbral se compara sobre el NÚCLEO del término (la primera palabra significativa) con la
+# misma medida que `tools._UMBRAL_NUCLEO_MISMO_FARMACO`: por encima de 0.75 se considera el
+# mismo fármaco escrito de otra forma ('atamle'→'atamel', 'omeprasol'→'omeprazol').
+def _farmaco_distinto(user_text: str, runtime: Any) -> str | None:
+    """El término del cliente si lo que se cotizó es OTRO fármaco. None si todo cuadra."""
+    if getattr(runtime, "busqueda_por_principio", False):
+        return None  # marca → principio activo: cambio legítimo
+    term_buscado = str(getattr(runtime, "last_term", "") or "").strip()
+    if not term_buscado or not getattr(runtime, "last_products", None):
+        return None  # sin productos cotizados no hay nada que corregir
+    cliente = _extraer_termino_medicamento(
+        _texto_cliente_sin_marcadores(user_text) or user_text or ""
+    )
+    if not cliente or not _termino_es_medicamento_plausible(cliente):
+        return None
+    if _es_solo_saludo(cliente) or _es_solo_saludo(cliente.split()[0]):
+        return None  # 'gracias muy amable' no es un fármaco
+    n_cli = (cliente.split() or [""])[0]
+    n_bus = (term_buscado.split() or [""])[0]
+    if not n_cli or not n_bus:
+        return None
+    ratio = difflib.SequenceMatcher(None, n_cli.lower(), n_bus.lower()).ratio()
+    if ratio >= 0.75:
+        return None
+    logger.info(
+        "otro fármaco: el cliente pidió '%s' y se cotizó '%s' (similitud %.2f) — se corrige",
+        cliente, term_buscado, ratio,
+    )
+    return cliente
+
+
+def _respuesta_no_es_ese_farmaco(cliente: str) -> str:
+    return (
+        f"⚠️ No tengo {cliente.upper()}. No te ofrezco otro medicamento parecido para no "
+        "confundirte: son cosas distintas.\n"
+        "¿Me confirmas el nombre tal como viene en la caja, o te paso con un auxiliar?"
+    )
 
 
 def _quitar_repregunta_tras_cierre(texto: str, ultimo_del_lead: str | None) -> str:

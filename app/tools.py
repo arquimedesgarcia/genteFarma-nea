@@ -205,12 +205,18 @@ _PALABRAS_FUNCIONALES = {
     # palabras identifica un fármaco por sí sola.
     # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
     "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    # 'tratamiento' no es un producto: el catálogo está lleno de TRATAMIENTO CAPILAR.
+    "tratamiento", "tratamientos", "tratamientos capilares",
     # CANTIDADES: 'las tres', 'los dos', 'quiero tres'. NO son medicamentos y el matcher
     # difuso los apoya en cualquier cosa (caso real: 'tres' → LITTLE TREES → 15
     # ambientadores cotizados como medicamentos, provider 32).
     "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
     "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
     "par", "pares", "trio", "docena", "mitad", "todas", "todos",
+    # ADVERBIOS/CUANTIFICADORES del habla: 'gracias, muy amable' dejaba el término 'muy'
+    # y el matcher difuso lo apoyaba en cualquier cosa.
+    "muy", "tan", "bastante", "demasiado", "algo", "mucho", "mucha", "muchos", "muchas",
+    "poco", "poca", "pocos", "pocas", "tambien", "también", "solo", "solamente",
     "plaquita", "plaquitas", "tirita", "tiritas",
     "aparato", "aparatos", "equipo", "maquina", "maquinita",
     "estuche", "maletin", "cargador", "cable", "bateria", "baterias",
@@ -348,6 +354,7 @@ def _termino_es_medicamento_plausible(term: str) -> bool:
         w in _VIAS_ADMINISTRACION
         or w in _CATEGORIAS_TERAPEUTICAS
         or w in _SALES_FARMACEUTICAS
+        or w in _ENFERMEDADES
         or w in _PALABRAS_FUNCIONALES
         for w in palabras
     ):
@@ -470,6 +477,34 @@ _FRASES_INDICACION = (
     "mucha sed", "orina frecuente", "resfriado comun", "gripe", "fiebre",
     "infeccion urinaria", "hongos en los pies",
 )
+
+# ENFERMEDADES / INDICACIONES de UNA palabra — NO SON EL MEDICAMENTO.
+# La enfermedad dice PARA QUÉ SIRVE. Sin esta lista, "tratamiento para toxoplasmosis" se
+# buscaba como producto y el catálogo devolvía 20 tratamientos capilares (DOVE, ELVIVE).
+# Caso real (provider 32, 2026-10-28 21:03).
+_ENFERMEDADES = frozenset({
+    "toxoplasmosis", "toxo", "gripe", "gripa", "resfriado", "catarro", "fiebre", "tos",
+    "dolor", "dolores", "cefalea", "migrana", "migraña", "jaqueca", "infeccion",
+    "infecciones", "hongos", "diarrea", "estrenimiento", "estreñimiento", "alergia",
+    "alergias", "rinitis", "hipertension", "hipertensión", "tension", "tensión",
+    "diabetes", "colesterol", "trigliceridos", "triglicéridos", "anemia", "vomito",
+    "vómito", "nauseas", "náuseas", "mareo", "mareos", "ansiedad", "insomnio", "acne",
+    "acné", "caspa", "psoriasis", "gastritis", "colon", "artritis", "artrosis",
+    "embarazo", "lactancia", "covid", "neumonia", "neumonía", "bronquitis", "asma",
+    "varicela", "sarampion", "sarampión", "herpes", "candidiasis", "parasitosis",
+    "lombrices", "piojos", "hemorroides", "ulcera", "úlcera", "reflujo", "depresion",
+    "depresión", "epilepsia", "tiroides", "hipotiroidismo", "hipertiroidismo", "prostata",
+    "próstata", "menopausia", "menstruacion", "menstruación", "resaca", "quemadura",
+    "quemaduras", "herida", "heridas", "cicatriz", "cicatrices", "deshidratacion",
+    "deshidratación", "desmayo", "convulsion", "convulsión", "tumor", "cancer", "cáncer",
+    # Adjetivos que acompañan a la indicación y quedan colgando al quitarla
+    # ('infeccion urinaria', 'infeccion respiratoria', 'dolor lumbar').
+    # NO se incluyen 'dental', 'vaginal', 'nasal', 'muscular' ni 'articular': son también
+    # palabras de PRODUCTO ('crema dental', 'óvulos vaginales', 'spray nasal') y quitarlas
+    # rompía 'crema dental sensodyne' → 'crema sensodyne' (valida_cortesia).
+    "urinaria", "urinarias", "respiratoria", "respiratorias", "lumbar", "menstrual",
+    "estomacal", "intestinal",
+})
 
 # Ordenadas de MÁS LARGA a más corta para que la frase específica gane a una más general.
 _RE_FRASE_INDICACION = re.compile(
@@ -597,6 +632,7 @@ def _limpiar_termino_medicamento(term: str) -> str:
         or (w not in _PALABRAS_FUNCIONALES
             and w not in _VIAS_ADMINISTRACION
             and w not in _CATEGORIAS_TERAPEUTICAS
+            and w not in _ENFERMEDADES
             and (len(w) >= 3 or w.isdigit() or any(c.isdigit() for c in w)))
     ]
     if not sustantivas:
@@ -2247,6 +2283,10 @@ class ToolRuntime:
         self.es_laboratorio = False
         self.es_sal = False
         self.aviso_forma = ""
+        # Se enciende si la respuesta salió del PRINCIPIO ACTIVO de una marca
+        # ('depomedrol' → 'metilprednisolona'): ese cambio de término es legítimo y el
+        # guard de "otro fármaco" no debe dispararse.
+        self.busqueda_por_principio = False
         if not nombre:
             return {"ok": False, "error": "nombre_vacio", "detalle": "indica qué medicamento buscas"}
         # Guarda anti-saludo: si el LLM llamó buscar_medicamento con un término
@@ -2362,10 +2402,14 @@ class ToolRuntime:
         ]
         if (
             _palabras_cat
-            and any(w in _CATEGORIAS_TERAPEUTICAS for w in _palabras_cat)
+            and any(
+                w in _CATEGORIAS_TERAPEUTICAS or w in _ENFERMEDADES
+                for w in _palabras_cat
+            )
             and all(
                 w in _CATEGORIAS_TERAPEUTICAS
                 or w in _VIAS_ADMINISTRACION
+                or w in _ENFERMEDADES
                 or w in _PALABRAS_FUNCIONALES
                 for w in _palabras_cat
             )
@@ -2814,6 +2858,7 @@ class ToolRuntime:
             if alternativas:
                 self.med_not_found = False
                 self.es_laboratorio = False
+                self.busqueda_por_principio = True
                 self.last_term = nombre
                 self.last_product = alternativas[0]
                 self.last_products = alternativas
