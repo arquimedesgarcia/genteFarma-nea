@@ -1787,6 +1787,19 @@ async def _tool_loop(
                                 for l in _lineas_lista_medicamentos(contenido_cliente)
                             )
                         )
+                        # UNA LÍNEA CON VARIOS MEDICAMENTOS separados por coma o " y "
+                        # ("Las tres , neblun, epirinolactona y empagliflozina"): el parser
+                        # va línea a línea y los dejaba PEGADOS en un solo término, que
+                        # luego no matcheaba nada y encabezaba la lista con la primera
+                        # palabra (TRES → AMBIENTADOR LITTLE TREES).
+                        if len(medicamentos) == 1:
+                            enumerados = _medicamentos_enumerados(contenido_cliente)
+                            if len(enumerados) >= 2:
+                                logger.info(
+                                    "backstop lista: una línea con %d medicamentos "
+                                    "separados — %s", len(enumerados), enumerados[:5],
+                                )
+                                medicamentos = enumerados
                     if medicamentos:
                         logger.info(
                             "backstop lista: %d medicamento(s) en la consulta: %s",
@@ -2529,6 +2542,12 @@ _FILLER = {
     # palabras identifica un fármaco por sí sola.
     # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
     "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    # CANTIDADES: 'las tres', 'los dos', 'quiero tres'. NO son medicamentos y el matcher
+    # difuso los apoya en cualquier cosa (caso real: 'tres' → LITTLE TREES → 15
+    # ambientadores cotizados como medicamentos, provider 32).
+    "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
+    "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
+    "par", "pares", "trio", "docena", "mitad", "todas", "todos",
     # FOTO/IMAGEN: pedir una foto no es pedir un producto. Buscar 'fotos' en el catálogo
     # devolvía cualquier cosa (caso real provider 32: "Me puede enviar unas fotos" →
     # "Actualmente no tenemos linternas"). Hay guard propio (`_pide_foto`).
