@@ -54,6 +54,10 @@ _FUNCIONALES = {
     "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
     "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
     "par", "pares", "trio", "docena", "mitad", "todas", "todos",
+    # "TIENEN A LA VENTA …" es la forma más común de preguntar si vendes algo: 'venta'
+    # no forma parte del nombre y descoloca al matcher (provider 32, 2026-10-29:
+    # 'venta aceite oregano' devolvía 5 productos de otra cosa).
+    "venta", "ventas", "vende", "vendes", "vendia", "vendían",
     # EL EQUIPO / EL PERSONAL: pedir el pase no nombra un producto. 'derivalo al equipo'
     # dejaba 'equipo' como término de búsqueda.
     "equipo", "staff", "asesor", "asesora", "supervisor", "encargado", "encargada",
