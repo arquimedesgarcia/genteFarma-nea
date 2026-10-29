@@ -986,6 +986,8 @@ async def run_turn(
         # No repetir la dirección/horario ni volver a pedir el nombre de la caja; y si
         # preguntan el teléfono, contestar a eso (ver `_quitar_repeticiones`).
         clean = _quitar_repeticiones(clean, user_text, history)
+        # El encabezado no puede prometer la concentración que el mensaje niega.
+        clean = _titulo_sin_dosis_negada(clean)
         if clean:
             sent = await _send(ctx, conv.id, str(crm_conv_id), clean)
             if sent:
@@ -4316,6 +4318,48 @@ def _texto_del_bot(history: list[Any], cuantos: int = 2) -> str:
         if getattr(m, "role", "") == "assistant" and (m.content or "").strip()
     ]
     return "\n\n".join(previos[-cuantos:])
+
+
+_RE_AVISO_DOSIS_NEGADA = re.compile(
+    r"no\s+tengo\s+de\s+(\d+(?:[.,]\d+)?\s*(?:mg|mcg|g|ml|ui))", re.IGNORECASE
+)
+_RE_LINEA_DE_LISTA = re.compile(r"💊|\$|\bBs\b|^(?:👉|🛒|✅|⚠️|Ejemplo)", re.IGNORECASE)
+
+
+def _titulo_sin_dosis_negada(texto: str) -> str:
+    """Quita del ENCABEZADO la concentración que el propio mensaje acaba de negar.
+
+    El aviso y el título pueden venir de caminos distintos (tool → backstop, o el LLM
+    copiando el formato), así que la corrección se hace sobre el TEXTO FINAL: si el mensaje
+    dice "No tengo de 20 mg" y su primera línea de encabezado es "RIVAROXABAN 20 MG", se
+    queda en "RIVAROXABAN".
+
+    Caso real (provider 32, 2026-10-29, foto del RIVAROXABAN 20 mg DISTRILAB):
+        RIVAROXABAN 20 MG
+        ⚠️ No tengo de 20 mg. Lo tengo en: 15 mg.
+    """
+    m = _RE_AVISO_DOSIS_NEGADA.search(texto or "")
+    if not m:
+        return texto
+    dosis = m.group(1).strip()
+    num = (re.match(r"[\d.,]+", dosis) or re.match(r"", dosis)).group(0)
+    if not num:
+        return texto
+    patron = re.compile(
+        rf"\s*\b{re.escape(num)}\s*(?:mg|mcg|g|ml|ui)\b", re.IGNORECASE
+    )
+    lineas = texto.splitlines()
+    for i, ln in enumerate(lineas):
+        s = ln.strip()
+        if not s or _RE_LINEA_DE_LISTA.search(s):
+            continue
+        if patron.search(s):
+            lineas[i] = patron.sub("", s).strip(" -–,:.")
+            logger.info(
+                "título sin la dosis negada: %r → %r", s[:40], lineas[i][:40]
+            )
+            break
+    return "\n".join(lineas)
 
 
 def _quitar_repeticiones(texto: str, user_text: str, history: list[Any]) -> str:
