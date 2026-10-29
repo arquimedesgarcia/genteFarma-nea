@@ -1698,6 +1698,9 @@ async def _tool_loop(
                         args["precioBs"] = producto["precioBs"]
                     result = await runtime.execute("agregar_al_carrito", args)
                     runtime.backstop_added_skus.add(str(producto.get("productId") or ""))
+                    runtime.cart_confirmaciones.append(
+                        f"• {producto.get('producto') or 'producto'} ×{cantidad}"
+                    )
                     messages.append(
                         {
                             "role": "assistant",
