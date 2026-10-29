@@ -2009,6 +2009,12 @@ class ToolRuntime:
         # ON CONFLICT de cart_add suma +1 y la cantidad sale doblada (pidió 1 y
         # quedan 2). Estos SKU se tratan como ya-agregados: idempotente.
         self.backstop_added_skus: set[str] = set()
+        # CONFIRMACIONES del carrito para el texto final. Caso real (provider 32,
+        # 2026-10-29): "Precio de la macrodantina?? Voy a querer una vitamina C de la
+        # opción 9" → el backstop SÍ agregó la opción 9 al carrito (lo dice el log), pero
+        # la respuesta fue solo la lista de precios: el cliente nunca supo que se lo
+        # habíamos agregado.
+        self.cart_confirmaciones: list[str] = []
         # true cuando el backstop anti-alucinación ya re-consultó el catálogo
         # con el término deterministicamente correcto (evita loops infinitos).
         self.catalog_retried = False

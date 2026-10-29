@@ -847,6 +847,7 @@ async def run_turn(
         clean = _quitar_repeticiones(clean, user_text, history)
         # El encabezado no puede prometer la concentración que el mensaje niega.
         clean = _titulo_sin_dosis_negada(clean)
+        clean = _con_confirmacion_carrito(clean, runtime)
         if clean:
             sent = await _send(ctx, conv.id, str(crm_conv_id), clean)
             if sent:
@@ -1450,6 +1451,9 @@ async def _tool_loop(
             # re-sume si vuelve a llamar agregar_al_carrito este turno (si no,
             # la cantidad sale doblada: pidió 1 y quedan 2).
             runtime.backstop_added_skus.add(str(producto_prev.get("productId") or ""))
+            runtime.cart_confirmaciones.append(
+                f"• {producto_prev.get('producto') or 'producto'} ×{cantidad_prev}"
+            )
             messages.append(
                 {
                     "role": "assistant",
@@ -2138,13 +2142,16 @@ async def _tool_loop(
                                     ctx,
                                     runtime._conv.id,
                                     runtime._crm_conv_id,
-                                    _titulo_sin_dosis_negada(receta_final),
+                                    _con_confirmacion_carrito(
+                                        _titulo_sin_dosis_negada(receta_final), runtime
+                                    ),
                                 )
                                 return None  # turno atendido
                         receta_final = _formatear_receta(grupos, no_disponibles, avisos)
                         # La receta se envía DIRECTO desde aquí, así que no pasa por el
                         # post-proceso de `run_turn`: el encabezado se corrige aquí.
                         receta_final = _titulo_sin_dosis_negada(receta_final)
+                        receta_final = _con_confirmacion_carrito(receta_final, runtime)
                         await _send(
                             ctx,
                             runtime._conv.id,
@@ -4210,6 +4217,26 @@ _RE_AVISO_DOSIS_NEGADA = re.compile(
     r"no\s+tengo\s+de\s+(\d+(?:[.,]\d+)?\s*(?:mg|mcg|g|ml|ui))", re.IGNORECASE
 )
 _RE_LINEA_DE_LISTA = re.compile(r"💊|\$|\bBs\b|^(?:👉|🛒|✅|⚠️|Ejemplo)", re.IGNORECASE)
+
+
+def _con_confirmacion_carrito(texto: str, runtime: Any) -> str:
+    """Antepone lo que el backstop agregó al carrito si la respuesta no lo dice.
+
+    El cliente pidió DOS cosas ("precio de la macrodantina" + "quiero la opción 9") y la
+    respuesta solo traía la lista de precios: el producto se agregó en silencio.
+    """
+    confs = list(getattr(runtime, "cart_confirmaciones", None) or [])
+    if not confs:
+        return texto
+    cuerpo = (texto or "").lower()
+    if "carrito" in cuerpo and ("agreg" in cuerpo or "añad" in cuerpo or "anad" in cuerpo):
+        return texto
+    if len(confs) == 1:
+        cabecera = "✅ Agregado al carrito: " + confs[0].lstrip("• ")
+    else:
+        cabecera = "✅ Agregado al carrito:\n" + "\n".join(confs)
+    logger.info("confirmación de carrito antepuesta (%d)", len(confs))
+    return cabecera + "\n\n" + (texto or "")
 
 
 def _titulo_sin_dosis_negada(texto: str) -> str:
