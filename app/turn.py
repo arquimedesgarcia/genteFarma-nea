@@ -2279,10 +2279,13 @@ async def _tool_loop(
                                     ctx,
                                     runtime._conv.id,
                                     runtime._crm_conv_id,
-                                    receta_final,
+                                    _titulo_sin_dosis_negada(receta_final),
                                 )
                                 return None  # turno atendido
                         receta_final = _formatear_receta(grupos, no_disponibles, avisos)
+                        # La receta se envía DIRECTO desde aquí, así que no pasa por el
+                        # post-proceso de `run_turn`: el encabezado se corrige aquí.
+                        receta_final = _titulo_sin_dosis_negada(receta_final)
                         await _send(
                             ctx,
                             runtime._conv.id,
