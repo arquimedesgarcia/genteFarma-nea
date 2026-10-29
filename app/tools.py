@@ -205,6 +205,12 @@ _PALABRAS_FUNCIONALES = {
     # palabras identifica un fármaco por sí sola.
     # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
     "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    # CANTIDADES: 'las tres', 'los dos', 'quiero tres'. NO son medicamentos y el matcher
+    # difuso los apoya en cualquier cosa (caso real: 'tres' → LITTLE TREES → 15
+    # ambientadores cotizados como medicamentos, provider 32).
+    "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
+    "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
+    "par", "pares", "trio", "docena", "mitad", "todas", "todos",
     "plaquita", "plaquitas", "tirita", "tiritas",
     "aparato", "aparatos", "equipo", "maquina", "maquinita",
     "estuche", "maletin", "cargador", "cable", "bateria", "baterias",
