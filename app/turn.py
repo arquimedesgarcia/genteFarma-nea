@@ -85,6 +85,10 @@ CLASIFICA LA INTENCIÓN DEL MENSAJE ANTES DE ACTUAR:
 - OTRO TEMA DEL NEGOCIO (NO uses buscar_medicamento): contratos, la página web, el chat, el comparador, horarios, ubicación, facturación, proveedores, empleo, alianzas, o cualquier asunto administrativo o comercial que NO sea pedir un medicamento. Responde de forma natural y útil, o deriva al humano si no es tu área. NUNCA busques en el catálogo con palabras como "contrato", "página", "chat", "comparador", "web", "horario".
 - NOTIFICACIÓN INTERNA DEL SISTEMA (NO uses buscar_medicamento ni el flujo de receta): mensajes con campos etiquetados como "*Fecha:*", "*Nombre:*", "*Farmacia:*", "*Teléfono:*", o avisos de "se ha realizado una reserva / nueva cita / reserva de demo / pedido confirmado". NO son del cliente: son avisos automáticos. NO busques FECHA, NOMBRE, FARMACIA ni TELÉFONO en el catálogo, ni respondas con una lista de productos. Responde con UNA línea breve de acuse (p. ej. "✅ Recibido: reserva de demo para FARMAUNO el 2/10/2026 a las 10:00 AM.") y nada más.
 
+DATOS DEL NEGOCIO (dirección, horario, teléfono):
+- Dalos SOLO si el cliente los pide, y UNA sola vez en la conversación. Si te pide el TELÉFONO y no lo tienes en los datos del negocio, dilo en UNA línea ("no manejo el teléfono desde aquí") y ofrécele pasar a un humano. NO contestes con la dirección ni el horario: no es lo que preguntó.
+- Si ya dijiste que NO TIENES un medicamento, no vuelvas a pedirle el nombre de la caja ni a ofrecer "otra presentación": ya lo preguntaste. Propón algo DISTINTO o cierra con naturalidad.
+
 REGLAS:
 - Si el cliente NO nombra un medicamento concreto, NO llames buscar_medicamento. Responde directamente.
 - Un saludo, una pregunta general o un tema administrativo NO es una consulta de medicamento.
@@ -814,6 +818,9 @@ async def run_turn(
         clean = _quitar_repregunta_tras_cierre(
             clean, _texto_cliente_sin_marcadores(user_text) or None
         )
+        # No repetir la dirección/horario ni volver a pedir el nombre de la caja; y si
+        # preguntan el teléfono, contestar a eso (ver `_quitar_repeticiones`).
+        clean = _quitar_repeticiones(clean, user_text, history)
         if clean:
             sent = await _send(ctx, conv.id, str(crm_conv_id), clean)
             if sent:
@@ -4035,6 +4042,91 @@ def _lead_esta_cerrando(texto: str | None) -> bool:
     if not texto:
         return False
     return bool(_es_negativa_o_despedida(texto) or _CIERRE_DEL_LEAD.search(texto))
+
+
+# ── ANTI-REPETICIÓN DEL TEXTO FINAL ────────────────────────────────────────────────
+# Dos frases que el modelo clava iguales turno tras turno y que el cliente lee como que no
+# le están escuchando:
+#
+#   "¿Tienes el nombre exacto que está en la caja? O si prefieres, ¿busco otra presentación
+#    o medicamento?"     ← se repite aunque ya se dijo que no hay nada
+#   "La farmacia X está en … y trabaja 24 horas."   ← se repite aunque pregunten el TELÉFONO
+#
+# Caso real (provider 32, 2026-10-28 20:39-20:41), ver el docstring del módulo de la sesión.
+_RE_PIDE_NOMBRE_CAJA = re.compile(
+    r"(nombre\s+exacto|nombre\s+que\s+(?:est[áa]|aparece|dice|tiene)\s+en\s+la\s+caja|"
+    r"otra\s+presentaci[oó]n\s+o\s+medicamento|busco\s+otra\s+presentaci[oó]n)",
+    re.IGNORECASE,
+)
+_RE_DIRECCION_HORARIO = re.compile(
+    r"la\s+farmacia[^.\n]{0,90}?(?:est[áa]|queda|se\s+encuentra|atiende)\b[^.\n]{0,140}?"
+    r"(?:trabaja|atiende|abre|cierra|24\s*horas)",
+    re.IGNORECASE,
+)
+_RE_CLIENTE_UBICACION = re.compile(
+    r"\b(d[oó]nde|ubicaci[oó]n|direcci[oó]n|horario|a\s+qu[eé]\s+hora|abren|cierran|"
+    r"24\s*horas|queda|sucursal|local)\b",
+    re.IGNORECASE,
+)
+_RE_CLIENTE_TELEFONO = re.compile(
+    # 'tel[eé]fon\w*' cubre teléfono Y telefónico ("el número telefónico", como escribió el
+    # cliente del caso real: sin esto el fallback no reconocía la pregunta).
+    r"\b(tel[eé]fon\w*|n[uú]mero\s+(?:de\s+|del\s+)?(?:contacto|tel[eé]fon\w*|la\s+farmacia)|"
+    r"contactarlos?|llamarlos?|whatsapp\s+de\s+la\s+farmacia)\b",
+    re.IGNORECASE,
+)
+
+FALLBACK_TELEFONO = (
+    "No manejo el teléfono de la farmacia desde aquí. 🙏 Si quieres, te paso con un humano."
+)
+FALLBACK_PENDIENTE = "Quedo pendiente. ¿Te ayudo con algo más?"
+
+
+def _quitar_frases(texto: str, patron: re.Pattern[str]) -> str:
+    """Quita las frases (separadas por . ! ? o salto) que casan con el patrón."""
+    trozos = re.split(r"(?<=[.!?])\s+|\n{2,}", texto)
+    quedan = [x for x in trozos if x and not patron.search(x)]
+    return "\n\n".join(x.strip() for x in quedan if x.strip()).strip()
+
+
+def _texto_del_bot(history: list[Any], cuantos: int = 2) -> str:
+    """Los últimos mensajes del BOT del historial, unidos."""
+    previos = [
+        str(m.content or "") for m in history
+        if getattr(m, "role", "") == "assistant" and (m.content or "").strip()
+    ]
+    return "\n\n".join(previos[-cuantos:])
+
+
+def _quitar_repeticiones(texto: str, user_text: str, history: list[Any]) -> str:
+    """No repetir lo que ya se dijo y no colar la dirección cuando no la pidieron."""
+    if not texto:
+        return texto
+    previo = _texto_del_bot(history)
+    cliente = _texto_cliente_sin_marcadores(user_text) or user_text or ""
+
+    # 1) La MISMA pregunta de siempre (nombre de la caja / otra presentación).
+    if _RE_PIDE_NOMBRE_CAJA.search(texto) and _RE_PIDE_NOMBRE_CAJA.search(previo):
+        logger.info("anti-repetición: quito la pregunta del nombre de la caja (ya se hizo)")
+        texto = _quitar_frases(texto, _RE_PIDE_NOMBRE_CAJA)
+
+    # 2) Dirección/horario cuando NO los pidieron y ya se dieron antes.
+    if (
+        _RE_DIRECCION_HORARIO.search(texto)
+        and not _RE_CLIENTE_UBICACION.search(cliente)
+        and _RE_DIRECCION_HORARIO.search(previo)
+    ):
+        logger.info("anti-repetición: quito la dirección/horario (ya se dio y no la pidieron)")
+        texto = _quitar_frases(texto, _RE_DIRECCION_HORARIO)
+
+    if _RE_PIDE_NOMBRE_CAJA.search(texto) or _RE_DIRECCION_HORARIO.search(texto):
+        texto = texto.strip()
+    if texto and re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]{3,}", texto):
+        return texto
+    # Se quedó vacío: se responde a lo que SÍ preguntó, sin muletillas.
+    if _RE_CLIENTE_TELEFONO.search(cliente):
+        return FALLBACK_TELEFONO
+    return FALLBACK_PENDIENTE
 
 
 def _quitar_repregunta_tras_cierre(texto: str, ultimo_del_lead: str | None) -> str:
