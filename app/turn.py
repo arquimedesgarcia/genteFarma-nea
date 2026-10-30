@@ -5570,6 +5570,45 @@ _PALABRAS_PRESENTACION_ENVASE = {
 }
 
 
+_RE_CODIGO_NOMBRE = re.compile(r"^[a-z]+\d{1,3}$")
+
+
+def _ES_FORMA_FARMACEUTICA(w: str) -> bool:
+    """¿La palabra es nombre de forma farmacéutica ('tableta', 'susp', 'jbe')?"""
+    return bool(re.match(
+        r"^(tab|tabs|tableta|tabletas|caps?|c[aá]psulas?|comp|comprimidos?|grageas?|"
+        r"sob|sobre|sobres|susp|suspension|jbe|jarabes?|crema|gel|pomada|unguent|"
+        r"[oó]vulo|ovulos|ovu|supositorios?|spray|solucion|sol|colirio|ampolla|ampollas|"
+        r"inyectable|granulado|elixir|locion|shampoo|parche|parches)$",
+        w,
+    ))
+
+
+def _es_solo_dosis_y_forma(termino: str) -> bool:
+    """¿El término NO nomtra fármaco: es solo números, unidades y formas?
+
+    '1080 mg tableta' y '10 meq tableta' no son medicamentos: el catálogo no puede
+    responder nada útil y el matcher difuso empareja 'meq' con lo primero que pille
+    (ACHICORIA AD. MEQ, provider 32, 2026-10-29 21:21, para la foto del UROCIT).
+    """
+    palabras = re.findall(r"[a-záéíóúüñ0-9]+", (termino or "").lower())
+    if not palabras:
+        return True
+    unidades = {
+        "mg", "ml", "mcg", "gr", "g", "cc", "ui", "kg", "meq",
+        "tab", "tabs", "cap", "caps", "comp", "sob", "sobre", "amp", "vial", "und",
+        "mg/g", "meqs",
+    }
+    residuo = [
+        w for w in palabras
+        if not w.isdigit()
+        and w not in _PALABRAS_PRESENTACION_ENVASE
+        and w not in unidades
+        and not _ES_FORMA_FARMACEUTICA(w)
+    ]
+    return not residuo
+
+
 def _es_linea_de_presentacion(linea: str) -> bool:
     """¿La línea dice el CONTENIDO del envase ('10 Tabletas Recubiertas', 'X 60 ML')?
 
@@ -5584,10 +5623,16 @@ def _es_linea_de_presentacion(linea: str) -> bool:
     """
     l = _normalizar_tildes((linea or "").strip().lower())
     l = re.sub(r"^[•·\-\*\u2022]+\s*", "", l)
-    if not l:
-        return False
-    if not re.search(r"\d", l):
-        return False
+    # 1) número + nombre del envase ('100 tabletas de liberación prolongada',
+    #    '10 tabletas recubiertas'): la frase puede seguir y sigue siendo presentación.
+    if re.match(
+        r"^\d+\s*[-.,]?\s*"
+        r"(tabs?|tabletas?|c[aá]ps?|c[aá]psulas?|comp|comprimidos?|grageas?|sobre?s?|"
+        r"ampollas?|viales?|vial|frasco?s?|pomo?s?|tubo?s?|und?s?|unid|sticks?|blister)",
+        l,
+    ):
+        return True
+    # 2) todos los términos son vocabulario de envase ('X 60 ml', 'cont. net: 60 ml').
     palabras = re.findall(r"[a-z]+", l)
     if not palabras:
         return False
@@ -5826,6 +5871,11 @@ async def _medicamentos_de_ocr(
         meds = _parsear_medicamentos_receta(
             "\n".join(_lineas_lista_medicamentos(ocr))
         )
+    # UNA DOSIS Y UNA FORMA NO SON UN MEDICAMENTO. Provider 32, 2026-10-29 (foto del
+    # UROCIT): el OCR se partió en cuatro y se buscó '1080 mg tableta' (0 productos →
+    # "No disponibles en el catálogo: 1080 MG TABLETA") y '10 meq tableta', que el matcher
+    # difuso emparejó con ACHICORIA AD. MEQ 120ML.
+    meds = [m for m in meds if not _es_solo_dosis_y_forma(m)]
     return meds, "receta (varios medicamentos independientes)"
 
 
