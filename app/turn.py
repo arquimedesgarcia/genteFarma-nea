@@ -5918,11 +5918,11 @@ async def _medicamentos_de_ocr(
     if term and componentes:
         _todas = [ln.strip() for ln in (ocr or "").splitlines() if ln.strip()]
         if any(_es_linea_de_presentacion(ln) for ln in _todas):
-            base = term
-            dosis_env = _dosis_unica_del_envase(lineas)
-            if dosis_env and dosis_env not in base:
-                base = f"{base} {dosis_env}"
-            return [base], "caja (el envase declara su presentación)"
+            # SIN la dosis del envase: el catálogo puede escribir la MISMA presentación
+            # en otra escala ('1080 mg de citrato = UROCIT LP 10MG'), y meter la dosis
+            # del paquete produce "⚠️ No tengo de 1080 mg. Lo tengo en: 10 mg" sobre el
+            # MISMO producto que el cliente está sosteniendo en la mano.
+            return [term], "caja (el envase declara su presentación)"
 
     # Receta: se devuelven las líneas como medicamentos independientes, con la misma
     # lógica que ya usaba el backstop.
