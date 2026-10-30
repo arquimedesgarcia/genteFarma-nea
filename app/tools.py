@@ -27,6 +27,7 @@ from app.relevancia import (
     parece_presentacion_personal,
     tokens_farmaco,
 )
+from app.aliases import reescribir as _reescribir_alias
 
 # Palabras que revelan que el LLM alucinó una frase como término de búsqueda
 # (backstops del prompt, mensajes de "unsupported", instrucciones, etc.).
@@ -2025,6 +2026,17 @@ class ToolRuntime:
         self.last_options: list[dict[str, Any]] = []
         # true cuando el backstop de carrito ya forzó el add este turno (evita loops).
         self.cart_forced = False
+        # F14.2 — true cuando el mensaje traía "opción N" y la opción se resolvió
+        # contra `last_options` (lista que el cliente YA vio). Es una COMPRA
+        # CONFIRMADA, no una consulta nueva: el backstop de catálogo NO debe
+        # reinterpretar el resto del mensaje como medicamento (caso real:
+        # "Precio de la macrodantina?? Voy a querer una vitamina C de la opción
+        # 9" extraía "macrodantina querer vitamina opción" y buscaba esa basura).
+        self.opcion_resuelta = False
+        # Texto del cliente de ESTE turno (lo escribe app/turn.py:542). Se
+        # inicializa aquí para que cualquier lectura del runtime —incluido
+        # `_forma_del_pedido`— no reviente si el turno todavía no lo puso.
+        self.texto_cliente: str = ""
         # SKU reales que el BACKSTOP ya agregó al carrito en ESTE turno (pre-LLM
         # o en-loop). El LLM luego vuelve a llamar agregar_al_carrito con los
         # mismos productos (pensa que debe confirmar la selección); sin esto, el
@@ -2699,6 +2711,19 @@ class ToolRuntime:
                 self._conv.id, cart_closed=False
             )
         self.consulted_catalog = True
+        # F14.4 — ALIAS de escritura: si el término es una grafía CONOCIDA de un
+        # medicamento, se reescribe a la canónica ANTES de consultar y se apaga
+        # la tolerancia a typos de esa búsqueda. Una grafía conocida no necesita
+        # que el matcher adivine, y el fuzzy de 2 ediciones es justo lo que hacía
+        # saltar de categoría terapéutica ('vivacina' → VITAMINA K y C).
+        nombre_original = nombre
+        nombre_alias, es_alias = _reescribir_alias(nombre)
+        if es_alias:
+            logger.info(
+                "buscar_medicamento: alias '%s' → '%s' (sin fuzzy en esta búsqueda)",
+                nombre, nombre_alias,
+            )
+            nombre = nombre_alias
         # Normalizar tildes: el catálogo guarda 'potasico' sin tilde; si el
         # cliente escribe 'potásico', el motor no matchea (AND sobre tokens).
         nombre = _normalizar_tildes(nombre)
@@ -2722,7 +2747,7 @@ class ToolRuntime:
         # Se descarta lo que no comparte señal real con el término, SIN tocar el
         # resultado cuando el filtro lo vaciaría (ver filtrar_relevantes).
         antes = len(products)
-        products = filtrar_relevantes(nombre, products)
+        products = filtrar_relevantes(nombre, products, permitir_typo=not es_alias)
         if len(products) != antes:
             logger.info(
                 "buscar_medicamento: '%s' — %d/%d productos descartados por relevancia",
@@ -2867,17 +2892,30 @@ class ToolRuntime:
         # farmacia/precio). Quedarse con el de MENOR precio evita listas de 20
         # con 14 duplicados idénticos.
         products = _dedupe_por_nombre(products)
+        # FAIL-SAFE del alias (F14.4): si la grafía canónica no dio NADA en este
+        # catálogo, se reintenta con la grafía ORIGINAL del cliente y tolerancia
+        # a typos. Un alias solo puede ayudar: nunca puede esconder un resultado
+        # (p. ej. el catálogo tiene MACRODANTINA y no NITROFURANTOINA).
+        if not products and es_alias and nombre_original:
+            logger.info(
+                "buscar_medicamento: alias '%s' sin resultados — reintento con la "
+                "grafía original", nombre,
+            )
+            data_orig = await self._ctx.crm.get_products(
+                self._provider_id, q=_normalizar_tildes(nombre_original), limit=20
+            )
+            candidatos_orig = _dedupe_por_nombre(data_orig.get("products") or [])
+            products = filtrar_relevantes(
+                _normalizar_tildes(nombre_original), candidatos_orig
+            )
+            if products:
+                nombre = _normalizar_tildes(nombre_original)
+                self.last_term = nombre
+                es_alias = False
 
-        # REINTENTO POR EL FÁRMACO CABEZA: la frase completa no trajo el fármaco al
-        # catálogo (el motor del CRM matchea TODOS los tokens, así que "magnesio plus
-        # life" devuelve lo que comparte 'life' y ni un magnesio). El cliente nombra el
-        # fármaco PRIMERO y añade descriptores después ('plus', 'life', la marca): se
-        # reintenta con ese token, que en el catálogo del provider 27 devuelve los 10
-        # magnesios reales.
-        #
-        # Va ANTES del acortamiento porque es más preciso: el acortamiento solo quita
-        # la cola, mientras que aquí se aísla el fármaco. Y se RE-FILTRA con el término
-        # original, como los demás reintentos, para no aflojar la relevancia.
+        # REINTENTO POR EL FÁRMACO CABEZA (cliente): la frase completa no trajo el
+        # fármaco al catálogo (el motor matchea TODOS los tokens). Se aísla el
+        # primer token con cuerpo de fármaco y se re-filtra con el término original.
         if not products:
             cabeza = _token_cabeza_farmaco(nombre)
             if cabeza and cabeza != nombre.lower():
@@ -2885,7 +2923,9 @@ class ToolRuntime:
                     self._provider_id, q=cabeza, limit=20
                 )
                 candidatos = _dedupe_por_nombre(data_c.get("products") or [])
-                products = filtrar_relevantes(nombre, candidatos)
+                products = filtrar_relevantes(
+                    nombre, candidatos, permitir_typo=not es_alias
+                )
                 if products:
                     logger.info(
                         "buscar_medicamento: '%s' sin resultados — encontrado por el "
@@ -2932,7 +2972,7 @@ class ToolRuntime:
                 # quitar ruido del TÉRMINO (un OCR verboso), nunca para aflojar la
                 # RELEVANCIA.
                 products = _dedupe_por_nombre(data.get("products") or [])
-                products = filtrar_relevantes(nombre, products)
+                products = filtrar_relevantes(nombre, products, permitir_typo=not es_alias)
                 if products:
                     self.last_term = fallback
         if not products:
@@ -2955,7 +2995,7 @@ class ToolRuntime:
                 # los mismos 4 jarabes ajenos, y se le mostrarían al cliente como si
                 # fueran su DOVILIN.
                 candidatos = _dedupe_por_nombre(data_v.get("products") or [])
-                products = filtrar_relevantes(nombre, candidatos)
+                products = filtrar_relevantes(nombre, candidatos, permitir_typo=not es_alias)
                 if products:
                     logger.info(
                         "buscar_medicamento: '%s' sin resultados — encontrado con la "
@@ -3114,7 +3154,21 @@ class ToolRuntime:
                     "pregunta NUEVA y distinta a cualquier anterior (p. ej. ¿traes el "
                     "nombre que está en la caja?, ¿te sirve otra presentación?). NO lo "
                     "repitas ni lo pases a un humano automáticamente por un medicamento "
-                    "agotado."
+                    "agotado. "
+                    # F14.3b — lo que NO se puede afirmar cuando la búsqueda no dio
+                    # nada. Medido en el Laboratorio (persona 'errores_modismos'): el
+                    # agente decía "el esoz está agotado" y "ya la habías consultado
+                    # antes y estaba agotada" — INVENTA estado de inventario y memoria
+                    # de turnos que no están en esta conversación. Los guards G6/G10 no
+                    # lo cubren (exigen respaldo del catálogo y aquí SÍ se consultó), así
+                    # que la regla va donde el modelo tiene el contexto: el resultado de
+                    # la herramienta.
+                    "PROHIBIDO decir que el medicamento 'está agotado', 'se acabó', "
+                    "'no hay existencia' o 'no quedan': no tenemos estado de inventario. "
+                    "PROHIBIDO decir que el cliente 'ya lo había consultado antes', "
+                    "'la última vez' o 'sigue igual' si eso NO aparece en ESTA "
+                    "conversación: no tienes memoria de otros hilos. Di simple y "
+                    "honesto: 'no lo tengo en el catálogo'."
                 ),
                 "busqueda": nombre,
             }
@@ -3391,7 +3445,19 @@ class ToolRuntime:
             "el principio activo, laboratorios, marcas, precios ni presentaciones "
             "que no estén en 'products'. Si el catálogo trae UN solo producto, "
             "muestra SOLO ese producto y su precio; no inventes presentaciones ni "
-            "composiciones adicionales."
+            "composiciones adicionales. "
+            # F14.3 — APERTURA SIN CONTRADICCIÓN. Caso real: el agente abría con
+            # "No tengo SOLUNOVAL BUCAL" y acto seguido listaba los productos
+            # encontrados (SOLUNOVAR, PINVEX). El cliente lee "no hay" y no ve la
+            # lista. Si HAY resultados, el mensaje empieza por lo que SÍ tienes.
+            "APERTURA: tienes productos ('products' NO está vacío), así que la "
+            "respuesta EMPIEZA por ellos ('Lo más parecido que tengo es…' o "
+            "'Tengo estas opciones:'). Está PROHIBIDO abrir o cerrar el mensaje "
+            "con 'No tengo X', 'no lo tengo', 'no está disponible' o 'no lo "
+            "encontré' cuando estos resultados existen: el 'no tengo el exacto' "
+            "solo se escribe si NO hay ningún producto que mostrar. Puedes aclarar "
+            "la diferencia DESPUÉS de la lista, en una línea (p. ej. \"no manejamos "
+            "esa presentación, pero esto es lo mismo\")."
         )
         # Corrección de escritura: el cliente escribió mal el nombre y el
         # catálogo lo encontró con otra grafía. Se lo decimos al LLM para que lo

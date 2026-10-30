@@ -138,6 +138,26 @@ _FUNCIONALES = {
     "interesada", "compra", "comprar", "compro", "pedido", "pedidos", "orden",
 }
 
+# APELATIVOS DE CORTESÍA (F14.1 / C1). Son vocativos con los que el cliente
+# abre el mensaje ("mi amor, ¿cuánto sale la nitrofurantoina?") y NUNCA
+# identifican un fármaco. Caso real medido: el término extraído era
+# "amor nitrofurantoina 50mg vitamina" y el token 'amor' (4 letras) validó
+# "TE AMO PRESERV. 3PCS" — un preservativo — como resultado relevante.
+#
+# Se suman a `_FUNCIONALES` (no pueden ser señal de relevancia) y turn.py los
+# quita del término extraído antes de consultar el catálogo.
+APELATIVOS = {
+    "amor", "vida", "cielo", "reina", "reyna", "rey", "linda", "lindo",
+    "hermosa", "hermoso", "bella", "bello", "preciosa", "precioso", "corazon",
+    "gordita", "gordito", "mami", "papi", "mama", "papa", "mijo", "mija",
+    "hermano", "hermana", "jefe", "jefa", "doctor", "doctora", "senor",
+    "senora", "camarada", "amigo", "amiga", "panita", "pana", "chamo", "chama",
+    "princesa", "principe", "negra", "negro", "flaco", "flaca", "socio",
+    "compadre", "comadre", "madrina", "padrino", "estimado", "estimada",
+    "tia", "tio", "muchacho", "muchacha", "caballero", "dama", "senorita",
+}
+_FUNCIONALES = _FUNCIONALES | APELATIVOS
+
 # Vocabulario de NEGOCIO que nunca identifica un fármaco, pero que sí tiene
 # "cuerpo" suficiente para colarse como señal ('delivery' tiene 8 letras). Sin
 # esto, el guard de entrada deja pasar frases de logística y administración, y el
@@ -202,6 +222,14 @@ _VERBOS_Y_DISCURSO = {
     "enviar", "mandan", "manda", "mandar", "tener", "tenia", "tendria",
     "quiero", "queria", "quisiera", "necesito", "necesita", "buscar", "buscaba",
     "saber", "sabes", "sabe", "sabria", "decir", "dices", "dice", "digo",
+    # F14.5 — formas del verbo 'decir'/'querer'/'poder' en 2ª/3ª persona que se
+    # colaban como "fármaco" al partir por conectores: "quiero amoxicilina y
+    # QUE ME DIGAS el precio" daba el lado derecho 'digas' y lo trataba como un
+    # medicamento. Solo entran formas inequívocas (nunca un nombre comercial).
+    "digas", "diga", "digan", "diras", "dira", "diria", "dirias", "decirme",
+    "decirte", "mencionas", "menciona", "comentas", "comenta", "pregunto",
+    "preguntas", "pregunta", "podras", "podra", "podriamos", "quieras",
+    "quisieras", "tengas", "tendras", "tendra", "vendes", "vender", "venden",
     "hablar", "hablas", "conversar", "conversamos", "consultar", "consulto",
     "ver", "veo", "ves", "vemos", "dame", "dime", "digame", "muestrame",
     "esperar", "espero", "esperando", "dejar", "dejame", "dejo", "deja",
@@ -380,6 +408,76 @@ def _difiere_por_sal(a: str, b: str) -> bool:
             and largo[:-1] == corto[:-1] + "c")
 
 
+# -----------------------------------------------------------------------------
+# C2 (F14.4) — TYPO CREÍBLE: el fuzzy de 2 ediciones no puede cruzar de categoría
+# terapéutica cuando el término es UN SOLO token.
+#
+# Caso real medido: 'vivacina' (8 letras, sin resultados propios) matcheaba
+# 'VITAMINA' con distancia 2 (v→t, c→m) y el cliente que pedía otra cosa recibía
+# VITAMINA K y VITAMINA C. Dos ediciones arbitrarias sobre un token largo son
+# demasiada libertad: cualquier palabra española acaba a distancia 2 de otra.
+#
+# Regla: con distancia 1 (typo de una letra, incluida la transposición) no se
+# toca nada — es el caso que el proyecto ya validó. Con distancia 2 se exige
+# EVIDENCIA DE PARENTESCO: prefijo común de 3+ letras ('omeprasol'≈'omeprazol',
+# 'amoxicilna'≈'amoxicilina', 'metmorfina'≈'metformina') o transposición de dos
+# letras adyacentes ('lorsatan'≈'losartan', 'diclofencao'≈'diclofenaco').
+# 'vivacina' vs 'vitamina': prefijo 2 y ninguna transposición → NO pasa.
+#
+# Solo aplica cuando el término tiene UN token de señal: con 2+ tokens la
+# estructura AND/OR ya aporta redundancia (y ahí está el comportamiento medido
+# de las fases previas, que no se toca).
+_TYPO_PREFIJO_MIN = 3
+
+
+def _prefijo_comun(a: str, b: str) -> int:
+    """Letras iniciales idénticas entre a y b."""
+    n = 0
+    for ca, cb in zip(a, b):
+        if ca != cb:
+            break
+        n += 1
+    return n
+
+
+def _es_desplazamiento(a: str, b: str) -> bool:
+    """¿b se obtiene MOVIENDO un solo carácter de a a otra posición?
+
+    True:  'diclofencao'→'diclofenaco' (transposición de dos letras),
+           'lorsatan'→'losartan' (la 'r' se corre dos puestos),
+           'flucozanol'→'fluconazol'.
+    False: 'vivacina'→'vitamina' — dos letras DISTINTAS cambiadas por otras
+           ('v'→'t', 'c'→'m'), que es el salto de categoría que hay que frenar.
+
+    Un desplazamiento es el typo más benigno que existe: todas las letras son
+    las mismas y en el mismo orden salvo un carácter que se movió. Se comprueba
+    quitando cada carácter de `a` e insertándolo en cada posición.
+    """
+    if a == b or len(a) != len(b):
+        return False
+    n = len(a)
+    for i in range(n):
+        movido = a[i]
+        sin = a[:i] + a[i + 1:]
+        for j in range(n):
+            if sin[:j] + movido + sin[j:] == b:
+                return True
+    return False
+
+
+def _typo_aceptable(a: str, b: str, dist: int, estricto: bool = False) -> bool:
+    """¿La distancia `dist` entre a y b es un typo aceptable?
+
+    dist ≤ 1 → siempre (typo de una letra / transposición: comportamiento ya
+    validado). dist 2 → siempre, salvo con `estricto=True` (término de UN solo
+    token), donde se exige evidencia de parentesco: prefijo común de 3+ letras
+    o desplazamiento de un carácter.
+    """
+    if dist <= 1 or not estricto:
+        return True
+    return _prefijo_comun(a, b) >= _TYPO_PREFIJO_MIN or _es_desplazamiento(a, b)
+
+
 def tokens_senal(termino: str, min_len: int | None = None) -> list[str]:
     """Tokens del término que pueden validar un producto, no relleno.
 
@@ -413,7 +511,12 @@ def tokens_senal(termino: str, min_len: int | None = None) -> list[str]:
     return out
 
 
-def es_relevante(termino: str, nombre_producto: str) -> bool:
+def es_relevante(
+    termino: str,
+    nombre_producto: str,
+    permitir_typo: bool = True,
+    typo_estricto: bool | None = None,
+) -> bool:
     """¿El producto comparte señal real con el término buscado?
 
     True si algún token del término aparece en el nombre del producto como
@@ -423,10 +526,21 @@ def es_relevante(termino: str, nombre_producto: str) -> bool:
 
     Si el término NO tiene ningún token de señal (todo relleno: 'gracias por
     todo'), devuelve False: no hay evidencia de que el producto tenga relación.
+
+    `permitir_typo=False` (F14.4): el término viene de un ALIAS reescrito a la
+    grafía canónica del catálogo, así que no hace falta tolerar typos — y no
+    tolerarlos evita que la coincidencia la dé un producto ajeno.
+    `typo_estricto=True` (C2/F14.4): término de UN solo token de señal → la
+    distancia 2 exige evidencia de parentesco (prefijo 3+ o transposición).
     """
     senales = tokens_senal(termino, _MIN_LEN_SENAL)
     if not senales:
         return False
+    # C2/F14.4: con UN solo token de señal, la distancia 2 de typo exige
+    # evidencia de parentesco ('vivacina' ≈ 'vitamina' NO cruza de categoría).
+    # Se deduce del TÉRMINO para que el resultado no dependa de quién llame.
+    if typo_estricto is None:
+        typo_estricto = len(senales) <= 1
     hay = _norm(nombre_producto)
     hay_tokens = hay.split()
     hay_set = set(hay_tokens)
@@ -458,10 +572,15 @@ def es_relevante(termino: str, nombre_producto: str) -> bool:
         # PRIMOR) y 'todo'≈'dove' (DESODORANTE DOVE) vuelven a colarse.
         # La sal también se exceptúa aquí: 'potasio'→'potasico' es distancia 1 y
         # sin esta excepción entran DICLOFENAC POTASICO y LOSARTAN POTASICO.
+        if not permitir_typo:
+            continue
         for t in hay_tokens:
             if (len(t) >= _MIN_LEN_TYPO and abs(len(t) - len(w)) <= _MAX_DIST
                     and not _difiere_por_sal(w, t)):
-                if _levenshtein(w, t) <= _MAX_DIST:
+                dist = _levenshtein(w, t)
+                if dist <= _MAX_DIST and _typo_aceptable(
+                    w, t, dist, estricto=typo_estricto
+                ):
                     return True
     return False
 
@@ -641,7 +760,12 @@ def _tokens_senal_ordenados(termino: str) -> list[str]:
     return sorted(tokens_senal(termino, _MIN_LEN_SENAL), key=len, reverse=True)
 
 
-def es_relevante_estricto(termino: str, nombre_producto: str) -> bool:
+def es_relevante_estricto(
+    termino: str,
+    nombre_producto: str,
+    permitir_typo: bool = True,
+    typo_estricto: bool | None = None,
+) -> bool:
     """¿El producto comparte señal con TODOS los tokens de FÁRMACO del término?
 
     "CITRATO POTASIO" pide el conjunto, no cada palabra por su lado. Con el criterio
@@ -659,15 +783,31 @@ def es_relevante_estricto(termino: str, nombre_producto: str) -> bool:
     senales = sorted(tokens_farmaco(termino), key=len, reverse=True)
     if not senales:
         senales = _tokens_senal_ordenados(termino)
+    # C2/F14.4: con UN solo token de señal, el typo de distancia 2 exige
+    # evidencia de parentesco (ver _typo_aceptable). Si el llamador ya decidió,
+    # se respeta su valor.
+    if typo_estricto is None:
+        typo_estricto = len(tokens_senal(termino, _MIN_LEN_SENAL)) <= 1
     if len(senales) < 2:
-        return es_relevante(senales[0], nombre_producto) if senales else False
+        return (
+            es_relevante(
+                senales[0], nombre_producto,
+                permitir_typo=permitir_typo, typo_estricto=typo_estricto,
+            )
+            if senales else False
+        )
     for w in senales:
-        if not es_relevante(w, nombre_producto):
+        if not es_relevante(
+            w, nombre_producto,
+            permitir_typo=permitir_typo, typo_estricto=typo_estricto,
+        ):
             return False
     return True
 
 
-def filtrar_relevantes(termino: str, productos: list[dict]) -> list[dict]:
+def filtrar_relevantes(
+    termino: str, productos: list[dict], permitir_typo: bool = True
+) -> list[dict]:
     """Devuelve solo los productos relevantes para el término.
 
     En CUATRO pasos, del más estricto al más permisivo:
@@ -709,60 +849,38 @@ def filtrar_relevantes(termino: str, productos: list[dict]) -> list[dict]:
         return productos
     farmacos = tokens_farmaco(termino)
     utiles = farmacos or tokens_senal(termino, _MIN_LEN_SENAL)
+    # C2/F14.4: con UN solo token de señal, la distancia 2 de typo exige
+    # evidencia de parentesco ('vivacina' ≈ 'vitamina' ya no cruza de categoría).
+    # Con 2+ tokens se mantiene el comportamiento medido en las fases previas.
+    typo_estricto = len(tokens_senal(termino, _MIN_LEN_SENAL)) <= 1
+
+    def _ok(w: str, nombre: str) -> bool:
+        return es_relevante(
+            w, nombre, permitir_typo=permitir_typo, typo_estricto=typo_estricto
+        )
 
     estrictos = [
         p for p in productos
-        if all(es_relevante(w, str(p.get("nombre") or "")) for w in utiles)
+        if all(_ok(w, str(p.get("nombre") or "")) for w in utiles)
     ]
     if estrictos:
         return estrictos
 
-    # RESCATE ESCALONADO, DEL TOKEN MÁS SELECTIVO AL MÁS GENÉRICO.
+    # RESCATE ESCALONADO, DEL TOKEN MÁS SELECTIVO AL MÁS GENÉRICO (cliente).
     #
-    # Antes se hacía un OR con TODOS los tokens a la vez: bastaba que UNO matcheara.
-    # Eso llenaba el rescate de ruido aunque estuviera presente el token que SÍ
-    # identifica. Caso real (provider 27, 2026-10): "asaprol as pina" (= ASAPROL
-    # ASPIRINA, escrito fonéticamente).
-    #
-    #   'asaprol'  matchea    2 productos  ← el que identifica
-    #   'pina'     matchea   18 productos  ← PINZA UMBILICAL, BOLSA RECOLECTORA DE
-    #                                        ORINA, PAÑAL, MIGURT SABORA PIÑA,
-    #                                        LUBRIX GEL PIÑA (¡sabor!), PINAVIX
-    #
-    # Con el OR a secas, el cliente pedía ASAPROL y recibía pañales y gel sabor piña.
-    # Probando de a UNO y parando en el primero con resultados, gana 'asaprol' (2
-    # productos, los correctos) y 'pina' ya no aporta nada.
-    #
-    # El criterio es la SELECTIVIDAD (cuántos productos matchea), no la longitud:
-    # 'omeprazol' y 'pastillas' miden igual y solo el primero identifica.
-    #
-    # Los sufijos comerciales se saltan aquí (ya se explicó arriba por qué).
+    # (Se conserva la explicación original del autor de este bloque: el rescate
+    # prueba de a UN token, del más selectivo al más genérico, en vez del OR con
+    # todos a la vez. F14 solo añade los flags `_ok` para que el rescate respete
+    # `permitir_typo` cuando el término viene de un ALIAS reescrito.)
     especificos = [w for w in utiles if not _es_sufijo_comercial(w)]
 
-    # EL FÁRMACO CABEZA MANDA: si el PRIMER token específico —el que el cliente
-    # escribió como nombre del producto— no comparte señal con NINGÚN producto de
-    # la lista, NO se rescata con los tokens que le siguen.
-    #
-    # Caso real (provider 27, 2026-10): "magnesio plus life". El CRM devolvió 20
-    # productos donde NINGUNO tenía magnesio, pero 8 tenían 'life' (STRON LIFE /
-    # WALIFE). El rescate escalonado ordena por selectividad DENTRO de la lista
-    # devuelta: 'magnesio' → 0, 'life' → 8. Como mide sobre la lista y no sobre el
-    # catálogo, 'magnesio' quedó descartado y ganó 'life': el cliente pidió
-    # MAGNESIO y recibió SAW PALMETO, CASCARA SAGRADA, FORCEHUMAINE... todos de la
-    # marca STRON LIFE. Un falso positivo así es peor que el silencio: el cliente
-    # puede comprar el producto equivocado.
-    #
-    # La marca no identifica el fármaco. Si el fármaco no está en la lista, se
-    # devuelve VACÍO (el agente dirá que no está disponible, o `tools.py` reintenta
-    # la búsqueda por el token cabeza — ver `_token_cabeza_farmaco`).
-    #
-    # No afecta a los rescates legítimos: en "asaprol as pina" el cabeza 'asaprol'
-    # SÍ matchea (2 productos, los correctos) y el guard no se activa; en "omeprazol
-    # pastillas" hay un solo token específico. Medido en la batería de regresión.
+    # EL FÁRMACO CABEZA MANDA: si el PRIMER token específico no comparte señal con
+    # NINGÚN producto de la lista, NO se rescata con los tokens que le siguen
+    # (marca ≠ fármaco). Ver el caso real de 'magnesio plus life'.
     if len(especificos) > 1:
         cabeza = especificos[0]
         if not any(
-            es_relevante(cabeza, str(p.get("nombre") or "")) for p in productos
+            _ok(cabeza, str(p.get("nombre") or "")) for p in productos
         ):
             return []
 
@@ -772,15 +890,16 @@ def filtrar_relevantes(termino: str, productos: list[dict]) -> list[dict]:
         for token in sorted(
             rescate,
             key=lambda w: sum(
-                1 for p in productos if es_relevante(w, str(p.get("nombre") or ""))
+                1 for p in productos if _ok(w, str(p.get("nombre") or ""))
             ),
         ):
             relajados = [
                 p for p in productos
-                if es_relevante(token, str(p.get("nombre") or ""))
+                if _ok(token, str(p.get("nombre") or ""))
             ]
             if relajados:
                 return relajados
+
 
     # No hay NINGÚN producto que comparta señal con los tokens útiles.
     if farmacos:
@@ -788,7 +907,13 @@ def filtrar_relevantes(termino: str, productos: list[dict]) -> list[dict]:
         # otro medicamento. Vacío a propósito.
         return []
     # Término sin fármaco (solo relleno/presentación): fail-safe clásico.
-    filtrados = [p for p in productos if es_relevante(termino, str(p.get("nombre") or ""))]
+    filtrados = [
+        p for p in productos
+        if es_relevante(
+            termino, str(p.get("nombre") or ""),
+            permitir_typo=permitir_typo, typo_estricto=typo_estricto,
+        )
+    ]
     return filtrados or productos
 
 
@@ -828,6 +953,19 @@ def _tokens_farmaco(termino: str) -> list[str]:
     """Tokens que podrían ser fármaco: ni relleno, ni negocio, ni verbo/discurso."""
     return [w for w in tokens_senal(termino, _MIN_LEN_ENTRADA)
             if w not in _NO_FARMACO and w not in _VERBOS_Y_DISCURSO]
+
+
+def tokens_posible_farmaco(termino: str) -> list[str]:
+    """Versión pública y CONSERVADORA de `_tokens_farmaco` (F14.5).
+
+    La usa la partición de consultas multi-medicamento: un lado del conector
+    solo cuenta como medicamento si le queda algún token que NO sea relleno,
+    vocabulario de negocio ni verbo de discurso. Sin esto, "quiero amoxicilina y
+    que me DIGAS el precio" se partía en dos y el agente buscaba 'digas' en el
+    catálogo. `tokens_farmaco` (la de relevancia de resultados) es deliberadamente
+    más permisiva — no es la que se usa aquí.
+    """
+    return _tokens_farmaco(termino)
 
 
 # El OCR de una imagen que NO es un medicamento devuelve una FRASE, no un nombre.
@@ -944,3 +1082,4 @@ def parece_ocr_sin_medicamento(texto: str) -> bool:
     if re.search(r"\d+\s*(?:mg|ml|mcg|g|ui|%)", t):
         return False
     return any(re.search(p, t) for p in _PISTAS_OCR_SIN_MEDICAMENTO)
+

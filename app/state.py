@@ -283,6 +283,9 @@ class Store(Protocol):
         limit: int = 20,
     ) -> list[dict[str, Any]]: ...
 
+    # alias de escritura de medicamentos (F14.4)
+    async def list_med_aliases(self) -> list[dict[str, Any]]: ...
+
     # pacientes crónicos (Fase 2: clasificación automática)
     async def condiciones_para_termino(self, term: str) -> list[str]: ...
     async def registrar_consulta_cronica(
@@ -614,6 +617,19 @@ class MemoryStore:
         return [
             {"term": term, "consultas": n}
             for term, n in conteo.most_common(limit)
+        ]
+
+    async def list_med_aliases(self) -> list[dict[str, Any]]:
+        """Alias de escritura registrados en memoria (tests / lab sin DB).
+
+        La semilla real vive en la tabla `med_aliases` (migración 012); aquí se
+        exponen los que se registren explícitamente con `aliases.cargar_items`.
+        """
+        from app.aliases import tabla
+
+        return [
+            {"alias": a, "canonico": c, "origen": "memoria"}
+            for a, c in tabla().items()
         ]
 
     async def cart_set(
