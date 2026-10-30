@@ -567,6 +567,27 @@ async def run_turn(
             runtime.last_options = json.loads(conv.last_options)
         except Exception:
             runtime.last_options = []
+    # «¿SOLO LO TIENES POR SEPARADO?» — pregunta sobre la respuesta ANTERIOR, no un
+    # medicamento. Se contesta con el producto que se acaba de cotizar, sin pasar por el LLM:
+    # el modelo negaba el producto dos líneas después de haberle dado el precio.
+    if farmacia and _pregunta_por_separado(user_text):
+        _prod_sep = getattr(runtime, "last_product", None) or (
+            runtime.last_options[0] if runtime.last_options else None
+        )
+        if isinstance(_prod_sep, dict) and _prod_sep.get("producto"):
+            logger.info(
+                "backstop por separado: '%s' → respondo con el producto ya cotizado",
+                user_text[:40],
+            )
+            await _send(
+                ctx,
+                conv.id,
+                str(crm_conv_id),
+                _con_confirmacion_carrito(
+                    _respuesta_por_separado(_prod_sep), runtime
+                ),
+            )
+            return
     # Modo farmacia (providerId ya calculado arriba): se exponen las tools de
     # catálogo y se retiran las de agenda.
     # Heartbeat de typing: mantiene los 3 puntitos vivos mientras el turno
@@ -2793,6 +2814,26 @@ REFERENCIA_LISTA_T = {
     "opcion", "opción", "opciones", "opcioncita", "numerito",
 }
 
+# «¿SOLO LO TIENES POR SEPARADO?» — es una PREGUNTA sobre la respuesta anterior, no un
+# producto. Caso real (provider 32, 2026-10-29): tras cotizar la caja de FIN-AL-GRIP FORTE
+# como si fueran cuatro medicamentos, el cliente preguntó "No entendí?? Solo lo tienes por
+# separado?" y el agente contestó "⚠️ No disponibles en el catálogo: SEPARADO" con un
+# ENTERUNI al lado.
+POR_SEPARADO_T = {
+    "separado", "separada", "separados", "separadas", "suelto", "suelta", "sueltos",
+    "sueltas", "individual", "individuales", "independiente", "independientes", "aparte",
+}
+
+# «NO ENTENDÍ» — el cliente pide una ACLARACIÓN, no un medicamento. Sin esto, "No entendí??
+# Solo lo tienes por separado?" se buscaba como 'ENTENDI SEPARADO' (provider 32, 2026-10-29).
+COMPRENSION_T = {
+    "entendi", "entiendo", "entender", "entendido", "entendiste", "entendieron",
+    "comprendi", "comprendo", "comprender", "comprendido", "comprende",
+    "repite", "repites", "repetir", "repitas", "reitero", "reiteras",
+    "explicame", "explicar", "explicas", "explicacion", "aclarame", "aclarar", "aclaracion",
+    "confundi", "confundido", "confundida", "duda", "dudas",
+}
+
 _FILLER = {
     "hola", "buenas", "buen", "buenos", "buena", "dia", "dias", "tardes",
     "noches", "gracias", "por", "favor", "quisiera", "podria", "puede",
@@ -2806,6 +2847,8 @@ _FILLER = {
     "cotizar", "cotizame", "cotizacion", "cotizaciones", "cotizarlos",
     # Vocativo, intención de compra y referencia a la lista (gemelos de tools).
     *VOCATIVOS_T, *INTENCION_COMPRA_T, *REFERENCIA_LISTA_T,
+    *POR_SEPARADO_T,
+    *COMPRENSION_T,
     "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
     # RÓTULOS DEL CAMPO: el OCR devuelve '**Nombre del medicamento:** Fexofenadina
     # Clorhidrato CALOX' y el término quedaba 'nombre del fexofenadina clorhidrato calox'.
@@ -4437,6 +4480,40 @@ def _grupo_ya_en_carrito(prods: list[dict[str, Any]], runtime: Any) -> bool:
     return False
 
 
+_RE_PREGUNTA_POR_SEPARADO = re.compile(
+    r"(?i)(?:\bsolo\b|\bsolamente\b|\bnada\s+m[aá]s\b|\bno\s+m[aá]s\b)"
+    r".{0,40}\b(?:separado|separada|separados|separadas|suelto|suelta|sueltos|sueltas|"
+    r"individual|individuales|aparte)\b"
+    r"|\bpor\s+separado\b"
+    r"|\blo\s+tienes\s+suelto\b|\blos\s+tienes\s+sueltos\b",
+)
+
+
+def _pregunta_por_separado(texto: str) -> bool:
+    """¿Pregunta si el producto se vende por partes («¿solo lo tienes por separado?»)?"""
+    return bool(_RE_PREGUNTA_POR_SEPARADO.search(texto or ""))
+
+
+def _respuesta_por_separado(producto: dict[str, Any]) -> str:
+    """Contesta SIN contradecir la lista anterior: el producto ES uno solo.
+
+    Caso real (provider 32, 2026-10-29): después de cotizar el FIN-AL-GRIP FORTE, el cliente
+    preguntó "¿Solo lo tienes por separado?" y el agente respondió "No tengo Fin-Al-Grip FORTE
+    como un solo producto. Te puedo buscar los ingredientes por separado" — dos líneas después
+    de haberle dado el precio del producto.
+    """
+    titulo = str(producto.get("producto") or producto.get("nombre") or "").upper()
+    # SIN `_lista_con_aviso`: con el nombre completo del producto como término, el aviso de
+    # "lo que no tengo" se disparaba con el LABORATORIO del propio título
+    # ("⚠️ No tengo DROTAFARMA. De FIN-AL-GRIP FORTE X 10TAB hay esto:").
+    return (
+        "No hace falta: es un solo producto, no hay que comprarlo por partes.\n\n"
+        + _formatear_lista_productos([producto], titulo)
+        + "\n\n"
+        + MENSAJE_SUGERIDO_CARRITO
+    )
+
+
 def _con_confirmacion_carrito(texto: str, runtime: Any) -> str:
     """Antepone lo que el backstop agregó al carrito si la respuesta no lo dice.
 
@@ -5546,6 +5623,40 @@ _RE_SOLO_FORMA = re.compile(
 )
 
 
+_PALABRAS_PRESENTACION_ENVASE = {
+    "tab", "tabs", "tableta", "tabletas", "caps", "capsula", "capsulas",
+    "comp", "comprimido", "comprimidos", "gragea", "grageas", "sobre", "sobres",
+    "ampolla", "ampollas", "vial", "viales", "und", "unid", "unidad", "unidades",
+    "ml", "gr", "g", "mg", "mcg", "ui", "recubierta", "recubiertas", "recubierto",
+    "recubiertos", "masticable", "masticables", "efervescente", "efervescentes",
+    "frasco", "pomo", "tubo", "blister", "sachet", "stick", "sticks", "vial",
+}
+
+
+def _es_linea_de_presentacion(linea: str) -> bool:
+    """¿La línea dice el CONTENIDO del envase ('10 Tabletas Recubiertas', 'X 60 ML')?
+
+    Es la firma de una CAJA: una receta escrita no termina con "10 tabletas recubiertas".
+
+    Caso real (provider 32, 2026-10-29): la foto del FIN-AL-GRIP FORTE (paracetamol 500 mg +
+    fenilefrina 10 mg + cetirizina 5 mg + dextrometorfano 15 mg, 10 tabletas recubiertas) se
+    leyó como CINCO medicamentos: cotizó el FIN-AL-GRIP FORTE y además avisó "No disponibles:
+    FENILEFRINA 10 MG, DEXTROMETORFANO 15 MG" y ofreció un PARACETAMOL en ampolla y una
+    CETIRIZINA en jarabe. La caja no se reconocía porque la cobertura de componentes exige
+    que el TÍTULO del catálogo los nombre, y "FIN-AL-GRIP FORTE" no nombra ninguno.
+    """
+    l = _normalizar_tildes((linea or "").strip().lower())
+    l = re.sub(r"^[•·\-\*\u2022]+\s*", "", l)
+    if not l:
+        return False
+    if not re.search(r"\d", l):
+        return False
+    palabras = re.findall(r"[a-z]+", l)
+    if not palabras:
+        return False
+    return all(w in _PALABRAS_PRESENTACION_ENVASE for w in palabras)
+
+
 def _es_linea_descriptiva(linea: str) -> bool:
     """¿La línea describe el MISMO producto (no es otro medicamento)?
 
@@ -5636,6 +5747,7 @@ async def _medicamentos_de_ocr(
         if productos:
             if not componentes:
                 return [term], "caja (el OCR solo trae el nombre)"
+
             # ¿algún producto del catálogo cubre TAMBIÉN los otros componentes?
             #
             # SOLO cuentan los componentes con palabra ÚTIL (≥5 letras) y que no sean
@@ -5743,6 +5855,29 @@ async def _medicamentos_de_ocr(
                 return [base], (
                     "caja (el envase se llama con todos los componentes)"
                 )
+
+    # ANTES DE RENDIRSE, LA ÚLTIMA SEÑAL DE CAJA: el envase declara su contenido.
+    #
+    # Caso real (provider 32, 2026-10-29): la foto del FIN-AL-GRIP FORTE (paracetamol 500 mg +
+    # fenilefrina 10 mg + cetirizina 5 mg + dextrometorfano 15 mg, 10 tabletas recubiertas) se
+    # leyó como CINCO medicamentos: cotizó la caja y además avisó "No disponibles: FENILEFRINA
+    # 10 MG, DEXTROMETORFANO 15 MG" y ofreció un PARACETAMOL en ampolla IV y una CETIRIZINA en
+    # jarabe. La cobertura de componentes falla aquí porque el título del catálogo no nombra
+    # ninguno ('FIN-AL-GRIP FORTE'), pero una receta escrita no termina en "10 tabletas
+    # recubiertas". Se comprueba sobre el OCR CRUDO: `_lineas_candidatas_medicamento` filtra
+    # esa línea por descriptiva.
+    #
+    # Va DESPUÉS de la cobertura a propósito: 'AMOXICILINA + ÁCIDO CLAVULÁNICO' también declara
+    # su presentación, y ahí el término bueno es el de los componentes ('amoxicilina acido
+    # clavulanico'), no la mono-terapia.
+    if term and componentes:
+        _todas = [ln.strip() for ln in (ocr or "").splitlines() if ln.strip()]
+        if any(_es_linea_de_presentacion(ln) for ln in _todas):
+            base = term
+            dosis_env = _dosis_unica_del_envase(lineas)
+            if dosis_env and dosis_env not in base:
+                base = f"{base} {dosis_env}"
+            return [base], "caja (el envase declara su presentación)"
 
     # Receta: se devuelven las líneas como medicamentos independientes, con la misma
     # lógica que ya usaba el backstop.

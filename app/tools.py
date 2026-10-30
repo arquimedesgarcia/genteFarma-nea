@@ -189,6 +189,26 @@ REFERENCIA_LISTA = {
     "opcion", "opción", "opciones", "opcioncita", "numerito",
 }
 
+# «¿SOLO LO TIENES POR SEPARADO?» — es una PREGUNTA sobre la respuesta anterior, no un
+# producto. Caso real (provider 32, 2026-10-29): tras cotizar la caja de FIN-AL-GRIP FORTE
+# como si fueran cuatro medicamentos, el cliente preguntó "No entendí?? Solo lo tienes por
+# separado?" y el agente contestó "⚠️ No disponibles en el catálogo: SEPARADO" con un
+# ENTERUNI al lado.
+POR_SEPARADO = {
+    "separado", "separada", "separados", "separadas", "suelto", "suelta", "sueltos",
+    "sueltas", "individual", "individuales", "independiente", "independientes", "aparte",
+}
+
+# «NO ENTENDÍ» — el cliente pide una ACLARACIÓN, no un medicamento. Sin esto, "No entendí??
+# Solo lo tienes por separado?" se buscaba como 'ENTENDI SEPARADO' (provider 32, 2026-10-29).
+COMPRENSION = {
+    "entendi", "entiendo", "entender", "entendido", "entendiste", "entendieron",
+    "comprendi", "comprendo", "comprender", "comprendido", "comprende",
+    "repite", "repites", "repetir", "repitas", "reitero", "reiteras",
+    "explicame", "explicar", "explicas", "explicacion", "aclarame", "aclarar", "aclaracion",
+    "confundi", "confundido", "confundida", "duda", "dudas",
+}
+
 _PALABRAS_FUNCIONALES = {
     # FRASE DE CONSULTA: el cliente anuncia la lista antes de enumerarla. No es un
     # medicamento y no puede encabezar el título ni la búsqueda (el cliente vería
@@ -199,6 +219,8 @@ _PALABRAS_FUNCIONALES = {
     "siguiente", "siguientes", "presupuesto",
     # Vocativo, intención de compra y referencia a la lista: NO son el nombre de nada.
     *VOCATIVOS, *INTENCION_COMPRA, *REFERENCIA_LISTA,
+    *POR_SEPARADO,
+    *COMPRENSION,
     # 'resumen' no es un medicamento (ver el gemelo en turn.py::_FILLER).
     "resumen", "resumenes", "resúmenes",
     # 'costo'/'porf' tampoco: 'porf' casa con el "POR" de AMPICILINA "POR 1 AMPOLLA" y
