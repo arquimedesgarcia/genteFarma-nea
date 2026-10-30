@@ -1,0 +1,240 @@
+{
+  "root": "C:\\Users\\arqui\\AppData\\Local\\Temp\\f14-origin",
+  "extraccion": {
+    "caso1_termino_unico": "nitrofurantoina 50mg vitamina c",
+    "caso1_parece_lista": true,
+    "caso1_multi": [],
+    "caso2_termino_unico": "vivacina",
+    "caso2_parece_lista": false,
+    "caso2_multi": [],
+    "caso3_termino_unico": "macrodantina vitamina c",
+    "caso3_parece_lista": true,
+    "caso3_multi": [],
+    "caso4_termino_unico": "solunoval solucion bucal pinvex solucion bucal",
+    "caso4_parece_lista": true,
+    "caso4_multi": [],
+    "caso3_menciona_opcion": "no existe en este árbol",
+    "caso3_eleccion_multiple": [
+      [
+        1,
+        9
+      ]
+    ],
+    "no_parte": {
+      "tienes atamel y su precio": [],
+      "amoxicilina y acido clavulanico": [],
+      "vitamina c y zinc": [],
+      "disponen de clopidogrel de 75 losartan de 50 atorvastatina de 30": [
+        "clopidogrel 75",
+        "losartan 50",
+        "atorvastatina 30"
+      ]
+    }
+  },
+  "relevancia": {
+    "caso1_relevancia_por_producto": {
+      "TE AMO PRESERV. 3PCS": false,
+      "VITAMINA K 10 MG X 30 TAB": true,
+      "VITAMINA C 500 MG X 10 TAB": true,
+      "NITROFURANTOINA 100 MG X 20 CAP": true
+    },
+    "caso1_filtrados": [
+      "NITROFURANTOINA 100 MG X 20 CAP"
+    ],
+    "caso2_relevancia_por_producto": {
+      "VITAMINA K 10 MG X 30 TAB": true,
+      "VITAMINA C 500 MG X 10 TAB": true,
+      "VITAMINAS B12 COMPLEJO X 30 CAP": false
+    },
+    "caso2_filtrados": [
+      "VITAMINA K 10 MG X 30 TAB",
+      "VITAMINA C 500 MG X 10 TAB"
+    ],
+    "typo_ok": {
+      "omeprasol": true,
+      "diclofencao": true,
+      "amoxicilna": true,
+      "solunoval": true,
+      "lorsatan": true,
+      "fexofenasina": true,
+      "azitromisina": true,
+      "metmorfina": true,
+      "clonacepan": true,
+      "shampo dreene": true,
+      "acetaminofen 650 mg": true
+    },
+    "falsos_positivos": {
+      "hasta": false,
+      "todo": false,
+      "tarda delivery": false,
+      "manana hora": false,
+      "amor": false
+    },
+    "caso4_filtrados": [
+      "SOLUNOVAR SOLUCION BUCAL X 1 FCO"
+    ]
+  },
+  "alias": {
+    "alias_modulo": "no existe en este árbol"
+  },
+  "matriz_typo": {
+    "typos_reales": {
+      "omeprasol->omeprazol": {
+        "dist": 1,
+        "prefijo": 6,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "diclofencao->diclofenaco": {
+        "dist": 2,
+        "prefijo": 8,
+        "desplazamiento": true,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "amoxicilna->amoxicilina": {
+        "dist": 1,
+        "prefijo": 8,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "solunoval->solunovar": {
+        "dist": 1,
+        "prefijo": 8,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "lorsatan->losartan": {
+        "dist": 2,
+        "prefijo": 2,
+        "desplazamiento": true,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "fexofenasina->fexofenadina": {
+        "dist": 1,
+        "prefijo": 8,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "azitromisina->azitromicina": {
+        "dist": 1,
+        "prefijo": 8,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "metmorfina->metformina": {
+        "dist": 2,
+        "prefijo": 3,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "clonacepan->clonazepam": {
+        "dist": 2,
+        "prefijo": 5,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "ceftriasona->ceftriaxona": {
+        "dist": 1,
+        "prefijo": 7,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "flucozanol->fluconazol": {
+        "dist": 2,
+        "prefijo": 5,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "amoxacilina->amoxicilina": {
+        "dist": 1,
+        "prefijo": 4,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "prednizona->prednisona": {
+        "dist": 1,
+        "prefijo": 6,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "gentamisina->gentamicina": {
+        "dist": 1,
+        "prefijo": 7,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "lozartan->losartan": {
+        "dist": 1,
+        "prefijo": 2,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      }
+    },
+    "cruces_de_categoria": {
+      "vivacina->vitamina": {
+        "dist": 2,
+        "prefijo": 2,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "todo->dove": {
+        "dist": 3,
+        "prefijo": 0,
+        "desplazamiento": false,
+        "es_relevante": false,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "tarda->venda": {
+        "dist": 3,
+        "prefijo": 0,
+        "desplazamiento": false,
+        "es_relevante": false,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "terapia->tortilla": {
+        "dist": 5,
+        "prefijo": 1,
+        "desplazamiento": false,
+        "es_relevante": false,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "morfina->formina": {
+        "dist": 2,
+        "prefijo": 0,
+        "desplazamiento": false,
+        "es_relevante": true,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "captopril->carotida": {
+        "dist": 6,
+        "prefijo": 2,
+        "desplazamiento": false,
+        "es_relevante": false,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      },
+      "insulina->insultos": {
+        "dist": 3,
+        "prefijo": 5,
+        "desplazamiento": false,
+        "es_relevante": false,
+        "es_relevante_laxo": "no existe el parámetro en este árbol"
+      }
+    }
+  }
+}

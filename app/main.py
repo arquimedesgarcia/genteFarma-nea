@@ -29,6 +29,7 @@ from app.sender import SenderWorker
 from app.state import AppContext
 from app.turn import handle_flush
 from app.webhook import router as webhook_router
+from app.aliases import cargar_desde_store as cargar_aliases
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,6 +57,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             await store.connect()
             await store.migrate(MIGRATIONS_DIR)
             logger.info("migraciones aplicadas — DB lista")
+            # Alias de escritura (F14.4): se cargan al arranque desde
+            # `med_aliases`. Nunca tumba el arranque (ver app/aliases.py).
+            await cargar_aliases(store)
             crm = CrmClient(settings.crm_base_url, settings.crm_bot_api_key)
             app.state.ctx = AppContext(
                 settings=settings,

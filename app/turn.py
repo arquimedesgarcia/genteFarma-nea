@@ -20,8 +20,13 @@ from app import media
 from app.config import canonical_identity
 from app.crm import CrmConflict, CrmError
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
+from app import guards
 from app.llm import LlmExhausted
-from app.relevancia import es_relevante
+from app.relevancia import (
+    APELATIVOS as _APELATIVOS,
+    es_relevante,
+    tokens_posible_farmaco,
+)
 from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt
@@ -496,6 +501,18 @@ async def run_turn(
     streak = hostile_streak([m.content for m in history if m.role == "user"])
     if streak >= 3:
         messages.append({"role": "system", "content": HOSTILITY_ALERT})
+    # Guarda G3 (canal sin media): el cliente menciona foto/adjunto pero este
+    # turno NO tiene imagen ni OCR → señal explícita para que jamás afirme
+    # haber recibido nada (falla "Recibí tu foto" del Laboratorio).
+    tiene_ocr = bool(_texto_ocr_completo(user_text))
+    if (
+        farmacia
+        and not image_uris
+        and not tiene_ocr
+        and guards.menciona_media(user_text)
+    ):
+        logger.info("guarda G3: lead menciona media sin imagen real — inyecto restricción de canal")
+        messages.append({"role": "system", "content": guards.NO_MEDIA_ALERT})
     # Candado de cierre: conversación que no va a ningún lado. Se despide con
     # UNA línea cálida en este turno y después calla (gate 1.5). El conteo es
     # determinista aquí; el LLM solo pone la redacción.
@@ -610,6 +627,14 @@ async def run_turn(
     # llamado el modelo o no (la regla de negocio no depende de su humor).
     if streak >= 3 and runtime.handoff_reason is None:
         runtime.handoff_reason = "hostilidad"
+    # Guarda G4: acusación de fraude dirigida → escalado INMEDIATO (un solo
+    # mensaje basta; el agente del Laboratorio respondía "no tengo capacidad"
+    # o seguía vendiendo en vez de escalar).
+    if runtime.handoff_reason is None and guards.acusacion_fraude(user_text):
+        logger.warning("guarda G4: acusación de fraude — handoff inmediato")
+        runtime.handoff_reason = "hostilidad"
+        # T8: el cierre de escalado es PLANTILLA CONSTANTE, no generación LLM.
+        final_text = guards.TPL_CIERRE_G4
 
     # NO se hace handoff automático por medicamento no disponible: si este turno
     # se buscó algo que no está en el catálogo, el agente lo informa con
@@ -843,7 +868,143 @@ async def run_turn(
             "agregando productos; se respeta el texto del LLM"
         )
 
+    # --- Guardas anti-alucinación (QA T4) — vetos deterministas -------------
+    # Se ejecutan AL FINAL: un veto reemplaza el texto por plantilla constante
+    # y/o fuerza handoff. Cada activación queda logueada para el conteo de
+    # vetos del reporte QA.
+    # Negativa con carrito activo: el cliente dijo "no" a más medicamentos.
+    # En este turno G1-ext/G5/G6 no deben pisar el resumen del pedido.
+    es_negativa_con_carrito = (
+        farmacia and cart_activo
+        and _quiere_ver_resumen(user_text, tiene_carrito=True)
+    )
+    if farmacia and final_text:
+        # G2 — política fuera del KB: escalado hardcodeado, jamás generación.
+        if guards.intencion_fuera_kb(user_text):
+            logger.warning("guarda G2 VETO: intención fuera de KB (%r) — plantilla de escalado", user_text[:80])
+            final_text = guards.TPL_FUERA_KB
+            if runtime.handoff_reason is None:
+                runtime.handoff_reason = "fuera_de_kb"
+        # G3 — el agente afirma haber recibido una imagen que NO llegó.
+        elif (
+            not image_uris
+            and not tiene_ocr
+            and guards.afirma_recibir_media(final_text)
+        ):
+            logger.warning("guarda G3 VETO: el agente afirmó recibir media inexistente — plantilla sin-media")
+            final_text = guards.TPL_SIN_MEDIA
+        # G1 — precio citado sin respaldo del catálogo.
+        elif (
+            not runtime.last_products
+            and not runtime.cart_summary_text
+            and guards.pide_precio_sin_dato(user_text)
+            and re.search(
+                r"\$\s*\d|\bBs\.?\s*\d|\d+(?:[.,]\d+)?\s*B", final_text, re.I
+            )
+        ):
+            logger.warning("guarda G1 VETO: precio sin respaldo de catálogo — plantilla sin-precio")
+            final_text = guards.TPL_SIN_PRECIO
+        # G1-ext — superlativo de precio ('el más económico', 'el genérico de')
+        # afirmado por el agente sin datos del catálogo en este turno.
+        elif (
+            not es_negativa_con_carrito
+            and not runtime.last_products
+            and not runtime.cart_summary_text
+            and guards.cita_superlativo_precio(final_text)
+        ):
+            logger.warning("guarda G1 VETO: superlativo de precio sin respaldo de catálogo — plantilla sin-precio")
+            final_text = guards.TPL_SIN_PRECIO
+        # G5 — principio activo/composición/genérico afirmado sin respaldo de
+        # catálogo. El agente inventa la composición de un medicamento cuando
+        # no hay resultados de tool en este turno (Daflon → 'ramiprilo').
+        elif (
+            not es_negativa_con_carrito
+            and guards.afirma_composicion(final_text)
+            and not runtime.last_products
+        ):
+            logger.warning("guarda G5 VETO: afirmación de composición/genérico sin respaldo — plantilla sin-composición")
+            final_text = guards.TPL_SIN_COMPOSICION
+        # G6 — precio con dígitos, stock o principio activo directo afirmado
+        # sin respaldo de catálogo. Complementa G1 (que solo actúa cuando el
+        # cliente preguntó el precio) y G5 (composición más amplia): G6 cubre
+        # el LLM que inventa datos aunque el cliente NO haya pedido precio
+        # explícitamente (p. ej. "el Daflon cuesta $5", "hay 10 unidades").
+        elif (
+            not es_negativa_con_carrito
+            and not runtime.last_products
+            and not runtime.cart_summary_text
+            and guards.afirma_dato_catalogo(final_text)
+        ):
+            logger.warning("guarda G6 VETO: datos de producto sin respaldo de catálogo — plantilla verificación")
+            final_text = guards.TPL_VERIFICACION_CATALOGO
+        # G7 — eco: el agente devuelve casi literalmente el mensaje del cliente
+        # en lugar de ejecutar la acción (buscar, agregar, confirmar) o pedir
+        # el dato que falta. Caso QA 'Comprador decidido': el agente repitió
+        # "Perfecto, quiero 2 cajas de losartan 50 mg." sin llamar ninguna tool.
+        elif guards.es_echo(final_text, user_text):
+            logger.warning("guarda G7 VETO: eco del mensaje del cliente — plantilla anti-eco")
+            final_text = guards.TPL_NO_ECHO
+        # G8 — placeholder sin ejecutar: el LLM escribió la plantilla de una
+        # tool-call en lugar de ejecutarla (p. ej. '[inserta información del
+        # producto desde buscar_medicamento]'). Caso QA 'Errores y modismos'.
+        elif guards.tiene_placeholder(final_text):
+            logger.warning("guarda G8 VETO: placeholder de herramienta en texto final — plantilla búsqueda honesta")
+            final_text = guards.TPL_BUSQUEDA_HONESTA
+        # G12 — tool-call JSON cruda filtrada al texto: el LLM emitió la llamada
+        # a herramienta como texto plano ('{"name":"sugerir_generico",...}') en
+        # vez de ejecutarla. Caso real del Laboratorio (fase 10, G11b-A,
+        # pregunton_precios). G8 no lo cubre (solo corchetes '[inserta...]').
+        elif guards.contiene_toolcall_json(final_text):
+            logger.warning("guarda G12 VETO: tool-call JSON cruda en texto final — plantilla G12")
+            final_text = guards.TPL_G12_TOOLCALL
+        # G9 — cliente pide hablar con humano pero el LLM no llamó handoff:
+        # el bench marcaba el cierre seco ("Entendido…") como debio_escalar/tono.
+        # Plantilla constante empática + handoff garantizado.
+        elif guards.pide_humano(user_text) and runtime.handoff_reason is None:
+            logger.warning("guarda G9 VETO: cliente pide humano sin handoff — plantilla cierre escalado")
+            final_text = guards.TPL_CIERRE_ESCALADO
+            runtime.handoff_reason = "lead_request"
+        # G10a — clase terapéutica o uso farmacológico afirmado sin haber consultado
+        # el catálogo en este turno. Caso 'pregunton_precios' del Laboratorio: el
+        # agente describía "Daflón 500 es un antiinflamatorio AINE que se usa para..."
+        # sin dato de herramienta. G5/G6 no cubren clases terapéuticas amplias.
+        # NO se activa si el turno SÍ llamó buscar_medicamento (consulted_catalog).
+        elif (
+            not runtime.consulted_catalog
+            and guards.afirma_composicion_farmacologica(final_text)
+        ):
+            logger.warning("guarda G10 VETO: composición/uso farmacológico sin catálogo — plantilla honesta G10")
+            final_text = guards.TPL_G10_COMPOSICION
+        # G10b — promesa de búsqueda futura sin haber llamado herramienta en el turno.
+        # El agente dice "Voy a buscar", "Déjame verificar", "Busco y te aviso" sin
+        # haber ejecutado buscar_medicamento: el cliente queda esperando una acción
+        # que nunca ocurrirá en este turno.
+        elif (
+            not runtime.consulted_catalog
+            and guards.promete_busqueda_sin_accion(final_text)
+        ):
+            logger.warning("guarda G10 VETO: promesa de búsqueda sin tool call — plantilla honesta G10")
+            final_text = guards.TPL_G10_PROMESA
+        # G11 — el agente prometió escalar a un humano por iniciativa propia
+        # (ej: "te comunico con un asesor", "alguien te contactará") sin haber
+        # llamado la herramienta handoff. G9 cubre el caso donde el CLIENTE
+        # pide humano; G11 cubre la promesa espontánea del agente sin handoff.
+        elif (
+            guards.promete_escalado(final_text)
+            and runtime.handoff_reason is None
+        ):
+            logger.warning("guarda G11 VETO: agente prometió escalado sin handoff — plantilla G11")
+            final_text = guards.TPL_G11_ESCALADO
+            runtime.handoff_reason = "lead_request"
+
+    # Negativa con carrito: si algún guard pisó el texto, restaurar el resumen
+    # canónico del carrito (ver_carrito ya se forzó en el tool_loop).
+    if es_negativa_con_carrito and runtime.cart_summary_text and final_text != runtime.cart_summary_text:
+        logger.info("negativa con carrito: restaurando resumen canónico tras posible veto")
+        final_text = runtime.cart_summary_text
+
     # Si lo cotizado es OTRO fármaco del que pidió el cliente, se responde honesto.
+    # Va DESPUÉS de las guardas QA: un fármaco equivocado pesa más que cualquier veto.
     if farmacia and final_text and runtime.last_products:
         _otro = _farmaco_distinto(user_text, runtime)
         if _otro:
@@ -1420,6 +1581,19 @@ async def _tool_loop(
         r"\s*\d{1,2}\s*", user_text or ""
     ):
         eleccion_prev = None
+    # F14.2 — "opción N" en mensaje MIXTO: la selección de una opción que el
+    # cliente YA vio es una COMPRA CONFIRMADA y tiene prioridad sobre cualquier
+    # búsqueda nueva. Se marca el turno para que el backstop de catálogo no
+    # reinterprete el resto del texto como medicamento (antes: extraía
+    # "macrodantina querer vitamina opción" y buscaba esa basura, pisando
+    # last_options y dejando la opción 9 fuera de rango).
+    if farmacia and runtime.last_options and _menciona_opcion_numerada(user_text):
+        runtime.opcion_resuelta = True
+        logger.info(
+            "F14.2 opción numerada en mensaje mixto: resuelvo la selección "
+            "(last_options=%d) y no busco término nuevo",
+            len(runtime.last_options),
+        )
     if (
         farmacia
         and eleccion_prev
@@ -1747,7 +1921,7 @@ async def _tool_loop(
             # de catálogo y volvemos a dejar que el modelo responda con datos.
             # Se salta si el cliente está cerrando el pedido (resumen/finalizar):
             # ese texto no es una búsqueda de medicamento.
-            if farmacia and not runtime.summary_forced and not runtime.finalize_forced:
+            if farmacia and not runtime.summary_forced and not runtime.finalize_forced and not runtime.opcion_resuelta:
                 # OCR de imagen (medicamento/receta): forzar la consulta con el
                 # término extraído del marcador, sin depender del criterio del LLM.
                 # catalog_retried evita re-forzar en loop (agotaba las rondas de
@@ -2993,6 +3167,25 @@ def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
     if not resultado:
         return None
     return resultado
+
+
+def _menciona_opcion_numerada(texto: str) -> bool:
+    """F14.2 — True si el mensaje selecciona una opción por número ("opción 9").
+
+    En un mensaje MIXTO ("Precio de la macrodantina?? Voy a querer una vitamina
+    C de la opción 9") esa selección es una COMPRA CONFIRMADA contra la lista
+    que el cliente YA vio, y manda sobre cualquier búsqueda nueva: resolverla
+    antes de extraer término evita que el resto del texto se interprete como
+    medicamento ("macrodantina querer vitamina opción").
+    """
+    if not texto:
+        return False
+    return bool(
+        re.search(
+            r"\bopci[oó]n(?:es)?\s*(?:n[úu]mero|n[º°])?\s*#?\s*\d{1,2}\b",
+            texto.strip().lower(),
+        )
+    )
 
 
 def _extraer_eleccion_opcion(texto: str) -> tuple[int, int] | None:
@@ -5190,6 +5383,33 @@ _MULETILLAS_HABLA = {
     "te", "le", "les", "nos", "se", "ya", "si", "no", "mas", "más",
 }
 
+# F14.1: los apelativos de cortesía se quitan TAMBIÉN del texto escrito (no
+# solo del habla). El caso real que lo motivó: "Buenas tardes!! Mi amor que
+# precio tiene la nitrofurantoina de 50mg y la vitamina C" extraía
+# "amor nitrofurantoina 50mg vitamina" y el token 'amor' validaba "TE AMO
+# PRESERV. 3PCS" (un preservativo) como resultado relevante. La lista es la
+# MISMA que usa el filtro de relevancia (app/relevancia.py, APELATIVOS): una
+# sola fuente para ambas capas.
+_MULETILLAS_HABLA = _MULETILLAS_HABLA | _APELATIVOS
+
+# Apelativos que además hay que comparar SIN tilde: el texto escrito llega tal
+# cual lo escribió el cliente ("corazón", "papi mío") y las listas están sin
+# tildes.
+_APELATIVOS_EXTRA = {"mio", "mia", "tuyo", "tuya", "lindo", "linda"}
+_APELATIVOS = _APELATIVOS | _APELATIVOS_EXTRA
+_MULETILLAS_HABLA = _MULETILLAS_HABLA | _APELATIVOS_EXTRA
+
+_MAPA_TILDES = str.maketrans("áéíóúüñÁÉÍÓÚÜÑ", "aeiouun" + "AEIOUUN")
+
+
+def _sin_tildes(palabra: str) -> str:
+    """La palabra en minúsculas y sin tildes: la clave de comparación.
+
+    El término de salida conserva lo que escribió el cliente ('solunoval
+    solución bucal'); las listas de relleno/verbos/apelativos están sin tildes,
+    así que la comparación va por esta clave ('corazón' → 'corazon')."""
+    return palabra.lower().translate(_MAPA_TILDES)
+
 
 def _limpiar_transcripcion(texto: str) -> str:
     """Quita el ruido conversacional de una transcripción de voz.
@@ -5239,7 +5459,7 @@ def _limpiar_transcripcion(texto: str) -> str:
         if w in unidades:
             utiles.append(w)
             continue
-        if w in _FILLER or w in _MULETILLAS_HABLA:
+        if _sin_tildes(w) in _FILLER or _sin_tildes(w) in _MULETILLAS_HABLA:
             continue
         # Las palabras muy cortas (1-2 letras) son siempre conectores del habla
         # ("a", "y", "de", "el", "mi", "te"), nunca un producto.
@@ -6879,19 +7099,78 @@ def _parece_lista_medicamentos(texto: str) -> bool:
     return False
 
 
+# Conectores de una consulta con DOS medicamentos en la misma frase.
+_CONECTORES_MULTI = re.compile(
+    r"\s*(?:,|;|\by\b|\btambien\b|\btambién\b|\bademas\b|\bademás\b)\s*",
+    re.IGNORECASE,
+)
+
+# Ingredientes de CO-FORMULACIÓN: cuando un lado del conector tiene SOLO estos
+# tokens, no es un medicamento aparte sino parte del mismo producto
+# (amoxicilina + ácido clavulánico = AUGMENTIN; losartán + hidroclorotiazida;
+# vitamina C + zinc). Partirlos mostraría dos listas ajenas al pedido y
+# declararía "no disponible" uno de los componentes.
+_COFORMULACION = {
+    "acido", "clavulanico", "clavulanic", "tazobactam", "sulbactam",
+    "cilastatina", "hidroclorotiazida", "trimetoprim", "sulfametoxazol",
+    "carbidopa", "benserazida", "cafeina", "zinc", "calcio", "magnesio",
+    "hierro", "potasio", "sodio", "fenilefrina", "clorfeniramina", "pseudoefedrina",
+}
+
+
+def _partir_por_conectores(texto: str) -> list[str]:
+    """F14.5 — divide por conectores cuando AMBOS lados tienen fármaco.
+
+    Caso real del cliente (C5): "Buenas tardes!! Mi amor que precio tiene la
+    nitrofurantoina de 50mg y la vitamina C" son DOS consultas, pero se
+    concatenaban en un término ("amor nitrofurantoina 50mg vitamina") y el
+    catálogo buscaba una frase que no existe.
+
+    Solo se parte si, tras limpiar cada lado, los DOS tienen un token con
+    cuerpo de fármaco (así "tienes atamel y su precio" sigue siendo UNA
+    consulta) y ninguno es solo co-formulación. Devuelve [] si no aplica.
+    """
+    trozos = [p.strip() for p in _CONECTORES_MULTI.split(texto) if p.strip()]
+    if len(trozos) < 2:
+        return []
+    terminos: list[str] = []
+    vistos: set[str] = set()
+    for trozo in trozos:
+        term = _extraer_termino_medicamento(trozo)
+        if not term:
+            continue
+        tokens = tokens_posible_farmaco(term)
+        if not tokens:
+            continue
+        if all(t in _COFORMULACION for t in tokens):
+            # Un lado que es SOLO co-formulación: no es una consulta aparte.
+            return []
+        if term not in vistos:
+            vistos.add(term)
+            terminos.append(term)
+    return terminos if len(terminos) >= 2 else []
+
+
 def _partir_consulta_multi(texto: str) -> list[str]:
     """Divide una consulta multi-medicamento en UNA línea sin separadores.
 
-    Patrón: 'de <dosis>' repetido 2+ veces separa medicamentos.
+    F14.5 — PRIMERO por conectores con fármaco a ambos lados:
+    'que precio tiene la nitrofurantoina de 50mg y la vitamina C'
+    → ['nitrofurantoina 50mg', 'vitamina c']
+
+    Patrón clásico: 'de <dosis>' repetido 2+ veces separa medicamentos.
     'quiero saber si disponen de clopidogrel de 75 losartan de 50
     atorvastatina de 30 nifedipina de 10 mg'
     → ['clopidogrel', 'losartan', 'atorvastatina', 'nifedipina']
 
-    Devuelve [] si hay menos de 2 dosis (consulta simple).
+    Devuelve [] si hay menos de 2 medicamentos (consulta simple).
     """
     if not texto:
         return []
     t = texto.strip()
+    por_conector = _partir_por_conectores(t)
+    if len(por_conector) >= 2:
+        return por_conector
     # Ocurrencias de 'de <número>' (dosis): cada una precede a un medicamento.
     matches = list(
         re.finditer(
@@ -7168,7 +7447,11 @@ def _formatear_receta(
 def _extraer_termino_medicamento(texto: str) -> str | None:
     """Extrae el término de búsqueda: TODAS las palabras que no son verbos de
     consulta ni relleno, unidas. 'tienes atamel forte?' -> 'atamel forte'.
-    'tienes acido folico de 10 mg' -> 'acido folico 10 mg' (incluye mg/ml)."""
+    'tienes acido folico de 10 mg' -> 'acido folico 10 mg' (incluye mg/ml).
+
+    F14.1: también se quitan los APELATIVOS de cortesía ('mi amor',
+    'mami', 'corazón'), que hasta ahora solo se limpiaban en las notas de voz.
+    """
     if not texto:
         return None
     # La FRASE de indicación ('tos seca', 'dolor de cabeza') no es parte del nombre: describe
@@ -7187,9 +7470,13 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
     # → "nifedipina 30 mg"). Sin esto el 30 se descarta por ir seguido de una
     # palabra que no está en la lista de unidades y la dosis se pierde.
     palabras = [_normalizar_unidad(w) for w in palabras]
-    # Verbos de consulta y relleno: nunca son parte del medicamento.
+    # Verbos de consulta, relleno y apelativos de cortesía: nunca son parte del
+    # medicamento.
     verbos = set(re.findall(r"[a-záéíóúüñ]+", _VERBOS_MEDICAMENTO.pattern))
-    excluidas = _FILLER | verbos | _VIAS_ADMINISTRACION | _CATEGORIAS_TERAPEUTICAS
+    excluidas = (
+        _FILLER | verbos | _VIAS_ADMINISTRACION | _CATEGORIAS_TERAPEUTICAS
+        | _APELATIVOS
+    )
     # Unidades de dosis que SÍ son parte del término: mg, ml, mcg, gotas, etc.
     unidades = {"mg", "ml", "mcg", "gotas", "ampolla", "ampollas", "jarabe",
                 "tabletas", "tab", "capsulas", "cap", "crema", "spray",
@@ -7223,7 +7510,7 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
             if any(c.isdigit() for c in w):
                 terminos.append(w)
             continue
-        if w in excluidas:
+        if _sin_tildes(w) in excluidas:
             continue
         if w.isdigit():
             if i + 1 < len(palabras) and palabras[i + 1] in unidades:
