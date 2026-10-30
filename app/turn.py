@@ -2839,6 +2839,21 @@ COMPRENSION_T = {
     "confundi", "confundido", "confundida", "duda", "dudas",
 }
 
+# FELICITACIONES / DESPEDIDA DE BUENAS NOCHES: "Feliz noche, ¿el precio de la buscapina?"
+# no es un medicamento llamado "FELIZ NOCHE BUSCAPINA" (provider 32, 2026-10-29).
+FELICITACION_T = {
+    "feliz", "felicidad", "felices", "abrazo", "abrazos", "beso", "besitos", "besos",
+    "bendiciones", "bendicion", "próspero", "prospero", "prospera", "éxito", "exito",
+    "exitos", "excelente", "excelentes", "lindas", "hermosos", "bonita", "bonito",
+}
+
+# SALUDOS DE TIEMPO EN SINGULAR: "buenas noches" ya estaba, el 'noche' suelto y
+# 'feliz noche' no. Son la misma muletilla (provider 32, 2026-10-29).
+SALUDO_TIEMPO_T = {
+    "noche", "tarde", "dia", "día", "manana", "mañana", "madrugada",
+    "nochecita", "medio dia", "medio dia",
+}
+
 _FILLER = {
     "hola", "buenas", "buen", "buenos", "buena", "dia", "dias", "tardes",
     "noches", "gracias", "por", "favor", "quisiera", "podria", "puede",
@@ -2854,6 +2869,8 @@ _FILLER = {
     *VOCATIVOS_T, *INTENCION_COMPRA_T, *REFERENCIA_LISTA_T,
     *POR_SEPARADO_T,
     *COMPRENSION_T,
+    *FELICITACION_T,
+    *SALUDO_TIEMPO_T,
     "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
     # RÓTULOS DEL CAMPO: el OCR devuelve '**Nombre del medicamento:** Fexofenadina
     # Clorhidrato CALOX' y el término quedaba 'nombre del fexofenadina clorhidrato calox'.
