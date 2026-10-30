@@ -1013,7 +1013,13 @@ async def run_turn(
     if farmacia and final_text and runtime.last_products:
         _otro = _farmaco_distinto(user_text, runtime)
         if _otro:
-            final_text = _respuesta_no_es_ese_farmaco(_otro)
+            # La FORMA pedida no sale en el aviso: "No tengo BUSCAPINA AMP" sobre un
+            # 'buscapina amp' se lee como si existiera algo llamado "buscapina amp";
+            # el mensaje honesto nombra el fármaco ("No tengo BUSCAPINA"). Si el término
+            # era solo la forma, se muestra el original.
+            final_text = _respuesta_no_es_ese_farmaco(
+                _termino_sin_forma(_otro) or _otro
+            )
             runtime.last_products = []
 
     sent = False
