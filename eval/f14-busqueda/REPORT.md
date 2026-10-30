@@ -331,7 +331,20 @@ En las 5 corridas F14 (A, B, E, H, I) los **4 casos de guarda**
 4. Un número pegado a la unidad ("50mg") sigue viajando como un token, igual que
    antes de F14: no se tocó para no alterar búsquedas que hoy funcionan.
 
-## 5. Cómo reproducir
+## 5. Entrega
+
+- **Pusheado** a `desarrollo` de **rsomoza01** (`origin`) y de **gentefarma**:
+  HEAD `337ac81` — verificado con `git ls-remote` que ambos remotos son idénticos
+  al local.
+- Commits: `3ed1425` (F14) · `4f651f0` + `337ac81` (merges con los 241+4 commits
+  del cliente) · `e1de06a` (artefactos de la corrida J).
+- Rama de seguridad local `f14-prev-merge` (el estado de F14 antes de integrar).
+- Entorno de laboratorio dejado listo: contenedor `vocerocrm-nea-j` (healthy) con
+  su DB desechable `nea-db-qa-j` en la red `vocerocrm_default`; el resto de
+  contenedores de prueba se eliminaron. `nea_data` y `med_queries` del cliente:
+  intactos (solo lectura).
+
+## 6. Cómo reproducir
 
 ```bash
 # 1) simulación antes/después (sin LLM)
