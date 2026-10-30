@@ -53,6 +53,26 @@ REFERENCIA_LISTA_R = {
     "opcion", "opción", "opciones", "opcioncita", "numerito",
 }
 
+# «¿SOLO LO TIENES POR SEPARADO?» — es una PREGUNTA sobre la respuesta anterior, no un
+# producto. Caso real (provider 32, 2026-10-29): tras cotizar la caja de FIN-AL-GRIP FORTE
+# como si fueran cuatro medicamentos, el cliente preguntó "No entendí?? Solo lo tienes por
+# separado?" y el agente contestó "⚠️ No disponibles en el catálogo: SEPARADO" con un
+# ENTERUNI al lado.
+POR_SEPARADO_R = {
+    "separado", "separada", "separados", "separadas", "suelto", "suelta", "sueltos",
+    "sueltas", "individual", "individuales", "independiente", "independientes", "aparte",
+}
+
+# «NO ENTENDÍ» — el cliente pide una ACLARACIÓN, no un medicamento. Sin esto, "No entendí??
+# Solo lo tienes por separado?" se buscaba como 'ENTENDI SEPARADO' (provider 32, 2026-10-29).
+COMPRENSION_R = {
+    "entendi", "entiendo", "entender", "entendido", "entendiste", "entendieron",
+    "comprendi", "comprendo", "comprender", "comprendido", "comprende",
+    "repite", "repites", "repetir", "repitas", "reitero", "reiteras",
+    "explicame", "explicar", "explicas", "explicacion", "aclarame", "aclarar", "aclaracion",
+    "confundi", "confundido", "confundida", "duda", "dudas",
+}
+
 _FUNCIONALES = {
     # RÓTULOS DEL CAMPO que el OCR devuelve pegados al contenido
     # ('nombre del medicamento fexofenadina clorhidrato calox'). Sin esto se cuelan como
@@ -61,6 +81,8 @@ _FUNCIONALES = {
     "nombre", "nombres", "rotulo", "etiqueta", "descripcion", "presentacion",
     # Vocativo, intención de compra y referencia a la lista (gemelos de tools/turn).
     *VOCATIVOS_R, *INTENCION_COMPRA_R, *REFERENCIA_LISTA_R,
+    *POR_SEPARADO_R,
+    *COMPRENSION_R,
     "medicamento", "medicamentos",
 
     # ACCESORIOS Y CONSUMIBLES DE UN EQUIPO, NO MEDICAMENTOS. Caso real (provider 32,
