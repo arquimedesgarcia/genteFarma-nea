@@ -416,10 +416,11 @@ corrida del Laboratorio con catálogo real** sería la única medición end-to-e
 
 ## 5. Entrega
 
-- **Pusheado** a `desarrollo` de **rsomoza01** (`origin`) y de **gentefarma**:
-  el commit del código es `3ed1425` (F14) + merges `4f651f0`/`337ac81`; este
-  reporte cierra con `0f4da4a` + el ajuste de esta línea. Verificado con
-  `git ls-remote` que ambos remotos quedaron idénticos al local.
+- **Pusheado** a `desarrollo` de **rsomoza01** (`origin`) y de **gentefarma**.
+  Commits: `3ed1425` (F14) + merges `4f651f0`/`337ac81` + `0f4da4a` (reporte) +
+  `8b86e97` (conversaciones simuladas y los 3 huecos que encontraron, con su
+  regresión). Verificado con `git ls-remote` que ambos remotos quedaron idénticos
+  al local. NADA se pusheó a `main` ni al upstream `kevinrivm`.
 - Rama de seguridad local `f14-prev-merge` (el estado de F14 antes de integrar).
 - Entorno de laboratorio dejado listo: contenedor `vocerocrm-nea-j` (healthy) con
   su DB desechable `nea-db-qa-j` en la red `vocerocrm_default`; el resto de
