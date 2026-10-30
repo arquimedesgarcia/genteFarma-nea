@@ -213,10 +213,13 @@ nunca se montó ni se tocó.
 | E | F14 v1 | fresco | `run_nxjlx5dvzwo95r7fzlun` | 91 | 10 verdes + `errores_modismos` **rojo** |
 | H | F14 final | fresco | `run_e7vfzuhkmf8t59mibgh8` | **100** | 11 verdes |
 | I | F14 final | fresco | `run_7k61nvr5kfdp2tqc8l8y` | 86 | 9 verdes + `guard_media_fantasma` amarillo (tono) + `errores_modismos` rojo |
+| J | F14 **mergeado** (241 commits del cliente) | fresco | `run_o4oscqnb6bl0r8amwwez` | **100** | 11 verdes (incluye `errores_modismos` y `comprador_decidido`) |
 
 Delta vs baseline histórico (95, `run_pbujqnvwslsu1bjq96v6`): **+5 (H)** y **−9 (I)**
-sobre el MISMO código. Criterio de la fase (delta < 8): **PASS en media**
-(promedio F14 final = 93; promedio PRE-F14 = 100).
+sobre el MISMO código; **+5 (J)** con el árbol mergeado. Criterio de la fase
+(delta < 8): **PASS** en H y J; en I el delta lo explica la oscilación del propio
+laboratorio (ver abajo), no un cambio de F14 — el árbol mergeado cierra en 100 con
+la persona que había fallado en I.
 
 #### La oscilación del Laboratorio manda en la lectura de los scores
 
