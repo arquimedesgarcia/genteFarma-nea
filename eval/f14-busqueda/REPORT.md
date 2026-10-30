@@ -419,10 +419,10 @@ corrida del Laboratorio con catálogo real** sería la única medición end-to-e
 - **Pusheado** a `desarrollo` de **rsomoza01** (`origin`) y de **gentefarma**.
   Commits: `3ed1425` (F14) + merges `4f651f0`/`337ac81` + `0f4da4a` (reporte) +
   `8b86e97` (conversaciones simuladas y los 3 huecos que encontraron, con su
-  regresión) y `59e6b13` (merge de los 12 commits nuevos del cliente, `b5d328e`,
+  regresión) y el merge `59e6b13` de los 12 commits nuevos del cliente (`b5d328e`,
   conservando ambos lados — verificado que sobreviven sus arreglos y los de F14).
   Verificado con `git ls-remote` que `desarrollo` quedó idéntico en los dos
-  remotos (`59e6b13`, 2026-10-30). NADA se pusheó a `main` de nadie ni al upstream
+  remotos (punta `6679693`, que incluye este reporte; 2026-10-30). NADA se pusheó a `main` de nadie ni al upstream
   `kevinrivm` (solo lectura).
 - Rama de seguridad local `f14-prev-merge` (el estado de F14 antes de integrar).
 - Entorno de laboratorio dejado listo: contenedor `vocerocrm-nea-j` (healthy) con
