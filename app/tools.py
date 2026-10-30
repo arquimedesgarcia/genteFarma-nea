@@ -20,6 +20,7 @@ from app.relevancia import (
     _es_letra_de_vitamina,
     _norm,
     _token_cabeza_farmaco,
+    correccion_creible,
     es_relevante,
     es_relevante_estricto,
     filtrar_relevantes,
@@ -2808,6 +2809,10 @@ class ToolRuntime:
                     and ratio_t >= _UMBRAL_TYPO_CATALOGO
                     and margen_t > 0.0
                     and _correccion_por_largo_plausible(nucleo, token_ok)
+                    # F14: además de parecerse (ratio de catálogo), tiene que ser un
+                    # TYPO CREÍBLE del mismo fármaco. Sin esto, 'vivacina' se
+                    # "corregía" a 'vitamina' y el cliente recibía vitaminas.
+                    and correccion_creible(nucleo, token_ok)
                 ):
                     prefijo = " ".join(nombre.strip().split()[:-1])
                     term_corregido = (
@@ -2862,30 +2867,44 @@ class ToolRuntime:
                     # ellas, y el agente buscaba SOLO por 'glucometro' → el cliente preguntó
                     # por tiras y recibió glucómetros.
                     if nucle_buscar != nucleo and ratio_t >= _UMBRAL_NUCLEO_MISMO_FARMACO:
-                        data_n = await self._ctx.crm.get_products(
-                            self._provider_id, q=nucle_buscar, limit=20
-                        )
-                        cand_n = _dedupe_por_nombre(data_n.get("products") or [])
-                        solo_nucleo = filtrar_relevantes(nucle_buscar, cand_n)
-                        # Tiene que aparecer DE VERDAD en algún nombre: si no, no mejora.
-                        _nu = _normalizar_tildes(nucle_buscar.lower())
-                        if solo_nucleo and any(
-                            _nu in _normalizar_tildes(
-                                str(p.get("nombre") or p.get("producto") or "").lower()
-                            )
-                            for p in solo_nucleo
-                        ):
+                        if not correccion_creible(nucleo, nucle_buscar):
+                            # F14 (hallazgo de la simulación de conversaciones):
+                            # la similitud de catálogo NO basta. 'vivacina' puntúa
+                            # alto contra 'vitamina' y el cliente que pedía otra cosa
+                            # recibía VITAMINA C/K/E con un «Asumí que buscas
+                            # VITAMINA»; el filtro de relevancia no lo veía porque
+                            # comparaba el término YA corregido. Se exige la regla C2
+                            # (mismo fármaco: prefijo 3+ o desplazamiento de una letra).
                             logger.info(
-                                "buscar_medicamento: '%s' — '%s' sigue sin estar en los %d "
-                                "resultados; busco SOLO por el núcleo '%s' (%d productos)",
-                                nombre, nucleo, len(products), nucle_buscar, len(solo_nucleo),
+                                "buscar_medicamento: '%s' — la corrección '%s' (ratio %.3f) "
+                                "NO es un typo creíble: no cruzo de categoría",
+                                nombre, nucle_buscar, ratio_t,
                             )
-                            products = solo_nucleo
-                            data = data_n
-                            self.last_term = nucle_buscar
-                            if not self.corregido_a:
-                                self.corregido_desde = nombre
-                                self.corregido_a = nucle_buscar
+                        else:
+                            data_n = await self._ctx.crm.get_products(
+                                self._provider_id, q=nucle_buscar, limit=20
+                            )
+                            cand_n = _dedupe_por_nombre(data_n.get("products") or [])
+                            solo_nucleo = filtrar_relevantes(nucle_buscar, cand_n)
+                            # Tiene que aparecer DE VERDAD en algún nombre: si no, no mejora.
+                            _nu = _normalizar_tildes(nucle_buscar.lower())
+                            if solo_nucleo and any(
+                                _nu in _normalizar_tildes(
+                                    str(p.get("nombre") or p.get("producto") or "").lower()
+                                )
+                                for p in solo_nucleo
+                            ):
+                                logger.info(
+                                    "buscar_medicamento: '%s' — '%s' sigue sin estar en los %d "
+                                    "resultados; busco SOLO por el núcleo '%s' (%d productos)",
+                                    nombre, nucleo, len(products), nucle_buscar, len(solo_nucleo),
+                                )
+                                products = solo_nucleo
+                                data = data_n
+                                self.last_term = nucle_buscar
+                                if not self.corregido_a:
+                                    self.corregido_desde = nombre
+                                    self.corregido_a = nucle_buscar
 
         # Dedupe por nombre de producto: el catálogo de Firebase repite el MISMO
         # ítem (mismo nombre) con distintos productId/precio (una entrada por
@@ -3034,6 +3053,12 @@ class ToolRuntime:
                 and ratio_t >= _UMBRAL_TYPO_CATALOGO
                 and margen_t > 0.0
                 and _correccion_por_largo_plausible(nucleo_typo, token_ok)
+                # F14 — TERCERA puerta de corrección (typos largos). El ratio del
+                # catálogo no basta: 'vivacina' → 'vitamina' puntúa 0.75 y colaba las
+                # vitaminas con un «Asumí que buscas VITAMINA». Se exige la regla C2.
+                # Sus casos documentados siguen pasando: 'hidrocoticida' →
+                # 'hidroclorotiazida' (prefijo 6) y 'cardevidol' → 'carvedilol' (3).
+                and correccion_creible(nucleo_typo, token_ok)
             ):
                 term_corregido = (
                     f"{prefijo_typo} {token_ok}".strip() if prefijo_typo else token_ok
@@ -3168,7 +3193,19 @@ class ToolRuntime:
                     "PROHIBIDO decir que el cliente 'ya lo había consultado antes', "
                     "'la última vez' o 'sigue igual' si eso NO aparece en ESTA "
                     "conversación: no tienes memoria de otros hilos. Di simple y "
-                    "honesto: 'no lo tengo en el catálogo'."
+                    "honesto: 'no lo tengo en el catálogo'. "
+                    # F14.3c — hallazgo de la simulación de CONVERSACIONES (2026-10-30):
+                    # con 'vivacina' el modelo, invitado por el punto 1), buscaba por su
+                    # cuenta el término GENÉRICO ('vitamina') y le presentaba al cliente
+                    # VITAMINA C/K/E como si fuera la respuesta (en el árbol del cliente
+                    # pasaba siempre; aquí oscila según el muestreo). Reintentar la grafía
+                    # es la MISMA palabra mejor escrita, nunca cambiar de fármaco.
+                    "PROHIBIDO mostrar productos de OTRO medicamento porque el nombre "
+                    "suene parecido al que pidió el cliente: si escribió 'vivacina' no "
+                    "puedes listarle vitaminas, ni decir 'asumí que buscas vitamina'. "
+                    "Reintentar la grafía = la MISMA palabra mejor escrita (una letra "
+                    "cambiada, transpuesta o de más), NO otro fármaco ni el término "
+                    "genérico de la categoría."
                 ),
                 "busqueda": nombre,
             }
