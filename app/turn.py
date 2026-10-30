@@ -563,6 +563,27 @@ async def run_turn(
             runtime.last_options = json.loads(conv.last_options)
         except Exception:
             runtime.last_options = []
+    # «¿SOLO LO TIENES POR SEPARADO?» — pregunta sobre la respuesta ANTERIOR, no un
+    # medicamento. Se contesta con el producto que se acaba de cotizar, sin pasar por el LLM:
+    # el modelo negaba el producto dos líneas después de haberle dado el precio.
+    if farmacia and _pregunta_por_separado(user_text):
+        _prod_sep = getattr(runtime, "last_product", None) or (
+            runtime.last_options[0] if runtime.last_options else None
+        )
+        if isinstance(_prod_sep, dict) and _prod_sep.get("producto"):
+            logger.info(
+                "backstop por separado: '%s' → respondo con el producto ya cotizado",
+                user_text[:40],
+            )
+            await _send(
+                ctx,
+                conv.id,
+                str(crm_conv_id),
+                _con_confirmacion_carrito(
+                    _respuesta_por_separado(_prod_sep), runtime
+                ),
+            )
+            return
     # Modo farmacia (providerId ya calculado arriba): se exponen las tools de
     # catálogo y se retiran las de agenda.
     # Heartbeat de typing: mantiene los 3 puntitos vivos mientras el turno
@@ -4421,6 +4442,40 @@ def _grupo_ya_en_carrito(prods: list[dict[str, Any]], runtime: Any) -> bool:
         if sku and sku in skus:
             return True
     return False
+
+
+_RE_PREGUNTA_POR_SEPARADO = re.compile(
+    r"(?i)(?:\bsolo\b|\bsolamente\b|\bnada\s+m[aá]s\b|\bno\s+m[aá]s\b)"
+    r".{0,40}\b(?:separado|separada|separados|separadas|suelto|suelta|sueltos|sueltas|"
+    r"individual|individuales|aparte)\b"
+    r"|\bpor\s+separado\b"
+    r"|\blo\s+tienes\s+suelto\b|\blos\s+tienes\s+sueltos\b",
+)
+
+
+def _pregunta_por_separado(texto: str) -> bool:
+    """¿Pregunta si el producto se vende por partes («¿solo lo tienes por separado?»)?"""
+    return bool(_RE_PREGUNTA_POR_SEPARADO.search(texto or ""))
+
+
+def _respuesta_por_separado(producto: dict[str, Any]) -> str:
+    """Contesta SIN contradecir la lista anterior: el producto ES uno solo.
+
+    Caso real (provider 32, 2026-10-29): después de cotizar el FIN-AL-GRIP FORTE, el cliente
+    preguntó "¿Solo lo tienes por separado?" y el agente respondió "No tengo Fin-Al-Grip FORTE
+    como un solo producto. Te puedo buscar los ingredientes por separado" — dos líneas después
+    de haberle dado el precio del producto.
+    """
+    titulo = str(producto.get("producto") or producto.get("nombre") or "").upper()
+    # SIN `_lista_con_aviso`: con el nombre completo del producto como término, el aviso de
+    # "lo que no tengo" se disparaba con el LABORATORIO del propio título
+    # ("⚠️ No tengo DROTAFARMA. De FIN-AL-GRIP FORTE X 10TAB hay esto:").
+    return (
+        "No hace falta: es un solo producto, no hay que comprarlo por partes.\n\n"
+        + _formatear_lista_productos([producto], titulo)
+        + "\n\n"
+        + MENSAJE_SUGERIDO_CARRITO
+    )
 
 
 def _con_confirmacion_carrito(texto: str, runtime: Any) -> str:
