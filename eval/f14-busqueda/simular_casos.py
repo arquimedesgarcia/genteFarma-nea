@@ -14,7 +14,7 @@ actual, y comparar con `diff`. Los imports que no existan en el árbol previo
 (p. ej. `app.aliases`) se reportan como "no existe", no rompen la simulación.
 
 La semilla de alias NO se duplica aquí: se lee del SQL real
-(`migrations/012_med_aliases.sql`), así la simulación prueba exactamente lo que
+(`migrations/013_med_aliases.sql`), así la simulación prueba exactamente lo que
 cargará el agente en el arranque.
 """
 from __future__ import annotations
@@ -96,8 +96,8 @@ MATRIZ = {
 
 
 def _semilla_sql(root: Path) -> list[dict]:
-    """Lee los pares alias→canónico del SQL real de la migración 012."""
-    sql = root / "migrations" / "012_med_aliases.sql"
+    """Lee los pares alias→canónico del SQL real de la migración 013."""
+    sql = root / "migrations" / "013_med_aliases.sql"
     if not sql.exists():
         return []
     texto = sql.read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
--- 012_med_aliases.sql — Alias de ESCRITURA de medicamentos (F14.4).
+-- 013_med_aliases.sql — Alias de ESCRITURA de medicamentos (F14.4).
 --
 -- Qué hace: cuando el cliente escribe un medicamento con una grafía que se
 -- CONOCE, el agente reescribe el término ANTES de consultar el catálogo y apaga

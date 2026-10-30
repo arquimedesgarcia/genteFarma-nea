@@ -2,7 +2,7 @@
   "root": "D:\\Proyectos\\GenteFarma\\agentNEA",
   "extraccion": {
     "caso1_termino_unico": "nitrofurantoina 50mg vitamina c",
-    "caso1_parece_lista": false,
+    "caso1_parece_lista": true,
     "caso1_multi": [
       "nitrofurantoina 50mg",
       "vitamina c"
@@ -10,14 +10,14 @@
     "caso2_termino_unico": "vivacina",
     "caso2_parece_lista": false,
     "caso2_multi": [],
-    "caso3_termino_unico": "macrodantina querer vitamina c opción",
-    "caso3_parece_lista": false,
+    "caso3_termino_unico": "macrodantina vitamina c",
+    "caso3_parece_lista": true,
     "caso3_multi": [],
-    "caso4_termino_unico": "solunoval solución bucal pinvex solución bucal",
-    "caso4_parece_lista": false,
+    "caso4_termino_unico": "solunoval solucion bucal pinvex solucion bucal",
+    "caso4_parece_lista": true,
     "caso4_multi": [
-      "solunoval solución bucal",
-      "pinvex solución bucal"
+      "solunoval solucion bucal",
+      "pinvex solucion bucal"
     ],
     "caso3_menciona_opcion": true,
     "opcion_negativos": {
@@ -52,8 +52,6 @@
       "NITROFURANTOINA 100 MG X 20 CAP": true
     },
     "caso1_filtrados": [
-      "VITAMINA K 10 MG X 30 TAB",
-      "VITAMINA C 500 MG X 10 TAB",
       "NITROFURANTOINA 100 MG X 20 CAP"
     ],
     "caso2_relevancia_por_producto": {

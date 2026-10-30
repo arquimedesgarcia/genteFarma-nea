@@ -31,7 +31,69 @@ import re
 
 # Palabras funcionales/relleno: nunca son señal de relevancia. Un término que
 # solo tiene palabras de esta lista no puede validar ningún producto.
+# VOCATIVO / CARIÑO: el cliente saluda y llama al agente "mi amor", "corazón", "cariño".
+# Caso real (provider 32, 2026-10-29): "Buenas tardes!! Mi amor que precio tiene la
+# nitrofurantoina de 50mg y la vitamina C" → el agente buscó 'AMOR NITROFURANTOINA 50MG',
+# avisó "No tengo NITROFURANTOINA. De AMOR 50MG hay esto" y cotizó TE AMO PRESERV. 3PCS.
+VOCATIVOS_R = {
+    "amor", "cariño", "carino", "corazon", "corazón", "bebe", "bebé", "preciosa",
+    "precioso", "linda", "lindo", "hermosa", "hermoso", "bonita", "bonito",
+    "principe", "príncipe", "reina", "rey", "amiga", "amigo", "senora", "señora",
+    "senor", "señor", "doctor", "doctora", "licenciada", "licenciado", "jefe", "jefa",
+    "vecina", "vecino", "pana", "panita", "compatriota",
+}
+# INTENCIÓN DE COMPRA: no es un medicamento.
+INTENCION_COMPRA_R = {
+    "quiero", "queria", "quería", "quisiera", "querer", "querría", "querria",
+    "deseo", "deseamos", "llevo", "llevare", "llevaré", "llevaria", "llevaría",
+    "apartame", "apártame", "separame", "sepárame", "encargame", "encárgame",
+}
+# REFERENCIA A LA LISTA ANTERIOR: 'de la opción 9', 'la número 3'.
+REFERENCIA_LISTA_R = {
+    "opcion", "opción", "opciones", "opcioncita", "numerito",
+}
+
 _FUNCIONALES = {
+    # RÓTULOS DEL CAMPO que el OCR devuelve pegados al contenido
+    # ('nombre del medicamento fexofenadina clorhidrato calox'). Sin esto se cuelan como
+    # token de fármaco: el núcleo ausente salía 'nombre'/'medicamento' y una lectura con
+    # solo la marca se daba por completa. Caso real provider 32, 2026-10-27.
+    "nombre", "nombres", "rotulo", "etiqueta", "descripcion", "presentacion",
+    # Vocativo, intención de compra y referencia a la lista (gemelos de tools/turn).
+    *VOCATIVOS_R, *INTENCION_COMPRA_R, *REFERENCIA_LISTA_R,
+    "medicamento", "medicamentos",
+
+    # ACCESORIOS Y CONSUMIBLES DE UN EQUIPO, NO MEDICAMENTOS. Caso real (provider 32,
+    # 2026-10-27): "¿el Glucómetro HLM-78 viene con las plaquitas, el lápiz y la pulla o
+    # solo el aparato?" → el troceador sacó ['lapiz', 'pulla aparato'] y el cliente recibió
+    # 20 LÁPICES de cejas y labiales, más "no disponibles: PULLA APARATO". Ninguna de estas
+    # palabras identifica un fármaco por sí sola.
+    # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
+    "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    # 'tratamiento' no es un producto: el catálogo está lleno de TRATAMIENTO CAPILAR.
+    "tratamiento", "tratamientos", "tratamientos capilares",
+    # CANTIDADES: 'las tres', 'los dos', 'quiero tres'. NO son medicamentos y el matcher
+    # difuso los apoya en cualquier cosa (caso real: 'tres' → LITTLE TREES → 15
+    # ambientadores cotizados como medicamentos, provider 32).
+    "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
+    "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
+    "par", "pares", "trio", "docena", "mitad", "todas", "todos",
+    # "TIENEN A LA VENTA …" es la forma más común de preguntar si vendes algo: 'venta'
+    # no forma parte del nombre y descoloca al matcher (provider 32, 2026-10-29:
+    # 'venta aceite oregano' devolvía 5 productos de otra cosa).
+    "venta", "ventas", "vende", "vendes", "vendia", "vendían",
+    # EL EQUIPO / EL PERSONAL: pedir el pase no nombra un producto. 'derivalo al equipo'
+    # dejaba 'equipo' como término de búsqueda.
+    "equipo", "staff", "asesor", "asesora", "supervisor", "encargado", "encargada",
+    # FOTO/IMAGEN: pedir una foto no es pedir un producto. Buscar 'fotos' en el catálogo
+    # devolvía cualquier cosa (caso real provider 32: "Me puede enviar unas fotos" →
+    # "Actualmente no tenemos linternas"). Hay guard propio (`_pide_foto`).
+    "foto", "fotos", "fotografia", "fotografias", "imagen", "imagenes", "selfie",
+    "plaquita", "plaquitas", "tirita", "tiritas",
+    "aparato", "aparatos", "equipo", "maquina", "maquinita",
+    "estuche", "maletin", "cargador", "cable", "bateria", "baterias",
+    "adaptador", "funda", "repuesto", "repuestos",
+
     "de", "la", "el", "los", "las", "un", "una", "unos", "unas", "y", "o", "u",
     "para", "por", "con", "sin", "que", "como", "cuanto", "cuanta", "cual",
     "cuales", "tiene", "tienen", "tengo", "hay", "es", "son", "esta", "estan",
@@ -212,8 +274,65 @@ _VERBOS_Y_DISCURSO = {
 #     menos, 'hasta'≈'pasta' y 'todo'≈'dove' vuelven a colarse — exactamente el
 #     bug que esto cierra. Con 5+, los typos reales pasan ('omeprasol'≈'omeprazol').
 _MIN_LEN_SENAL = 4
+
+# LA LETRA DE LA VITAMINA ES PARTE DEL NOMBRE. Caso real (provider 32, 2026-10-29):
+# "la vitamina C" se reducía a 'vitamina' (una letra se descarta por corta) y el cliente
+# recibía 20 productos de Vitamina E, K, B12, colágeno… y hasta LIMPIADOR FACIAL.
+_VITAMINAS = {"a", "b", "c", "d", "e", "k"}
+_RE_VITAMINA_EN_TERMINO = re.compile(r"\bvitamin|\bmultivit|\bcomplejo\s+b\b", re.IGNORECASE)
+
+
+def _es_letra_de_vitamina(w: str, termino: str = "") -> bool:
+    """¿Es la letra PEGADA a la palabra 'vitamina' ('vitamina c', 'vit d3')?
+
+    Tiene que ir INMEDIATAMENTE después: con solo "el término dice vitamina" se colaba la
+    preposición 'a' de "¡Voy a querer una vitamina C!" como si fuera VITAMINA A.
+    """
+    if w not in _VITAMINAS:
+        return False
+    return bool(
+        re.search(rf"\bvitaminas?\s*[-/+]?\s*{re.escape(w)}\b", termino or "", re.IGNORECASE)
+    )
+
+
+def _relevante_letra_de_vitamina(w: str, nombre: str) -> bool:
+    """La letra solo vale si el producto es de ESA vitamina.
+
+    Sin esto, 'c' casaría con cualquier 'C' del título (VITAMINA E 400UI X 10CAP).
+    """
+    n = _norm(nombre)
+    if re.search(rf"\bvitaminas?\s*[-/]?\s*{w}\b", n):
+        return True
+    if re.search(rf"\bvit\s*[-/]?\s*{w}\b", n):
+        return True
+    # 'C' suelta como palabra completa (p. ej. 'VITAMINA C + ZINC').
+    return bool(re.search(rf"(?:^|\s){w}(?:\s|$)", n))
+
 _MIN_LEN_ENTRADA = 3
 _MIN_LEN_TYPO = 5
+
+# Número + unidad PEGADOS: '25mg', '500ml', '10mcg', '2gr'. Es una DOSIS, no un nombre de
+# fármaco. (Los códigos del nombre —'d3', 'k2', 'b12'— no llevan unidad y no caen aquí.)
+_RE_DOSIS_TOKEN = re.compile(r"\d+(?:[.,]\d+)?(?:mg|ml|mcg|gr|g|ui|cc|kg|tab|caps?)$")
+
+
+def _es_codigo_del_nombre(w: str) -> bool:
+    """¿Es un CÓDIGO del nombre (d3, k2, b6, b12, q10)? Entonces NO es una dosis.
+
+    Los NÚMEROS puros sí son dosis y no identifican nada ('40', '850': el catálogo los
+    filtra aparte). Pero un código letra+número es parte del NOMBRE: VITAMINA D3 no es
+    lo mismo que VITAMINA B12, y son dos productos distintos del catálogo.
+
+    Sin esto, `tokens_farmaco('vitamina d3 k2')` devolvía `['vitamina']`: el filtro de
+    relevancia no podía exigir ni 'd3' ni 'k2', así que se dejaba pasar TODO lo que
+    tuviera 'vitamina' (multivitaminas, jabón con provitamina, B12...). Medido: el
+    producto que el cliente quiere —`VITAMINA D3+K2 2000 IU X 30 TAB PHARMACORP`— no
+    aparecía en la respuesta.
+
+    Se excluye la forma 'x30' (marcador de ENVASE, no del nombre) para que no se exija
+    como si fuera parte del fármaco.
+    """
+    return bool(re.fullmatch(r"[a-wyz]{1,2}\d{1,3}", w))
 
 # Distancia de edición máxima tolerada (cubre los typos ya soportados).
 _MAX_DIST = 2
@@ -350,8 +469,20 @@ def tokens_senal(termino: str, min_len: int | None = None) -> list[str]:
     umbral = _MIN_LEN_ENTRADA if min_len is None else min_len
     out: list[str] = []
     for w in _norm(termino).split():
-        if len(w) < umbral or w.isdigit():
+        # UNA DOSIS NO ES UN FÁRMACO. '25mg', '500ml', '10mcg' son número+unidad pegados:
+        # no identifican nada. Sin esta regla, en 'acido hialuronico 25mg 2' el token de
+        # señal '25mg' acababa siendo el NÚCLEO del fármaco, la corrección por catálogo lo
+        # "arreglaba" a 'kimiceg' (un LABORATORIO) y el cliente recibía 20 productos de
+        # Kimiceg en vez del ácido hialurónico que había pedido.
+        # (No confundir con los códigos del nombre 'd3'/'k2'/'b12': esos no llevan unidad.)
+        if _RE_DOSIS_TOKEN.fullmatch(w):
             continue
+        if len(w) < umbral or w.isdigit():
+            # EXCEPCIÓN 1: los CÓDIGOS del nombre ('d3', 'k2', 'b12') son cortos pero
+            # identifican el producto. Ver `_es_codigo_del_nombre`.
+            # EXCEPCIÓN 2: la LETRA de la vitamina ('vitamina c').
+            if not (_es_codigo_del_nombre(w) or _es_letra_de_vitamina(w, termino)):
+                continue
         if w in _FUNCIONALES:
             continue
         out.append(w)
@@ -391,6 +522,17 @@ def es_relevante(
     hay = _norm(nombre_producto)
     hay_tokens = hay.split()
     hay_set = set(hay_tokens)
+    # LA LETRA DE LA VITAMINA SE EXIGE. Buscando 'vitamina c', el producto VITAMINA E
+    # comparte 'vitamina' y entraba en la lista (20 productos de E, K, B12 y colágeno
+    # para quien pidió C). Con la letra pedida, ese producto queda fuera.
+    letras = [w for w in senales if w in _VITAMINAS]
+    if letras:
+        if not all(_relevante_letra_de_vitamina(w, hay) for w in letras):
+            return False
+        resto = [w for w in senales if w not in _VITAMINAS]
+        if not resto:
+            return True
+        return any(_coincide_token(w, hay, hay_tokens, hay_set) for w in resto)
     for w in senales:
         if w in hay_set:
             return True
@@ -421,6 +563,24 @@ def es_relevante(
     return False
 
 
+def _coincide_token(w: str, hay: str, hay_tokens: list[str], hay_set: set[str]) -> bool:
+    """¿Este token del término aparece en el nombre del producto? (cuerpo de `es_relevante`)"""
+    if w in hay_set:
+        return True
+    for t in hay_tokens:
+        if (len(t) >= _MIN_LEN_SENAL - 1 and (t.startswith(w) or w.startswith(t))
+                and not _difiere_por_sal(w, t)):
+            return True
+    if len(w) >= 6 and w in hay:
+        return True
+    for t in hay_tokens:
+        if (len(t) >= _MIN_LEN_TYPO and abs(len(t) - len(w)) <= _MAX_DIST
+                and not _difiere_por_sal(w, t)):
+            if _levenshtein(w, t) <= _MAX_DIST:
+                return True
+    return False
+
+
 # PRESENTACIÓN (forma farmacéutica) y AUDIENCIA (a quién va dirigido): describen el
 # envase, NO identifican el fármaco. Por eso NO pueden validar un producto.
 #
@@ -444,12 +604,81 @@ _PRESENTACION_AUDIENCIA = {
     "capsula", "capsulas", "cap", "caps", "comprimido", "comprimidos", "comp",
     "ovulo", "ovulos", "supositorio", "supositorios", "parche", "parches",
     "grageas", "gragea", "inyectable", "emulsion", "jalea", "colirio", "ungüento",
+    # Sinónimos COLOQUIALES de la forma farmacéutica. Faltaban 'pastillas' y
+    # 'pildoras' —que es como el cliente PIDE— y con el rescate escalonado por
+    # selectividad se colaban: 'omeprazol pastillas' daba ['omeprazol','pastillas']
+    # y 'pastillas' matcheaba 6 productos (LAFARCAINA, ALURON) frente a 8 de
+    # 'omeprazol', así que el rescate elegía la FORMA y devolvía productos que no
+    # tienen omeprazol. Una forma farmacéutica nunca identifica el fármaco.
+    "pastilla", "pastillas", "pildora", "pildoras",
     # Audiencia
     "adulto", "adultos", "pediatrico", "pediatrica", "nino", "nina", "ninos",
     "ninas", "infantil", "bebe", "bebes", "lactante", "lactantes", "mayores",
     "anciano", "ancianos",
 }
 
+# SUFIJOS COMERCIALES: acompañan a la marca pero NO la identifican.
+#
+# "ATAMEL PLUS" ya se identifica con 'atamel'; el 'plus' solo dice que es la variante
+# reforzada. Por eso NO pueden usarse para RESCATAR productos: 'plus' aparece en 51
+# nombres del catálogo (PAPEL PLUS, ALIVET PLUS, BETADEX PLUS, VITISIVAL PLUS...), así
+# que un rescate por 'plus' le muestra al cliente papel, cremas y analgésicos cuando
+# pidió un medicamento concreto.
+#
+# Caso real: "Isopray plus" (ISOSPRAY PLUS, escrito con una S menos). El AND exigía
+# {isopray, plus} y fallaba porque ISOSPRAY no está en el catálogo del provider 27; el
+# rescate por 'plus' devolvía 41 productos ajenos. Medido sobre 1000 consultas reales:
+# dejando que el sufijo rescate → 41; sin dejar que rescate → 5, sin un solo falso
+# rechazo nuevo en los catálogos 19 y 27.
+#
+# OJO: el sufijo SÍ sigue participando del AND (paso 1). Es lo que pide el cliente que
+# consulta "isopray plus" en conjunto: si el producto exacto existe, gana el AND.
+_SUFIJOS_COMERCIALES = {
+    "plus", "forte", "duo", "retard", "compuesto", "extra", "ultra", "active",
+    "pack", "super", "max", "pro", "lp", "sr", "xr", "mr", "cr", "er",
+}
+
+
+def _es_sufijo_comercial(palabra: str) -> bool:
+    """¿La palabra es un sufijo comercial, aunque esté mal escrita?
+
+    'plus'/'pluss'/'plas' → sí.  'plastico', 'losartan' → no.
+
+    Se compara también con distancia ≤1 porque el cliente escribe 'plus' de muchas
+    formas; un sufijo mal escrito que no se reconozca vuelve a colarse por el rescate.
+    """
+    for s in _SUFIJOS_COMERCIALES:
+        if palabra == s:
+            return True
+        # Solo se tolera typo en sufijos de 4+ letras: 'pro'/'max'/'duo' son demasiado
+        # cortos y cualquier palabra cercana colisionaría ('pro' ~ 'pero', 'max' ~ 'mas').
+        if len(s) < 4 or abs(len(palabra) - len(s)) > 1:
+            continue
+        if _levenshtein(palabra, s) <= 1:
+            return True
+    return False
+
+
+
+# ── SALES DEL PRINCIPIO ACTIVO: 'clorhidrato' no es un medicamento ────────────────
+# 'CLORHIDRATO' lo comparten decenas de fármacos distintos (betahistina, metformina,
+# bromexina, loperamida, fexofenadina…). Buscar SOLO por la sal devuelve un catálogo al azar.
+#
+# Caso real (provider 05, 2026-10-27): el OCR de una caja de 'Fexofenadina Clorhidrato
+# CALOX' devolvió solo 'CLORHIDRATO' y el agente cotizó betahistina, metformina, bromexina y
+# loperamida como si fueran lo que el cliente pidió.
+#
+# NO están en la lista 'sodico', 'potasico', 'cloruro' ni 'bicarbonato': esos SÍ pueden ser
+# el nombre de un producto ('cloruro de sodio', 'bicarbonato de sodio').
+_SALES_FARMACEUTICAS = {
+    "clorhidrato", "hidrocloruro", "hidroclorhidrato", "diclorhidrato", "bromhidrato",
+    "maleato", "succinato", "fumarato", "tartrato", "bitartrato", "citrato",
+    "fosfato", "difosfato", "sulfato", "nitrato", "acetato", "benzoato",
+    "estearato", "valerato", "propionato", "dipropionato", "mesilato", "besilato",
+    "tosilato", "oxalato", "lactato", "gluconato",
+    "monohidrato", "dihidrato", "trihidrato", "anhidro", "anhidra",
+    "micronizado", "micronizada",
+}
 
 def tokens_farmaco(termino: str) -> list[str]:
     """Tokens del término que DEBEN identificar un fármaco.
@@ -467,6 +696,13 @@ def tokens_farmaco(termino: str) -> list[str]:
     out: list[str] = []
     for w in tokens_senal(termino, _MIN_LEN_SENAL):
         if w in _PRESENTACION_AUDIENCIA:
+            continue
+        # La SAL tampoco identifica un fármaco: 'clorhidrato' lo comparten betahistina,
+        # metformina, bromexina, loperamida… Sin esto, el núcleo ausente de
+        # 'fexofenadina clorhidrato 120 mg' era 'clorhidrato' y la recuperación buscaba por
+        # la sal (medido en producción, provider 32, 2026-10-27:
+        # "busco SOLO por el núcleo 'clorhidrato'").
+        if w in _SALES_FARMACEUTICAS:
             continue
         # ¿es una presentación mal escrita? Se compara por prefijo/Levenshtein contra
         # las formas conocidas, no por igualdad exacta.
@@ -560,7 +796,9 @@ def filtrar_relevantes(
          "citrato potasio"). Medido: quita 27/27 ajenos en esa consulta.
       2. OR — basta un token de FÁRMACO. Rescata los casos en que el catálogo nombra al
          revés ("nitrato de miconazol" → "MICONAZOL 400MG ... (NITRATO)") o trae el
-         nombre partido.
+         nombre partido. LOS SUFIJOS COMERCIALES NO RESCATAN: se prueban primero los
+         tokens ESPECÍFICOS y solo si no hay ninguno se cae al OR clásico. Ver
+         `_SUFIJOS_COMERCIALES`.
       3. VACÍO — si el cliente NOMBRÓ un fármaco concreto y NINGÚN producto del catálogo
          lo comparte, se devuelve vacío. Que el agente lo diga con honestidad o busque
          por principio activo (camino que ya existe en tools.py).
@@ -574,6 +812,12 @@ def filtrar_relevantes(
     falso positivo así es peor que el silencio: el cliente puede comprar el medicamento
     equivocado. El fail-safe se conserva solo donde de verdad protege (términos sin
     fármaco), no para inventar un resultado.
+
+    POR QUÉ EL OR EXCLUYE LOS SUFIJOS COMERCIALES: "Isopray plus" (ISOSPRAY PLUS, con una
+    S menos) exigía {isopray, plus} en el AND; como ISOSPRAY no está en el catálogo del
+    provider 27, el AND fallaba y el OR rescataba con 'plus' → 41 productos ajenos
+    (PAPEL PLUS, BETADEX PLUS, VITISIVAL PLUS...). Medido sobre 1000 consultas reales de
+    los catálogos 19 y 27: sin el rescate por sufijo, 0 falsos rechazos nuevos.
 
     Verificado a escala: 6.146 nombres reales buscados por su propio nombre → 0
     pérdidas, con los controles legítimos intactos (losartan potasico 11, diclofenac
@@ -600,12 +844,40 @@ def filtrar_relevantes(
     if estrictos:
         return estrictos
 
-    relajados = [
-        p for p in productos
-        if any(_ok(w, str(p.get("nombre") or "")) for w in utiles)
-    ]
-    if relajados:
-        return relajados
+    # RESCATE ESCALONADO, DEL TOKEN MÁS SELECTIVO AL MÁS GENÉRICO (cliente).
+    #
+    # (Se conserva la explicación original del autor de este bloque: el rescate
+    # prueba de a UN token, del más selectivo al más genérico, en vez del OR con
+    # todos a la vez. F14 solo añade los flags `_ok` para que el rescate respete
+    # `permitir_typo` cuando el término viene de un ALIAS reescrito.)
+    especificos = [w for w in utiles if not _es_sufijo_comercial(w)]
+
+    # EL FÁRMACO CABEZA MANDA: si el PRIMER token específico no comparte señal con
+    # NINGÚN producto de la lista, NO se rescata con los tokens que le siguen
+    # (marca ≠ fármaco). Ver el caso real de 'magnesio plus life'.
+    if len(especificos) > 1:
+        cabeza = especificos[0]
+        if not any(
+            _ok(cabeza, str(p.get("nombre") or "")) for p in productos
+        ):
+            return []
+
+    for rescate in (especificos, utiles if not especificos else []):
+        if not rescate:
+            continue
+        for token in sorted(
+            rescate,
+            key=lambda w: sum(
+                1 for p in productos if _ok(w, str(p.get("nombre") or ""))
+            ),
+        ):
+            relajados = [
+                p for p in productos
+                if _ok(token, str(p.get("nombre") or ""))
+            ]
+            if relajados:
+                return relajados
+
 
     # No hay NINGÚN producto que comparta señal con los tokens útiles.
     if farmacos:
@@ -621,6 +893,22 @@ def filtrar_relevantes(
         )
     ]
     return filtrados or productos
+
+
+def _token_cabeza_farmaco(termino: str) -> str | None:
+    """El token que NOMBRA el fármaco: el primero específico del término.
+
+    'magnesio plus life' → 'magnesio'.  'asaprol as pina' → 'asaprol'.
+
+    Es el token con el que hay que reintentar la búsqueda cuando la frase completa
+    no trajo el fármaco al catálogo (el motor del CRM matchea todos los tokens).
+    El cliente escribe el nombre del producto primero y añade descriptores después
+    ('plus', 'life', 'forte', la marca, la presentación): el primero es el fármaco.
+    """
+    for w in tokens_farmaco(termino):
+        if not _es_sufijo_comercial(w):
+            return w
+    return None
 
 
 def hay_senal_de_farmaco(termino: str) -> bool:
@@ -656,3 +944,120 @@ def tokens_posible_farmaco(termino: str) -> list[str]:
     más permisiva — no es la que se usa aquí.
     """
     return _tokens_farmaco(termino)
+
+
+# El OCR de una imagen que NO es un medicamento devuelve una FRASE, no un nombre.
+#
+# Caso real (provider 19, 2026-10): el cliente mandó el COMPROBANTE DE UN PAGO
+# ("Hola buenos días este es el pago muchas gracias" + la captura de Pagomóvil
+# BDV) y el OCR respondió:
+#
+#   "No se puede extraer texto relacionado con medicamentos o recetas de la
+#    imagen proporcionada, ya que no contiene dicha información."
+#
+# Esa frase es PEOR que un OCR vacío: pasa el blindaje anti-prompt (no repite el
+# vocabulario del prompt) y se usa como TÉRMINO DE BÚSQUEDA. El catálogo difuso
+# resolvió `'extraer texto relacionado proporcionad'` a FREEGELLS EXTRA FUERTE y
+# JABON ANITA PEARL EXTRACT; en el otro caso (`'texto legible proporcionada
+# cuchara medidora'`) a UNA PERA VAGINAL. El cliente mandó un pago y recibió
+# productos que no pidió.
+#
+# El prompt del OCR ASUME que la imagen es un medicamento ("Extrae SOLO el texto
+# legible de esta imagen de medicamento o receta"), así que ante un comprobante el
+# modelo no puede cumplir y escribe esa negación. Hay que tratarla como OCR vacío:
+# el marcador queda honesto (imagen sin texto de medicamento) y el agente responde
+# al CONTEXTO (el texto del cliente dice que es un pago), no a la frase.
+_PISTAS_OCR_SIN_MEDICAMENTO = (
+    r"no\s+(?:se\s+puede|hay|es\s+posible|contiene|muestra|aparece|se\s+observa)",
+    r"(?:imagen|foto|captura)\s+(?:proporcionada|adjunta|enviada)",
+    r"sin\s+(?:informaci[oó]n|texto)\s+(?:sobre|de|relacionad)",
+    r"no\s+(?:contiene|muestra|presenta|incluye)\s+(?:informaci[oó]n|texto|medicamento)",
+    r"no\s+(?:es|se\s+trata\s+de)\s+(?:una?\s+)?(?:medicamento|receta)",
+    r"no\s+hay\s+texto",
+)
+
+
+def parece_presentacion_personal(texto: str) -> bool:
+    """¿El texto es una PRESENTACIÓN de la persona, no una consulta de medicamento?
+
+    'soy víctor', 'me llamo Pedro', 'soy la dueña', 'mi nombre es Ana'.
+
+    La construcción es la señal: "soy/me llamo/mi nombre es" + un nombre. El nombre
+    propio es un token sustantivo de 6 letras que ningún guard de "cuerpo de fármaco"
+    puede distinguir de 'losartan', así que hay que reconocer la ESTRUCTURA.
+
+    Caso real (conv 2720, 2026-10): el cliente venía de un audio donde alguien
+    preguntaba por él y escribió "Soy víctor". El agente buscó "Víctor" en el catálogo
+    y respondió "No te tengo información sobre 'Víctor' en el catálogo" — tratando a
+    una persona como un medicamento.
+
+    OJO: solo la construcción COMPLETA. 'soy' suelto o 'quiero 2 de la opción 1' no
+    cuentan. Si la frase trae una dosis ('soy diabético, necesito metformina 850 mg')
+    NO es una presentación a secas: hay un medicamento que buscar, y el guard de
+    entrada no debe bloquearlo.
+    """
+    if not texto:
+        return False
+    t = texto.strip().lower()
+    if not t:
+        return False
+    # Si trae dosis con unidad, hay una consulta de medicamento de verdad: no bloquear.
+    if re.search(r"\d+\s*(?:mg|ml|mcg|gr|g|cc|ui|%)\b", t):
+        return False
+    # Nombre de medicamento explícito tampoco: 'soy María, tienes atamel?' es consulta.
+    _VERBOS_MEDICINA = re.compile(
+        r"\b(tienes|tienen|tiene|hay|busco|necesito|quiero|venden|precio|"
+        r"cuesta|disponible|consigo|manejan)\b"
+    )
+    if _VERBOS_MEDICINA.search(t):
+        return False
+    # ESTADOS que empiezan con "soy" pero NO son una presentación: "soy alérgico a la
+    # penicilina", "soy diabético", "soy hipertenso". Ahí hay información clínica útil
+    # (y a veces un fármaco), no un nombre. Solo cuentan como presentación si lo que
+    # sigue es un nombre propio, no un adjetivo de condición.
+    _ESTADOS = re.compile(
+        r"^\s*(?:soy|me\s+llamo)\s+(?:al[eé]rgic\w*|diab[eé]tic\w*|hipertens\w*|"
+        r"asm[aá]tic\w*|embarazad\w*|operad\w*|client\w*|usuari\w*|"
+        r"un\s+paciente|una\s+paciente)\b"
+    )
+    if _ESTADOS.search(t):
+        return False
+    return bool(
+        re.search(
+            r"^\s*(?:hola\s+|buenas\s+|buenos\s+d[ií]as\s+|buenas\s+tardes\s+)?"
+            r"(?:soy|me\s+llamo|mi\s+nombre\s+es|aqui\s+habla|les\s+habla)\b",
+            t,
+        )
+        or re.fullmatch(
+            r"\s*(?:soy|me\s+llamo)\s+(?:el|la|un|una)?\s*\w{2,20}\s*[.!]?\s*", t
+        )
+    )
+
+
+def parece_ocr_sin_medicamento(texto: str) -> bool:
+    """¿El texto del OCR dice que la imagen NO trae un medicamento?
+
+    True para las respuestas que hablan de la IMAGEN o de la AUSENCIA de
+    medicamento ("no contiene información sobre medicamentos", "la imagen no
+    muestra ningún medicamento"). Esas frases NO son un término de búsqueda.
+
+    También cubre el marcador EXACTO `NO_APLICA` que el prompt del OCR pide cuando
+    la imagen no es de un medicamento (comprobante de pago, utensilio, comida): es
+    una señal deliberada y estable, mucho más fiable que una frase libre — el
+    modelo la redactaba distinto en cada corrida.
+
+    Guarda contra el falso positivo: una dosis con unidad (`500 mg`, `2 ml`) es
+    señal inequívoca de un medicamento de VERDAD — aunque la frase diga "no" (un
+    OCR que transcribe "NO USAR MÁS DE 500 MG" sigue siendo un medicamento). Con
+    dosis presente, nunca se descarta.
+    """
+    if not texto:
+        return False
+    t = texto.lower().strip()
+    if t.startswith("no_aplica") or t == "no aplica":
+        # El marcador deliberado: puede venir SOLO o con una explicación detrás.
+        return True
+    if re.search(r"\d+\s*(?:mg|ml|mcg|g|ui|%)", t):
+        return False
+    return any(re.search(p, t) for p in _PISTAS_OCR_SIN_MEDICAMENTO)
+

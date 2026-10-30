@@ -162,8 +162,83 @@ class OpenAiLlm:
             return False
         return True
 
-    async def ocr_image(self, data: bytes, mime: str = "image/jpeg") -> str:
+    PROMPT_DUDOSA = (
+        "Mira la imagen: es una receta médica o la foto de un medicamento. Responde SOLO "
+        "una palabra.\n"
+        "LEGIBLE: puedes leer con seguridad el nombre de cada medicamento y su dosis.\n"
+        "DUDOSA: hay letra escrita a mano, tachaduras, abreviaturas o mala calidad que "
+        "hacen que algún nombre o dosis pueda leerse de otra manera.\n"
+        "Si UNA sola palabra o dosis te deja en duda, responde DUDOSA.\n"
+        "Responde únicamente LEGIBLE o DUDOSA."
+    )
+
+    PROMPT_MANUSCRITA = (
+        "Mira la imagen y responde SOLO una palabra.\n"
+        "MANUSCRITA: lo importante está escrito a mano por una persona — trazos de "
+        "bolígrafo o lápiz, letra irregular, tinta. Típico de una receta en papel.\n"
+        "IMPRESA: el texto es de imprenta o etiqueta de fábrica — caja, blíster o frasco "
+        "de un medicamento, letras alineadas y uniformes, o una receta de computadora.\n"
+        "Responde únicamente MANUSCRITA o IMPRESA."
+    )
+
+    async def _clasifica(self, data: bytes, mime: str, prompt: str) -> str:
+        """Una palabra del modelo sobre la imagen ('' si falla)."""
+        from app.media import MAX_IMAGE_BYTES  # import tardío, evita ciclo
+
+        if len(data) > MAX_IMAGE_BYTES:
+            return ""
+        import base64
+
+        uri = f"data:{mime};base64,{base64.b64encode(data).decode()}"
+        try:
+            resp = await self._client.chat.completions.create(
+                model=self._model,
+                temperature=0.0,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": uri}},
+                        ],
+                    }
+                ],
+            )
+            choices = getattr(resp, "choices", None) or []
+            msg = getattr(choices[0], "message", None) if choices else None
+            content = getattr(msg, "content", None) or ""
+            if isinstance(content, list):
+                content = " ".join(
+                    p.get("text", "") for p in content if isinstance(p, dict)
+                )
+            return str(content).strip().upper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clasificación de imagen: fallo (%s)", exc)
+            return ""
+
+    async def lectura_dudosa(self, data: bytes, mime: str = "image/jpeg") -> bool:
+        """¿La receta NO se puede leer con seguridad? Ante el fallo, DUDOSA (conservador)."""
+        texto = await self._clasifica(data, mime, self.PROMPT_DUDOSA)
+        logger.info("lectura_dudosa: el modelo dijo %r", texto[:40])
+        if not texto:
+            return True  # no se pudo comprobar → no se arriesga
+        return "DUDOSA" in texto
+
+    async def es_manuscrita(self, data: bytes, mime: str = "image/jpeg") -> bool:
+        """¿El texto está escrito a mano? Solo elige el TEXTO del mensaje, no la puerta."""
+        texto = await self._clasifica(data, mime, self.PROMPT_MANUSCRITA)
+        logger.info("es_manuscrita: el modelo dijo %r", texto[:40])
+        return "MANUSCRITA" in texto and "IMPRESA" not in texto
+
+    async def ocr_image(
+        self, data: bytes, mime: str = "image/jpeg", prompt: str | None = None
+    ) -> str:
         """Extrae el texto de una imagen (medicamento/receta) con visión.
+
+        `prompt` permite un SEGUNDO intento ENFOCADO cuando la primera lectura se dejó el
+        nombre del medicamento (ver `media.py`): en vez de "extrae el texto", se le pide
+        exactamente el nombre y la dosis.
+        
 
         Usa el mismo modelo del chat (gpt-4o-mini tiene visión). Devuelve el
         texto extraído; vacío/fallo → LlmExhausted (media lo degrada honesto).
@@ -180,20 +255,43 @@ class OpenAiLlm:
             try:
                 resp = await self._client.chat.completions.create(
                     model=self._model,
+                    # DETERMINISMO EN EL OCR. Sin fijar la temperatura el proveedor usa su
+                    # valor por defecto (~1.0) y la MISMA foto devuelve lecturas distintas:
+                    # medido con la caja de FEXOFENADINA CLORHIDRATO CALOX, dos pasadas
+                    # dieron 'FEXOFENADINA CLORHIDRATO' y una tercera inventó
+                    # 'LIMOLAX LIMONADA PURGANTE' (un producto que existe en el catálogo
+                    # pero no está en la foto). Un OCR que varía convierte cualquier
+                    # revisión en una lotería.
+                    temperature=0.0,
                     messages=[
                         {
                             "role": "user",
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": (
-                                        "Extrae SOLO el texto legible de esta imagen de "
-                                        "medicamento o receta. Devuelve: nombre del "
-                                        "medicamento, principio activo y concentración "
-                                        "(mg/ml), y presentación si se ve. Si es una "
-                                        "receta, extrae cada medicamento en una línea. "
-                                        "No inventes nada que no esté en la imagen. "
-                                        "Responde en texto plano."
+                                    "text": prompt if prompt else (
+                                        "Extrae el texto legible de esta imagen, en "
+                                        "texto plano.\n"
+                                        "Si la imagen es de un MEDICAMENTO (caja, "
+                                        "envase, blíster) o de una RECETA, extrae el "
+                                        "nombre del medicamento, el principio activo "
+                                        "y la concentración (mg/ml), y la "
+                                        "presentación si se ve. Si la imagen trae "
+                                        "VARIOS medicamentos (una receta con varios "
+                                        "renglones, o varias cajas en la misma foto), "
+                                        "escribe CADA medicamento en su PROPIA línea, "
+                                        "con su concentración; nunca los juntes en una "
+                                        "sola frase ni los numeres. "
+                                        "Aunque el texto esté manuscrito, borroso o "
+                                        "a medias, escribe lo que alcances a leer: "
+                                        "NUNCA respondas NO_APLICA si ves un envase "
+                                        "de medicamento, una receta, un papel con "
+                                        "nombres de fármacos o una caja de farmacia.\n"
+                                        "Responde NO_APLICA SOLO si la imagen no "
+                                        "tiene nada que ver con medicamentos (un "
+                                        "comprobante de pago, una factura, un "
+                                        "utensilio de cocina, ropa, comida...).\n"
+                                        "No inventes nada que no esté en la imagen."
                                     ),
                                 },
                                 {"type": "image_url", "image_url": {"url": uri}},

@@ -29,7 +29,7 @@ Fail-safe en tools.py: si la búsqueda con el alias reescrito devuelve 0
 productos, se REINTENTA con el término original (con fuzzy). Un alias solo
 puede ayudar; nunca puede esconder un resultado.
 
-Fuentes de la semilla (ver migrations/012_med_aliases.sql):
+Fuentes de la semilla (ver migrations/013_med_aliases.sql):
   - `med_queries` (log real de consultas sin resultados) → pares typo→grafía
     usada después en la misma conversación.
   - Casos reales verificados por simulación (docs/F14-diagnostico-busqueda.md).
@@ -212,7 +212,7 @@ async def cargar_desde_store(store: Any) -> int:
     else:
         logger.warning(
             "aliases: med_aliases vacía — sin reescritura de typos "
-            "(¿migración 012_med_aliases.sql aplicada?)"
+            "(¿migración 013_med_aliases.sql aplicada?)"
         )
     return n
 

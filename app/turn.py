@@ -7,6 +7,7 @@ Degradación silenciosa: cualquier fallo termina en silencio + log (y handoff
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import re
@@ -29,6 +30,7 @@ from app.relevancia import (
 from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt
+from app.wtext import a_formato_whatsapp
 from app.state import (
     AppContext,
     Conversation,
@@ -37,12 +39,29 @@ from app.state import (
     utcnow,
 )
 from app.tools import (
+    _es_letra_de_vitamina,
     ToolRuntime,
     active_tool_schemas,
+    _dosis_sin_unidad,
+    _aviso_forma,
+    _es_nombre_de_laboratorio,
+    _es_solo_saludo,
+    _extraer_dosis,
+    _filtrar_por_forma,
+    _forma_pedida,
     _formatear_lista_productos,
     _fmt_ve,
+    _limpiar_termino_medicamento,
+    _normalizar_tildes,
     _normalizar_unidad,
+    _nucleo_ausente,
+    _CATEGORIAS_TERAPEUTICAS,
+    _VIAS_ADMINISTRACION,
+    _sin_frase_de_indicacion,
     _termino_es_medicamento_plausible,
+    _termino_sin_forma,
+    _titulo_normalizado,
+    _tokens_de_titulo,
     _PALABRAS_FUNCIONALES,
 )
 
@@ -72,6 +91,10 @@ CLASIFICA LA INTENCIÓN DEL MENSAJE ANTES DE ACTUAR:
 - RECETA (usa el flujo de receta): el cliente manda una foto o lista de 2+ medicamentos.
 - OTRO TEMA DEL NEGOCIO (NO uses buscar_medicamento): contratos, la página web, el chat, el comparador, horarios, ubicación, facturación, proveedores, empleo, alianzas, o cualquier asunto administrativo o comercial que NO sea pedir un medicamento. Responde de forma natural y útil, o deriva al humano si no es tu área. NUNCA busques en el catálogo con palabras como "contrato", "página", "chat", "comparador", "web", "horario".
 - NOTIFICACIÓN INTERNA DEL SISTEMA (NO uses buscar_medicamento ni el flujo de receta): mensajes con campos etiquetados como "*Fecha:*", "*Nombre:*", "*Farmacia:*", "*Teléfono:*", o avisos de "se ha realizado una reserva / nueva cita / reserva de demo / pedido confirmado". NO son del cliente: son avisos automáticos. NO busques FECHA, NOMBRE, FARMACIA ni TELÉFONO en el catálogo, ni respondas con una lista de productos. Responde con UNA línea breve de acuse (p. ej. "✅ Recibido: reserva de demo para FARMAUNO el 2/10/2026 a las 10:00 AM.") y nada más.
+
+DATOS DEL NEGOCIO (dirección, horario, teléfono):
+- Dalos SOLO si el cliente los pide, y UNA sola vez en la conversación. Si te pide el TELÉFONO y no lo tienes en los datos del negocio, dilo en UNA línea ("no manejo el teléfono desde aquí") y ofrécele pasar a un humano. NO contestes con la dirección ni el horario: no es lo que preguntó.
+- Si ya dijiste que NO TIENES un medicamento, no vuelvas a pedirle el nombre de la caja ni a ofrecer "otra presentación": ya lo preguntaste. Propón algo DISTINTO o cierra con naturalidad.
 
 REGLAS:
 - Si el cliente NO nombra un medicamento concreto, NO llames buscar_medicamento. Responde directamente.
@@ -361,7 +384,11 @@ async def run_turn(
         logger.info("turno %s: nada procesable en la ráfaga — silencio", identity)
         return
 
-    user_text = "\n".join(parts)
+    # El VOCATIVO inicial ('Robi, ...') se quita ANTES de todo: con la coma dentro se parte
+    # en dos trozos y el nombre acaba presentado como un medicamento no disponible. Caso real
+    # (conv 2109, provider 19): "Robi, me puedes dar el precio del beprospem" → el cliente
+    # veía "⚠️ No disponibles en el catálogo: ROBI".
+    user_text = "\n".join(_sin_vocativo(p) for p in parts)
     await ctx.store.add_message(
         conv.id, "user", user_text, wa_message_id=inbound[0].wa_message_id
     )
@@ -418,8 +445,55 @@ async def run_turn(
     )
     if state_block:
         system = system + "\n\n" + state_block
+    # Los mensajes del CLIENTE vuelven al LLM sin los marcadores del sistema — SALVO
+    # el del turno EN CURSO. Al llegar una imagen/audio, `media.py` guarda (y se
+    # persiste) un marcador que es una INSTRUCCIÓN NUESTRA:
+    #
+    #   [El lead mandó una imagen — la tienes adjunta, puedes verla. OCR de la
+    #    imagen: "Fexofenadina Clorhidrato 120 mg 10 Tabletas". Si es un
+    #    medicamento/receta, interpreta la imagen, extrae el/los medicamento(s) que
+    #    pide y consúltalos en el catálogo (buscar_medicamento). No inventes
+    #    disponibilidad.]
+    #
+    # En el TURNO de la imagen eso es correcto y necesario. Pero el marcador se queda
+    # en el historial y en los turnos SIGUIENTES el LLM lo lee como si el cliente lo
+    # hubiera dicho y lo OBEDECE: el cliente escribe "Hola" y el agente busca y ofrece
+    # la Fexofenadina de la foto de dos días antes.
+    #
+    # Caso real (provider 19, 2026-10): dos "Hola" seguidos → las dos veces el agente
+    # ofreció FEXOFENADINA 120 MG en lugar de saludar, porque el marcador de la imagen
+    # estaba en su ventana de contexto. Reproducido 3/3 con el LLM real y el historial
+    # real de la BD.
+    #
+    # Se conserva el DATO del cliente (el OCR) y se descartan las instrucciones. El
+    # mensaje del turno en curso NO se toca: quitarlo dejaría al LLM sin la
+    # instrucción cuando de verdad toca leer la foto (la ruta de más valor, medido:
+    # el turno de la imagen es el ÚNICO en que el marcador debe llegar íntegro).
+    # `user_text` es exactamente lo que se acaba de persistir para este turno, así
+    # que el mensaje del turno en curso se identifica por su contenido. Si no se
+    # encontrara (p. ej. el marcador llegó vacío), se cae al ÚLTIMO mensaje del
+    # cliente del historial — que es el de este turno — antes que limpiar de más:
+    # tocar el turno de la imagen rompería la lectura de recetas por foto.
+    idx_actual = next(
+        (i for i in range(len(history) - 1, -1, -1)
+         if history[i].role == "user" and (history[i].content or "") == user_text),
+        None,
+    )
+    if idx_actual is None:
+        idx_actual = next(
+            (i for i in range(len(history) - 1, -1, -1) if history[i].role == "user"),
+            -1,
+        )
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}] + [
-        {"role": m.role, "content": m.content} for m in history
+        {
+            "role": m.role,
+            "content": (
+                m.content
+                if m.role != "user" or i == idx_actual
+                else _texto_cliente_sin_marcadores(m.content)
+            ),
+        }
+        for i, m in enumerate(history)
     ]
     # Hostilidad sostenida (AC-18): el CONTEO es determinista — el LLM salió
     # flaky contando entre turnos. Al tercer strike: alerta en el turno y
@@ -463,6 +537,9 @@ async def run_turn(
     # --- LLM con tools ----------------------------------------------------
     # provider_id y farmacia ya se calcularon arriba (para el bloque de farmacia).
     runtime = ToolRuntime(ctx, conv, str(crm_conv_id), profile=profile, provider_id=provider_id)
+    # El mensaje del cliente, para que las tools puedan leer de ahí lo que el LLM quitó del
+    # término de búsqueda (la FORMA: 'omeprazol en cápsulas' → término 'omeprazol').
+    runtime.texto_cliente = user_text
     # Cargar el último producto consultado persistido en el turno anterior
     # (para el backstop de carrito cuando el cliente responde una cantidad).
     # Defensivo: asyncpg puede devolver JSONB como str si el codec no se aplicó.
@@ -480,7 +557,7 @@ async def run_turn(
     runtime.last_ocr_term = (
         conv.last_ocr_term if isinstance(conv.last_ocr_term, str) else ""
     )
-    prev_last_ocr_term = runtime.last_ocr_term
+    runtime.prev_last_ocr_term = runtime.last_ocr_term
     # Lista de opciones persistida del turno anterior (para resolver
     # "quiero X cajas de la opción Z").
     if isinstance(conv.last_options, list):
@@ -561,9 +638,11 @@ async def run_turn(
             "backstop contradicción: el LLM negó disponibilidad pese a %d productos — reemplazo con lista real",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de lista desordenada: si el LLM enumeró TODOS los productos
     # pero en un orden distinto al canónico (precio ascendente), reemplazamos
@@ -580,46 +659,69 @@ async def run_turn(
             "backstop lista desordenada: el LLM mostró %d productos fuera del orden canónico — reemplazo con lista ordenada por precio",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de formato no canónico: el LLM enumeró los productos pero con
     # su propio estilo (markdown, $ con punto, sin 💊 ni Bs). Se reemplaza por
     # la lista canónica: mismo orden (precio asc), formato estándar de la
     # farmacia (💊 N. NOMBRE + $X,XX | Bs Y). El cliente SIEMPRE ve el mismo
     # formato, venga lo que venga del LLM.
+    #
+    # GUARD DEL CIERRE: si el cliente se está despidiendo, su respuesta es una cortesía y
+    # no se sustituye por el catálogo. Caso real (conv 2826): "Ok gracias pasaré por allá"
+    # → el backstop reemplazó el adiós con la lista de NAPROXENO que el cliente YA había
+    # visto. `_enumera_productos` (dentro del predicado) ya descarta las cortesías; este
+    # guard es la segunda capa para el caso de una despedida larga que cite un precio.
     if (
         farmacia
         and runtime.last_products
         and final_text
+        and not _lead_esta_cerrando(_texto_cliente_sin_marcadores(user_text))
         and _formato_no_canonico(final_text, runtime.last_products)
     ):
         logger.warning(
             "backstop formato: el LLM enumeró %d productos sin el formato canónico — reemplazo con lista estándar",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de omisión: si el catálogo devolvió productos pero el texto final
     # NO menciona el medicamento (ni el término ni ningún nombre de producto),
     # el cliente recibiría un "¿Cuál prefieres?" sin contexto. Reemplazamos con
     # la lista real para que la respuesta sea autocontenida.
+    #
+    # GUARD DEL CIERRE: si el lead acaba de agradecer/despedirse, NO se re-lista.
+    # Caso real (provider 27, 2026-10): tras la consulta de omeprazol + asaprol el
+    # cliente escribió "Gracias". El LLM contestó cortés y sin repetir productos
+    # (correcto), pero este backstop vio `last_products` con productos y un texto
+    # que no los mencionaba → REEMPLAZÓ la cortesía con la lista completa de
+    # ASAPROL PINA (PINZA UMBILICAL, pañales...). El cliente que se despedía
+    # recibió otra vez el catálogo. Re-listar a quien ya se despidió es el mismo
+    # daño que la repregunta que ya se corrigió en el texto.
     if (
         farmacia
         and runtime.last_products
         and final_text
+        and not _lead_esta_cerrando(_texto_cliente_sin_marcadores(user_text))
         and not _menciona_producto(final_text, runtime.last_products, runtime.last_term)
     ):
         logger.warning(
             "backstop omisión: el LLM no mencionó el producto pese a %d resultados — reemplazo con lista real",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de precios inventados: si el catálogo devolvió productos pero el
     # texto final cita un precio ($) que NO coincide con ningún producto real,
@@ -635,28 +737,62 @@ async def run_turn(
             "backstop precio inventado: el LLM citó un precio falso pese a %d productos — reemplazo con lista real",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
 
     # Backstop de handoff injustificado: si el catálogo SÍ devolvió productos
     # pero el LLM despide al cliente o lo pasa a humano (sin que el medicamento
     # esté agotado), reemplazamos con la lista real. El cliente jamás debe ser
     # despedido cuando hay productos disponibles.
+    #
+    # GUARD DEL CIERRE: si quien se despide es EL CLIENTE (no el LLM), re-listar
+    # es justo lo contrario de lo que corresponde. Aquí el texto del LLM es una
+    # despedida porque el lead se despidió: se le deja la cortesía y NO se le
+    # devuelve el catálogo.
     if (
         farmacia
         and runtime.last_products
         and final_text
         and not runtime.med_not_found
         and _es_despedida_o_handoff(final_text)
+        and not _lead_esta_cerrando(_texto_cliente_sin_marcadores(user_text))
     ):
         logger.warning(
             "backstop handoff injustificado: el LLM despidió pese a %d productos — reemplazo con lista real",
             len(runtime.last_products),
         )
-        final_text = _formatear_lista_productos(
-            runtime.last_products, runtime.last_term or ""
-        ) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+        final_text = _lista_con_aviso(
+            runtime.last_products,
+            runtime.last_products_term or runtime.last_term or "",
+            "\n\n" + MENSAJE_SUGERIDO_CARRITO,
+        )
+
+    # AVISO DE FORMA: si el cliente pidió una presentación (suspensión, gotas, tabletas) y
+    # la que hay es otra, la respuesta tiene que DECIRLO aunque el LLM redacte su propia
+    # versión. Los productos llegan ya acotados por la tool; este aviso es lo que impide que
+    # la lista se lea como "esto es lo que pediste".
+    # AVISO DE CONCENTRACIÓN: si el cliente pidió una dosis y NINGÚN producto la tiene, el
+    # mensaje lo dice SIEMPRE (aunque el LLM redacte su propia versión). Hermano del aviso
+    # de forma. Caso real (provider 32, 2026-10-29): "RIVAROXABAN DE 20mg" se respondió con
+    # dos presentaciones de 15 mg sin una sola palabra de que la de 20 no existe.
+    if farmacia and final_text and runtime.last_products:
+        _term_cli = _extraer_termino_medicamento(
+            _texto_cliente_sin_marcadores(user_text) or user_text or ""
+        ) or ""
+        _dosis_cli = _extraer_dosis(_term_cli) if _term_cli else ""
+        if _dosis_cli:
+            _aviso_d = _aviso_dosis_agotada(runtime.last_products, _dosis_cli)
+            if _aviso_d and _aviso_d not in final_text:
+                logger.info("backstop dosis: antepongo el aviso — %s", _aviso_d)
+                final_text = _aviso_d + "\n\n" + final_text
+
+    _aviso_forma_rt = getattr(runtime, "aviso_forma", "") or ""
+    if farmacia and final_text and _aviso_forma_rt and _aviso_forma_rt not in final_text:
+        logger.info("backstop forma: antepongo el aviso — %s", _aviso_forma_rt)
+        final_text = _aviso_forma_rt + "\n\n" + final_text
 
     # Backstop de bloque de carrito: SIEMPRE que se consultaron productos
     # (last_products) y el texto final es una lista de presentaciones (no un
@@ -692,11 +828,24 @@ async def run_turn(
     # cantidad y subtotal en USD Y Bs, y el total en ambos — aunque el modelo
     # omita el monto en Bs. Se ejecuta después de los backstops de lista porque
     # last_products no aplica aquí (ver_carrito consulta cart_items).
-    if farmacia and runtime.cart_summary_text:
+    #
+    # PERO NO SI EL CLIENTE ADEMÁS ESTÁ AGREGANDO PRODUCTOS: en ese caso el texto del
+    # LLM es el que trae lo que el cliente pidió añadir, y sustituirlo por el resumen
+    # del carrito ACTUAL lo hace desaparecer. Caso real (conv 2109, 2026-10-17):
+    #     cliente: "Me puedes dar el resumen de esto y le agregas 3 cajas de glymar de
+    #               4 MG y 2 toallas securezza x 15"
+    #     el LLM enumeró GLYMAR y SECUREZZA  →  este backstop los borró y dejó solo el
+    #     resumen del carrito (COLAYTE). El cliente no volvió a ver lo que pidió.
+    if farmacia and runtime.cart_summary_text and not _tambien_pide_agregar(user_text):
         logger.info(
             "backstop resumen determinista: reemplazando texto del LLM por el resumen canónico del carrito"
         )
         final_text = runtime.cart_summary_text
+    elif farmacia and runtime.cart_summary_text:
+        logger.info(
+            "backstop resumen determinista: NO se aplica — el cliente además está "
+            "agregando productos; se respeta el texto del LLM"
+        )
 
     # --- Guardas anti-alucinación (QA T4) — vetos deterministas -------------
     # Se ejecutan AL FINAL: un veto reemplaza el texto por plantilla constante
@@ -833,6 +982,14 @@ async def run_turn(
         logger.info("negativa con carrito: restaurando resumen canónico tras posible veto")
         final_text = runtime.cart_summary_text
 
+    # Si lo cotizado es OTRO fármaco del que pidió el cliente, se responde honesto.
+    # Va DESPUÉS de las guardas QA: un fármaco equivocado pesa más que cualquier veto.
+    if farmacia and final_text and runtime.last_products:
+        _otro = _farmaco_distinto(user_text, runtime)
+        if _otro:
+            final_text = _respuesta_no_es_ese_farmaco(_otro)
+            runtime.last_products = []
+
     sent = False
     if final_text and final_text.strip():
         # Sanitiza el markup interno de handoff (si el modelo lo escribió como
@@ -846,6 +1003,12 @@ async def run_turn(
         clean = _quitar_repregunta_tras_cierre(
             clean, _texto_cliente_sin_marcadores(user_text) or None
         )
+        # No repetir la dirección/horario ni volver a pedir el nombre de la caja; y si
+        # preguntan el teléfono, contestar a eso (ver `_quitar_repeticiones`).
+        clean = _quitar_repeticiones(clean, user_text, history)
+        # El encabezado no puede prometer la concentración que el mensaje niega.
+        clean = _titulo_sin_dosis_negada(clean)
+        clean = _con_confirmacion_carrito(clean, runtime)
         if clean:
             sent = await _send(ctx, conv.id, str(crm_conv_id), clean)
             if sent:
@@ -993,6 +1156,173 @@ async def _fetch_context(
     return None
 
 
+async def _preguntar_metodo_entrega(
+    ctx: AppContext, runtime: ToolRuntime
+) -> None:
+    """Pregunta el MÉTODO DE ENTREGA y deja el estado pendiente. ÚNICO ESCRITOR.
+
+    Centraliza los tres sitios que enviaban el menú (el helper PRE-LLM y los dos
+    guards del despacho). Con una sola definición no pueden divergir ni duplicar el
+    envío: el cliente vio el menú DOS veces cuando había copias.
+
+    Idempotente dentro del turno (`delivery_pregunta_enviada`) y contra el estado
+    persistente (`delivery_pending`).
+    """
+    conv = runtime._conv
+    await ctx.store.update_conversation(conv.id, delivery_pending="method")
+    conv.delivery_pending = "method"
+    runtime.delivery_pendiente = "method"
+    runtime.delivery_pregunta_enviada = True
+    runtime.delivery_pregunta = True
+    logger.info("paso de entrega: pregunto delivery/retiro antes del resumen")
+    await _send(ctx, conv.id, runtime._crm_conv_id, MENSAJE_METODO_ENTREGA)
+
+
+async def _resolver_paso_entrega(
+    ctx: AppContext,
+    runtime: ToolRuntime,
+    user_text: str,
+    *,
+    farmacia: bool = False,
+) -> tuple[bool, str | None]:
+    """Resuelve el PASO DE ENTREGA antes de llamar al LLM. Un solo punto para todos.
+
+    Devuelve ``(manejado, texto)``:
+
+      * ``(False, None)`` — no hay nada del paso de entrega en vuelo: seguir con el LLM.
+      * ``(True, None)``  — el turno ya se atendió (se envió una pregunta por ``_send``).
+      * ``(True, resumen)`` — ya está todo resuelto; enviar ese texto.
+
+    POR QUÉ AQUÍ Y NO EN LA RAMA SIN-TOOLS: cuando el cliente responde al menú de
+    entrega, el modelo NO se queda sin tool-calls — llama ``finalizar_pedido`` o
+    ``ver_carrito`` directamente, así que esa rama nunca se evalúa. Medido en
+    producción (provider 05, 2026-10):
+
+        20:57:58  paso de entrega: preguntando delivery/retiro      ← menú #1
+        20:58:11  backstop carrito: '2' responde a la pregunta de ENTREGA
+        20:58:13  guard finalizar: sin método de entrega — pregunto  ← menú #2
+        20:58:13  backstop resumen determinista                      ← resumen SIN método
+
+    El cliente vio el menú DOS veces y su "2" se perdió. Al resolverlo antes del LLM,
+    en el único punto por el que pasan TODOS los turnos, el modelo no puede saltárselo.
+    """
+    if not farmacia:
+        return False, None
+
+    conv = runtime._conv
+    pendiente = conv.delivery_pending or ""
+
+    # --- 1) RESPUESTA A UNA PREGUNTA DE ENTREGA EN VUELO ---
+    if pendiente == "method":
+        eleccion = _eleccion_entrega(user_text)
+        if eleccion == "delivery":
+            await runtime.guardar_eleccion_entrega("delivery")
+            logger.info("paso de entrega: eligió DELIVERY — pido la dirección")
+            await _send(ctx, conv.id, runtime._crm_conv_id, MENSAJE_PEDIR_DIRECCION)
+            return True, None
+        if eleccion == "pickup":
+            await runtime.guardar_eleccion_entrega("pickup")
+            logger.info("paso de entrega: eligió RETIRAR EN FARMACIA — muestro el resumen")
+            result = await runtime.execute("ver_carrito", {})
+            if not runtime.cart_summary_text:
+                # Sin carrito no hay resumen que mostrar; que el LLM continúe.
+                return False, None
+            return True, runtime.cart_summary_text
+        # EL CLIENTE NO CONTESTA EL MENÚ, PERO PIDE EL TOTAL.
+        #
+        # Ser flexible: contestarle lo que está pidiendo en vez de repetirle la pregunta.
+        # Caso real (conv 1003, provider 19, 2026-10-16): el cliente escribió
+        #     "Cuánto sería el total."  y  "Cuánto sería el monto total de los 3 productos ?"
+        # y recibió el menú de entrega (y después nada). Nunca vio su total.
+        #
+        # La pregunta de entrega SE QUEDA EN VUELO a propósito: el cliente puede contestar
+        # "1"/"2" en el turno siguiente y el flujo continúa con normalidad. Limpiarla aquí
+        # haría que el guard de `ver_carrito` volviera a preguntar el método.
+        if _pide_el_total(user_text):
+            result = await runtime.execute("ver_carrito", {})
+            if runtime.cart_summary_text:
+                logger.info(
+                    "paso de entrega: el cliente pidió el TOTAL sin contestar el menú "
+                    "— muestro el resumen y dejo la pregunta de entrega en vuelo",
+                )
+                return True, runtime.cart_summary_text
+        # No se reconoce: puede ser una consulta nueva (el cliente cambió de tema).
+        # Se limpia la pregunta pendiente y se deja al LLM atender el mensaje.
+        logger.info(
+            "paso de entrega: %r no responde al menú — limpio la pregunta y sigo",
+            user_text[:60],
+        )
+        await ctx.store.update_conversation(conv.id, delivery_pending="")
+        conv.delivery_pending = ""
+        runtime.delivery_pendiente = ""
+        return False, None
+
+    if pendiente == "address":
+        if _parece_direccion(user_text):
+            direccion = _texto_cliente_sin_marcadores(user_text) or user_text.strip()
+            await runtime.guardar_direccion_entrega(direccion.strip())
+            logger.info("paso de entrega: DIRECCIÓN guardada (%r)", direccion[:70])
+            result = await runtime.execute("ver_carrito", {})
+            return True, runtime.cart_summary_text
+        logger.info(
+            "paso de entrega: %r no parece dirección — la pido de nuevo",
+            user_text[:60],
+        )
+        await _send(ctx, conv.id, runtime._crm_conv_id, MENSAJE_PEDIR_DIRECCION)
+        return True, None
+
+    # --- 2) ¿HAY QUE PREGUNTAR EL MÉTODO AHORA? ---
+    # El cliente quiere ver el resumen y aún no eligió cómo recibirlo. Se pregunta
+    # ANTES del resumen, en este mismo punto (cubre todos los caminos, incluido que el
+    # LLM llame ver_carrito por su cuenta).
+    #
+    # LA CONDICIÓN ES `delivery_method is None` A SECAS. NO se usa
+    # `cart_summary_shown` como puerta: ese flag significa "ya mostré un resumen en
+    # esta conversación" y es MEMORIA DE HISTORIAL, no de si ESTE pedido tiene método.
+    #
+    # Caso real (provider 05, 08-oct): el cliente cerró un pedido a las 00:16 — con el
+    # código ANTERIOR al fix de la auditoría, así que `cart_summary_shown` quedó en
+    # True para siempre. A las 01:20 hizo un pedido NUEVO: el carrito estaba vacío (se
+    # limpió al cerrar) y `delivery_method` era None, pero el flag viejo decía True, así
+    # que el paso de entrega se OMITIÓ y el resumen salió sin MÉTODO DE ENTREGA.
+    #
+    # El dato autoritativo de "este pedido ya tiene método" es `delivery_method`, que
+    # se limpia al cerrar el pedido. El flag del resumen es de otra cosa: si además
+    # quedó colgado de un pedido anterior, no hay que arrastrarlo.
+    carrito = await ctx.store.cart_items(
+        conv.id, session_hours=ctx.settings.cart_session_hours
+    )
+    # `delivery_method is None` es el ÚNICO requisito de "este pedido no tiene método".
+    # `cart_summary_shown` NO participa: es memoria de "ya mostré un resumen", no de si
+    # ESTE pedido tiene método de entrega (ver el comentario de arriba).
+    if (
+        carrito
+        and conv.delivery_method is None
+        and _quiere_ver_resumen(user_text, tiene_carrito=True)
+        # Y NO SE PREGUNTA SI EL CLIENTE TODAVÍA ESTÁ AGREGANDO PRODUCTOS.
+        # Preguntar el método de entrega mientras el cliente sigue dictando el pedido
+        # corta el turno y se traga lo que pidió. Caso real (conv 2109, 2026-10-17):
+        #     "Me puedes dar el resumen de esto y le agregas 3 cajas de glymar de 4 MG
+        #      y 2 toallas securezza x 15"  →  solo recibió el menú de entrega.
+        # Ver `_tambien_pide_agregar`.
+        and not _tambien_pide_agregar(user_text)
+    ):
+        # Si el cliente ya dijo "delivery"/"retirar" en el mismo mensaje, no se
+        # pregunta: se toma la elección.
+        eleccion = _eleccion_entrega(user_text)
+        if eleccion:
+            await runtime.guardar_eleccion_entrega(eleccion)
+            if eleccion == "delivery":
+                await _send(ctx, conv.id, runtime._crm_conv_id, MENSAJE_PEDIR_DIRECCION)
+                return True, None
+            result = await runtime.execute("ver_carrito", {})
+            return True, runtime.cart_summary_text
+        await _preguntar_metodo_entrega(ctx, runtime)
+        return True, None
+
+    return False, None
+
+
 async def _tool_loop(
     ctx: AppContext,
     messages: list[dict[str, Any]],
@@ -1002,6 +1332,197 @@ async def _tool_loop(
     user_text: str = "",
 ) -> str | None:
     """Rondas de tool-calling hasta obtener texto final (o rendirse)."""
+
+    # ------------------------------------------------- PASO DE ENTREGA ---
+    # SE RESUELVE AQUÍ, EN CÓDIGO Y ANTES DE LLAMAR AL LLM. Es el único punto por el
+    # que pasa TODOS los turnos, así que el modelo no puede saltárselo.
+    #
+    # POR QUÉ NO EN LA RAMA SIN-TOOLS (donde estaba): cuando el cliente responde "2"
+    # al menú de entrega, el modelo NO se queda sin tool-calls — llama
+    # `finalizar_pedido`/`ver_carrito` directamente. Esa rama nunca se evalúa, así que
+    # la respuesta del cliente se descartaba y el guard del despacho volvía a
+    # preguntar el método. Medido en producción (provider 05, 2026-10):
+    #
+    #     20:57:58  paso de entrega: preguntando delivery/retiro      ← menú #1
+    #     20:58:11  backstop carrito: '2' responde a la pregunta de ENTREGA
+    #     20:58:13  guard finalizar: sin método de entrega — pregunto  ← menú #2
+    #     20:58:13  backstop resumen determinista                      ← resumen sin método
+    #
+    # El cliente vio el menú DOS veces y el resumen salió sin el método de entrega.
+    # ------------------------------------------------- HANDOFF POR PETICIÓN ---
+    # El cliente pide hablar con una persona → se atiende SIEMPRE y A LA PRIMERA, en
+    # código, sin depender del modelo. Va antes de todo lo demás (incluido el paso de
+    # entrega y cualquier búsqueda): quien pide un humano suele estar frustrado y no
+    # debe recibir una lista de productos ni una respuesta fría.
+    #
+    # Caso real (conv 2720, 07-oct): "Pasame el humano" → el agente respondió "no puedo
+    # pasarte el contacto de ninguna persona directamente" y NO hizo el handoff. El
+    # prompt pedía llamar la tool handoff "a la primera", pero sin guard determinista el
+    # caso quedaba al azar del modelo.
+    if farmacia:
+        texto_cliente_handoff = _texto_cliente_sin_marcadores(user_text) or user_text
+        if _pide_hablar_con_humano(texto_cliente_handoff):
+            logger.info(
+                "handoff por petición del cliente: %r — aviso al equipo y despido cálido",
+                texto_cliente_handoff[:60],
+            )
+            await ctx.store.update_conversation(
+                runtime._conv.id, phase="cerrada", followup_due_at=None
+            )
+            await _safe_handoff(ctx, runtime._crm_conv_id, "lead_request")
+            await _send(
+                ctx, runtime._conv.id, runtime._crm_conv_id, MENSAJE_HANDOFF_HUMANO
+            )
+            return None
+
+    resuelto, texto_entrega = await _resolver_paso_entrega(
+        ctx, runtime, user_text, farmacia=farmacia
+    )
+    if resuelto:
+        return texto_entrega  # None = ya se atendió con _send; texto = el resumen
+
+    # GUARD DE ENVASE AGOTADO — ANTES DEL LLM, junto al paso de entrega.
+    #
+    # El cliente pide un TAMAÑO DE CAJA ('de 10 pastillas'). Si el catálogo no lo tiene,
+    # hay que DECÍRSELO con los tamaños que sí hay — no re-listar los de 30 como si fueran
+    # la respuesta.
+    #
+    # Caso real (conv 2714, provider 27, BRASARTAN): el cliente preguntó "No tienes de 10
+    # pastillas?" y el agente respondió re-listando los envases de 30, los MISMOS que ya
+    # había mostrado. El cliente se fue creyendo que sí había respuesta a su pregunta,
+    # cuando la había y era "no". Re-listar sin decir el NO es no responder: el cliente no
+    # puede distinguir "no tengo" de "no me entendió".
+    #
+    # POR QUÉ AQUÍ Y NO EN EL LOOP: en el loop el turno ya pasó por el LLM, que con
+    # 'brasartan 80 mg 10' consulta el catálogo y deja `consulted_catalog=True`. Un guard
+    # condicionado a esa bandera nunca dispararía. Es el mismo error que tuvo el paso de
+    # entrega. Los pasos obligatorios se resuelven ANTES del modelo.
+    if farmacia:
+        # ¿PREGUNTA SI EL EQUIPO VIENE CON LOS MATERIALES?
+        # El catálogo no guarda el contenido de la caja (ver `_EQUIPOS_CONSUMIBLES`), así
+        # que no se puede asegurar. Lo que sí se puede es ofrecer los insumos que se venden
+        # aparte — que es lo que haría un humano de mostrador, en vez de un "no tengo
+        # información" seco seguido de un handoff.
+        # RECETA A MANO O ILEGIBLE: no se transcribe ni se cotiza. Se avisa que un
+        # auxiliar atiende y se registra el handoff para que un humano la lea.
+        tipo_receta = _receta_ilegible(user_text)
+        if tipo_receta:
+            logger.info(
+                "guard receta ilegible (%s): aviso al auxiliar + handoff", tipo_receta
+            )
+            texto_receta = (
+                RESPUESTA_RECETA_MANUSCRITA if tipo_receta == "mano"
+                else RESPUESTA_RECETA_DUDOSA
+            )
+            await _send(ctx, runtime._conv.id, runtime._crm_conv_id, texto_receta)
+            await _safe_handoff(ctx, str(runtime._crm_conv_id), "modelo")
+            return None  # turno atendido: no se consulta el catálogo
+
+        # ¿PIDE UNA FOTO DEL PRODUCTO? Se acusa recibo con una frase humana y NO se
+        # inventa que la enviamos ni se busca "fotos" en el catálogo. Si el cliente está
+        # ENVIANDO una imagen (hay OCR en el turno), esto no aplica.
+        if _pide_foto(user_text) and not _texto_ocr_completo(user_text):
+            logger.info("guard foto: el cliente pide una foto — acuso recibo")
+            await _send(ctx, runtime._conv.id, runtime._crm_conv_id, RESPUESTA_FOTO)
+            return None  # turno atendido: no dejar que el LLM reescriba
+
+        familia = _familia_de_pregunta_contenido(
+            user_text, runtime.last_term, runtime.last_product
+        )
+        if farmacia and familia:
+            # El nombre del EQUIPO se toma ANTES de buscar: `buscar_medicamento` pisa
+            # `last_term`/`last_product` con el consumible, y la frase acababa diciendo
+            # "en el catálogo el LANCETAS … figura como una unidad".
+            producto_ctx = str(runtime.last_term or "").strip()
+            if not producto_ctx and isinstance(runtime.last_product, dict):
+                producto_ctx = str(
+                    runtime.last_product.get("producto")
+                    or runtime.last_product.get("nombre")
+                    or ""
+                ).strip()
+            consumibles: list[dict[str, Any]] = []
+            for insumo in _EQUIPOS_CONSUMIBLES[familia]:
+                data_ins = await runtime.execute("buscar_medicamento", {"nombre": insumo})
+                consumibles.extend((data_ins or {}).get("products") or [])
+            # Dedupe por nombre y ordenar por precio, como el resto de listas.
+            vistos: set[str] = set()
+            limpios: list[dict[str, Any]] = []
+            for p in consumibles:
+                clave = str(p.get("producto") or p.get("nombre") or "").strip().upper()
+                if clave and clave not in vistos:
+                    vistos.add(clave)
+                    limpios.append(p)
+            if _familia_de_equipo(producto_ctx) != familia:
+                # El contexto no habla del equipo: se usa la palabra del propio cliente.
+                producto_ctx = familia
+            producto_ctx = producto_ctx or "el aparato"
+            logger.info(
+                "guard contenido: pregunta por el contenido de '%s' (%s) — ofrezco %d insumo(s)",
+                producto_ctx, familia, len(limpios),
+            )
+            texto = _respuesta_contenido_equipo(str(producto_ctx), limpios)
+            await _send(ctx, runtime._conv.id, runtime._crm_conv_id, texto)
+            return None  # turno atendido: no dejar que el LLM reescriba
+
+        env_pedido = _pedido_de_envase(user_text)
+        # EL MENSAJE NO DEBE TRAER SU PROPIO MEDICAMENTO.
+        #
+        # Este guard aplica el tamaño de caja que el cliente mencionó (`x 30 Tab`) al
+        # ÚLTIMO medicamento de la conversación. Eso es correcto cuando el cliente está
+        # afinando la consulta anterior ("no tienes de 10 pastillas?"), pero NO cuando
+        # llega con una consulta nueva que trae sus propios medicamentos.
+        #
+        # Caso real (conv 2109, provider 19, 2026-10-16): el cliente pidió 8 medicamentos
+        #     "Glimepiride de. 4 MG x 30 Tab, candesatan 16 x 30 Tab, ..."
+        # y `last_term` era 'discolayte' (de una sesión del 9-oct). El guard tomó el '30'
+        # de "x 30 Tab", buscó DISCOLAYTE, no lo encontró en envase de 30 y respondió
+        #     "No tengo DISCOLAYTE en envase de 30 unidades. Lo tengo en: 69 unidades."
+        # NINGUNO de los 8 medicamentos se buscó: el guard RETORNA y el camino de lista
+        # nunca corre. Es la misma regla que ya se aplicó al backstop de refinamiento:
+        # la FORMA refina, el FÁRMACO manda.
+        if env_pedido and runtime.last_term and not _trae_medicamento_propio(
+            user_text, runtime.last_term
+        ):
+            # Se busca con el término LIMPIO: last_term puede traer el envase ya pegado
+            # ('brasartan 80 mg 10') y contaminaría la consulta.
+            term_busqueda = _termino_sin_envase(runtime.last_term, env_pedido)
+            data_env = await runtime.execute(
+                "buscar_medicamento", {"nombre": term_busqueda}
+            )
+            prods_env = (data_env or {}).get("products") or []
+            hay_env = [
+                p for p in prods_env
+                if _envase_de_nombre(p.get("producto") or p.get("nombre")) == env_pedido
+            ]
+            if not hay_env:
+                disponibles = sorted(
+                    {
+                        _envase_de_nombre(p.get("producto") or p.get("nombre"))
+                        for p in prods_env
+                        if _envase_de_nombre(p.get("producto") or p.get("nombre"))
+                    },
+                    key=int,
+                )
+                logger.info(
+                    "guard envase: '%s' pidió envase %s y NO hay — disponibles: %s",
+                    runtime.last_term, env_pedido, disponibles,
+                )
+                texto = _respuesta_envase_agotado(
+                    runtime.last_term, env_pedido, disponibles, prods_env
+                )
+                await _send(ctx, runtime._conv.id, runtime._crm_conv_id, texto)
+                return None  # turno atendido: no dejar que el LLM reescriba
+            # SÍ existe: se acota la lista a ese envase y sigue el flujo normal.
+            logger.info(
+                "guard envase: '%s' envase %s → %d de %d opciones",
+                runtime.last_term, env_pedido, len(hay_env), len(prods_env),
+            )
+            runtime.last_options = sorted(
+                hay_env,
+                key=lambda p: (p.get("precio") if isinstance(p.get("precio"), (int, float))
+                               else 0),
+            )
+
     schemas = active_tool_schemas(farmacia=farmacia)
     # Cuenta rondas consecutivas donde el LLM llamó tools con arguments vacíos
     # ({}): señal de bucle degenerado — cortamos con un texto de respaldo.
@@ -1012,6 +1533,26 @@ async def _tool_loop(
     # runtime.last_options con una búsqueda nueva y la opción Z quede fuera de
     # rango. (El cliente elige contra la lista que YA vio.)
     eleccion_prev = _extraer_eleccion_multiple(user_text)
+    # UN NÚMERO QUE RESPONDE A NUESTRA PREGUNTA NO ES UNA ELECCIÓN DE PRODUCTO.
+    # Si el agente está esperando la respuesta del paso de ENTREGA ("1. Delivery /
+    # 2. Retirar en Farmacia") o la DIRECCIÓN, un "1"/"2" contesta ESA pregunta.
+    #
+    # Caso real (provider 05, 2026-10): el cliente pidió ACETAMINOFEN 650 MG, vio la
+    # lista de 3 opciones, eligió "2" (LA SANTE, correcto). Luego se le preguntó
+    # delivery/retiro, contestó "1" (delivery) — y ese "1" se resolvió contra
+    # `last_options` como la OPCIÓN 1 de la lista: se agregó GENVEN ($0,52) además de
+    # LA SANTE ($0,65). El resumen mostró DOS acetaminofén que el cliente nunca pidió.
+    #
+    # El pre-check vive aquí, ANTES de mi guard de entrega, así que hay que filtrarlo
+    # en la fuente: mientras haya una pregunta de entrega en vuelo, ningún número
+    # suelto puede ser una elección de opción.
+    if eleccion_prev and _hay_pregunta_de_entrega(runtime):
+        logger.info(
+            "backstop carrito: '%s' responde a la pregunta de ENTREGA — "
+            "no es una elección de opción",
+            user_text[:40],
+        )
+        eleccion_prev = None
     # Si el asistente acaba de preguntar "¿cuántas cajas/unidades?", un número
     # suelto ("2") es la CANTIDAD del producto, NO la elección de una opción.
     # La pregunta de cantidad tiene prioridad sobre la lista de opciones.
@@ -1039,6 +1580,21 @@ async def _tool_loop(
         and not runtime.cart_forced
         and not runtime.consulted_catalog
     ):
+        # ¿EL CLIENTE ESTÁ LEYENDO OTRA LISTA? Si alguno de los números que cita no
+        # existe en la actual, no se añade NADA y se le pide aclaración. Antes se añadían
+        # los que cabían —a un producto equivocado— y el resto se perdía en silencio.
+        # Ver `_opciones_no_encajan`.
+        if _opciones_no_encajan(eleccion_prev, runtime.last_options):
+            logger.warning(
+                "backstop carrito (pre-LLM): las opciones %s no caben en la lista actual "
+                "(%d) — NO se agrega nada, pido aclaración",
+                [op for _, op in eleccion_prev], len(runtime.last_options),
+            )
+            await _send(
+                ctx, runtime._conv.id, runtime._crm_conv_id,
+                MENSAJE_OPCIONES_NO_ENCAJAN,
+            )
+            return None
         runtime.cart_forced = True
         for cantidad_prev, opcion_prev in eleccion_prev:
             idx_prev = opcion_prev - 1
@@ -1069,6 +1625,9 @@ async def _tool_loop(
             # re-sume si vuelve a llamar agregar_al_carrito este turno (si no,
             # la cantidad sale doblada: pidió 1 y quedan 2).
             runtime.backstop_added_skus.add(str(producto_prev.get("productId") or ""))
+            runtime.cart_confirmaciones.append(
+                f"• {producto_prev.get('producto') or 'producto'} ×{cantidad_prev}"
+            )
             messages.append(
                 {
                     "role": "assistant",
@@ -1103,7 +1662,32 @@ async def _tool_loop(
                 # Elección por número de opción ("quiero 2 cajas de la opción 3"
                 # o selección múltiple "1 caja de 1,4,7 y 8"): resolver contra la
                 # lista persistida del turno anterior.
+                #
+                # CON LA MISMA GUARDA que el pre-check de arriba: mientras haya una
+                # pregunta de ENTREGA en vuelo, un número suelto contesta ESA pregunta
+                # y no elige una opción de la lista. Este es el segundo punto donde se
+                # resolvía el "1" del menú delivery/retiro como la opción 1.
                 elecciones = _extraer_eleccion_multiple(user_text)
+                if elecciones and _hay_pregunta_de_entrega(runtime):
+                    logger.info(
+                        "backstop carrito: '%s' responde a la pregunta de ENTREGA — "
+                        "no es una elección de opción (rama sin-tools)",
+                        user_text[:40],
+                    )
+                    elecciones = None
+                # MISMA REGLA que en el pre-LLM: si los números citados no caben en la
+                # lista actual, el cliente está leyendo OTRA lista → nada se agrega.
+                if elecciones and _opciones_no_encajan(elecciones, runtime.last_options):
+                    logger.warning(
+                        "backstop carrito: las opciones %s no caben en la lista actual "
+                        "(%d) — NO se agrega nada, pido aclaración",
+                        [op for _, op in elecciones], len(runtime.last_options),
+                    )
+                    await _send(
+                        ctx, runtime._conv.id, runtime._crm_conv_id,
+                        MENSAJE_OPCIONES_NO_ENCAJAN,
+                    )
+                    return None
                 for cantidad, opcion in (elecciones or []):
                     idx = opcion - 1
                     if not (0 <= idx < len(runtime.last_options)):
@@ -1131,6 +1715,9 @@ async def _tool_loop(
                         args["precioBs"] = producto["precioBs"]
                     result = await runtime.execute("agregar_al_carrito", args)
                     runtime.backstop_added_skus.add(str(producto.get("productId") or ""))
+                    runtime.cart_confirmaciones.append(
+                        f"• {producto.get('producto') or 'producto'} ×{cantidad}"
+                    )
                     messages.append(
                         {
                             "role": "assistant",
@@ -1169,14 +1756,40 @@ async def _tool_loop(
                 result = await runtime.execute("info_provider", {})
                 _append_forced_tool(messages, "info_provider", {}, result)
                 continue
+            # PASO DE ENTREGA (nuevo, va ANTES del Resumen del Pedido): cuando el
+            # cliente quiere ver el resumen y todavía no eligió cómo recibirlo, se
+            # le pregunta primero:
+            #     1. Delivery          → luego se pide la dirección
+            #     2. Retirar en Farmacia
+            # Solo después se muestra el Resumen, que incluye el MÉTODO DE ENTREGA.
+            #
+            # EL PASO DE ENTREGA SE RESUELVE EN `_resolver_paso_entrega`, AL INICIO DE
+            # `_tool_loop` Y ANTES DEL LLM. Aquí había una SEGUNDA copia que enviaba el
+            # menú: era código muerto (nunca se alcanzaba, porque cuando el cliente
+            # responde al menú el modelo llama una tool y esta rama no se evalúa) y a
+            # la vez un riesgo de DOBLE ENVÍO si algún día se alcanzaba. Un solo
+            # escritor del estado de entrega: el helper.
+            carrito_activo = bool(await ctx.store.cart_items(
+                runtime._conv.id, session_hours=ctx.settings.cart_session_hours
+            ))
+
             # Backstop de resumen: si el cliente quiere ver el resumen y el LLM
             # no llamó ver_carrito, lo forzamos (el modelo a veces no lo llama).
             # El "no" suelto (a "¿Deseas buscar otro medicamento?") con carrito
             # activo también cuenta: quiere el resumen, no handoff.
-            carrito_activo = bool(await ctx.store.cart_items(
-                runtime._conv.id, session_hours=ctx.settings.cart_session_hours
-            ))
-            if farmacia and _quiere_ver_resumen(user_text, tiene_carrito=carrito_activo) and not runtime.summary_forced:
+            #
+            # PERO NO SI ADEMÁS ESTÁ AGREGANDO PRODUCTOS: forzar ver_carrito mete el
+            # carrito ACTUAL en el contexto y el modelo se limita a resumirlo, dejando
+            # sin atender los productos que el cliente acaba de pedir. Medido con el LLM
+            # real (conv 2109, 2026-10-17): en los dos casos el carrito resumido salió
+            # sin el GLYMAR ni el SECUREZZA que el cliente había pedido en el mismo
+            # mensaje. Sin forzar, el modelo sí busca y enumera los dos productos.
+            if (
+                farmacia
+                and _quiere_ver_resumen(user_text, tiene_carrito=carrito_activo)
+                and not runtime.summary_forced
+                and not _tambien_pide_agregar(user_text)
+            ):
                 runtime.summary_forced = True
                 logger.info("backstop resumen: forzando ver_carrito")
                 result = await runtime.execute("ver_carrito", {})
@@ -1203,8 +1816,6 @@ async def _tool_loop(
                 result = await runtime.execute("finalizar_pedido", {})
                 _append_forced_tool(messages, "finalizar_pedido", {}, result)
                 continue
-            # Backstop de refinamiento: si el cliente responde con un miligramo /
-            # presentación (p.ej. "30 mg") y ya consultamos un medicamento antes,
             # forzamos re-consultar el catálogo con ese refinamiento para que el
             # LLM cite los productos reales (no los invente de memoria).
             #
@@ -1221,6 +1832,19 @@ async def _tool_loop(
                 and runtime.last_term
                 and _es_refinamiento_presentacion(user_text)
                 and not runtime.consulted_catalog
+                # EL MENSAJE NO DEBE TRAER SU PROPIO MEDICAMENTO. Si lo trae, es una
+                # CONSULTA NUEVA, no un refinamiento de la anterior.
+                #
+                # Caso real (conv 2287, provider 19): el cliente pidió la vitamina E y el
+                # título quedó 'VIVAS' (last_term='vivas'). 22 h después escribió
+                #     "Precio de airfen gotas ped"
+                # y el backstop compuso term = 'vivas' + 'gotas' = 'VIVAS GOTAS', devolviendo
+                # los 5 productos VIVAX otra vez. El cliente pedía AIRFEN, que estaba en su
+                # propio mensaje y el catálogo resuelve ('airfen' → 2 productos).
+                #
+                # 'gotas' es una FORMA, así que el mensaje pasaba por refinamiento; pero
+                # 'airfen' es un fármaco nuevo y manda.
+                and not _trae_medicamento_propio(user_text, runtime.last_term)
             ):
                 # Solo el refinamiento (mg/presentación), NO el user_text completo:
                 # "tienes acido folico de 10 mg" → "10 mg" (sin verbos ni duplicar
@@ -1332,14 +1956,69 @@ async def _tool_loop(
                 # fuzzy en 'leda' ≈ 'seda' y el cliente recibió SUTURA SEDA.
                 # El contenido del cliente se detecta con _texto_cliente_sin_marcadores.
                 contenido_cliente = _texto_cliente_sin_marcadores(user_text)
+                # AUDIO: una nota de voz es HABLA CONVERSACIONAL, no una receta. Si el
+                # mensaje es una transcripción, el troceo por comas produce piezas que no
+                # son medicamentos y hay que validarlas una por una.
+                #
+                # Caso real (conv 2834): "Buenos días mi amor, en qué precio tienen la
+                # venda sol? La caja trae dos, verdad?" se troceó en
+                #     ['días amor', 'en qué la venda sol? La caja trae dos', 'verdad']
+                # y el cliente recibió
+                #     ⚠️ No disponibles en el catálogo: DÍAS AMOR, VERDAD
+                #     EN QUÉ LA VENDA SOL? LA CAJA TRAE DOS   ← el título era la frase cruda
+                # o sea dos "medicamentos" que son el saludo y la coletilla, y un título
+                # que es la pregunta entera. El producto correcto (VENDA ELÁSTICA) sí
+                # estaba en la lista, pero envuelto en basura.
+                if _texto_transcripcion_completo(user_text):
+                    piezas_audio = _medicamentos_de_transcripcion(contenido_cliente or "")
+                    if piezas_audio:
+                        logger.info(
+                            "backstop lista (audio): %d medicamento(s) reales: %s",
+                            len(piezas_audio), piezas_audio[:5],
+                        )
+                        medicamentos = piezas_audio
                 if (
                     not medicamentos
-                    and not _es_negativa_o_despedida(contenido_cliente)
                     and _parece_lista_medicamentos(contenido_cliente)
                 ):
-                    medicamentos = _parsear_medicamentos_receta(
-                        "\n".join(_lineas_lista_medicamentos(contenido_cliente))
-                    )
+                    # El troceado por LÍNEAS no sirve cuando la enumeración va en UNA
+                    # línea con comas o 'y' ("precio de valsartan e hidroclorotiazida y
+                    # omeprazol"): da un solo trozo. `_medicamentos_enumerados` respeta
+                    # los separadores y devuelve cada medicamento por separado.
+                    medicamentos = _medicamentos_enumerados(contenido_cliente)
+                    if not medicamentos:
+                        # CADA LÍNEA SE PASA POR `_sin_motivo` ANTES DE PARSEAR. Sin esto el
+                        # verbo del motivo queda PEGADO al nombre y llega al cliente como si
+                        # fuera un medicamento. Caso real (conv 2824): el cliente escribió
+                        # "Dame precio de hidrocoticida de 12.5" y el aviso salió
+                        #     ⚠️ No disponibles en el catálogo: DAME HIDROCOTICIDA, CARDEVIDOL
+                        # — el verbo 'DAME' incluido, y el cliente lee que 'DAME HIDROCOTICIDA'
+                        # es un medicamento que no existe. `_lineas_lista_medicamentos` reparte
+                        # el texto en trozos pero NO limpia el motivo de cada uno.
+                        medicamentos = _parsear_medicamentos_receta(
+                            "\n".join(
+                                _sin_motivo(l)
+                                for l in _lineas_lista_medicamentos(contenido_cliente)
+                            )
+                        )
+                        # UNA LÍNEA CON VARIOS MEDICAMENTOS separados por coma o " y "
+                        # ("Las tres , neblun, epirinolactona y empagliflozina"): el parser
+                        # va línea a línea y los dejaba PEGADOS en un solo término, que
+                        # luego no matcheaba nada y encabezaba la lista con la primera
+                        # palabra (TRES → AMBIENTADOR LITTLE TREES).
+                        if len(medicamentos) == 1:
+                            enumerados = _medicamentos_enumerados(contenido_cliente)
+                            if len(enumerados) >= 2:
+                                logger.info(
+                                    "backstop lista: una línea con %d medicamentos "
+                                    "separados — %s", len(enumerados), enumerados[:5],
+                                )
+                                medicamentos = enumerados
+                    if medicamentos:
+                        logger.info(
+                            "backstop lista: %d medicamento(s) en la consulta: %s",
+                            len(medicamentos), medicamentos[:5],
+                        )
                 # Consulta multi-medicamento en UNA línea sin separadores:
                 # "disponen de clopidogrel de 75 losartan de 50 atorvastatina
                 # de 30 nifedipina de 10 mg" — el patrón 'de <dosis>' repetido
@@ -1349,20 +2028,244 @@ async def _tool_loop(
                 if medicamentos and not runtime.receta_atendida:
                     runtime.receta_atendida = True
                     runtime.catalog_retried = True
+                    # DOSIS POR MEDICAMENTO, extraída ANTES de tocar el término: la dosis
+                    # vive en la LÍNEA del cliente y hay que conservarla para filtrar. El
+                    # término va LIMPIO para que la cascada de typos resuelva el nombre.
+                    dosis_por_term: dict[str, str] = {}
+                    for _t, _d in _medicamentos_con_dosis(contenido_cliente or ""):
+                        if _d:
+                            dosis_por_term[_t] = _d
+                    # El ENVASE que pidió el cliente, también por línea. Se extrae igual
+                    # que la dosis: de la LÍNEA original (donde vive el número).
+                    envase_por_term: dict[str, str] = {}
+                    for _linea in _lineas_lista_medicamentos(contenido_cliente or ""):
+                        _term = _extraer_termino_medicamento(_sin_motivo(_linea))
+                        if not _term:
+                            continue
+                        _env = _envase_pedido_en_linea(_linea)
+                        if _env:
+                            envase_por_term[_term] = _env
                     logger.info(
                         "backstop receta: %d medicamentos detectados — consultando todos",
                         len(medicamentos),
                     )
                     grupos: list[tuple[str, list[dict[str, Any]]]] = []
                     no_disponibles: list[str] = []
+                    # Términos que se descartaron por no ser un medicamento (solo la marca
+                    # del laboratorio o solo la sal). Si no queda ningún grupo, la respuesta
+                    # correcta es pedir el nombre de la caja.
+                    terminos_descartados: list[str] = []
+                    avisos: dict[str, str] = {}
+                    # Productos que el cliente pidió AGREGAR explícitamente y que se
+                    # pueden añadir sin preguntar: cantidad dicha por él + un único
+                    # candidato. Ver el bloque que los agrega, después del bucle.
+                    agregables: list[tuple[str, dict[str, Any], int]] = []
                     for med in medicamentos:
+                        runtime.corregido_desde = None
+                        runtime.corregido_a = None
                         result = await runtime.execute("buscar_medicamento", {"nombre": med})
                         prods = (result or {}).get("products") or []
+                        # EL TÉRMINO ERA EL LABORATORIO, NO UN MEDICAMENTO.
+                        # Caso real (conv 7, provider 05, 2026-10-27): la foto de una caja de
+                        # 'Fexofenadina Clorhidrato CALOX' se leyó como dos medicamentos,
+                        # FEXOFENADINA y CALOX, y la respuesta incluyó un catálogo entero de
+                        # esa marca (20 productos: acetaminofén, amlodipina, albendazol...).
+                        # Se ignora en SILENCIO: no es un "no disponible" — el cliente nunca
+                        # nombró un fármaco CALOX.
+                        # EL TÉRMINO ERA LA SAL DEL PRINCIPIO ACTIVO ('clorhidrato').
+                        # No es un medicamento ni un "no disponible": se ignora en silencio.
+                        # Caso real (2026-10-27): el OCR de una caja de FEXOFENADINA CLORHIDRATO
+                        # devolvió solo 'CLORHIDRATO' y se cotizaron betahistina, metformina,
+                        # bromexina y loperamida.
+                        # ¿EL TÉRMINO ES UNA FRASE, NO UN MEDICAMENTO?
+                        # Una PREGUNTA sobre un producto ("¿el Glucómetro HLM-78 viene con las
+                        # plaquitas de la sangre...?") troceada por líneas produce términos que
+                        # no son medicamentos. Buscarlos devuelve basura o productos que no
+                        # vienen al caso; la regla es no responder con algo incoherente.
+                        if not _termino_es_medicamento_plausible(med):
+                            logger.info(
+                                "receta: '%s' no parece un medicamento (frase/pregunta) — no "
+                                "busco en el catálogo", med,
+                            )
+                            continue
+                        if getattr(runtime, "es_sal", False):
+                            logger.info(
+                                "receta: '%s' es solo la SAL del principio activo — se ignora "
+                                "(sin aviso de no disponible)", med,
+                            )
+                            terminos_descartados.append(med)
+                            continue
+                        if getattr(runtime, "es_laboratorio", False):
+                            logger.info(
+                                "receta: '%s' es el LABORATORIO de los productos, no un "
+                                "medicamento — se ignora (sin aviso de no disponible)",
+                                med,
+                            )
+                            terminos_descartados.append(med)
+                            continue
+                        # FILTRAR POR LA DOSIS QUE PIDIÓ EL CLIENTE.
+                        #
+                        # SE FILTRA AL FINAL, NO SE BUSCA CON LA DOSIS. Medido: si el
+                        # término lleva la dosis pegada, `_quitar_saludos` convierte el
+                        # decimal en un espacio ('hidrocoticida 12.5 mg' → 'hidrocoticida
+                        # 12 5 mg') y la cascada de typos YA NO ENCUENTRA el fármaco → 0
+                        # productos. El typo debe resolverse con el nombre LIMPIO y la dosis
+                        # aplicarse después, sobre los productos devueltos.
+                        #
+                        # POR QUÉ HACE FALTA EL FILTRO LOCAL: el motor del catálogo matchea
+                        # por el fármaco e IGNORA el número, así que devuelve las
+                        # concentraciones mezcladas (medido: 'carvedilol 6.25 mg' → 5 de
+                        # 25 mg). El cliente escribió su dosis; hay que mostrarle solo esa.
+                        dosis_pedida = (
+                            dosis_por_term.get(med)
+                            or _dosis_sin_unidad(med)
+                            or _extraer_dosis(med)
+                        )
+                        aviso_dosis = ""
+                        if dosis_pedida:
+                            antes = len(prods)
+                            # El aviso se calcula ANTES de filtrar, sobre la lista completa:
+                            # necesita saber qué concentraciones HAY para poder decir
+                            # "lo tengo en". Es el hermano del aviso de envase.
+                            aviso_dosis = _aviso_dosis_agotada(prods, dosis_pedida)
+                            prods = _filtrar_por_dosis(prods, dosis_pedida)
+                            logger.info(
+                                "receta: '%s' dosis %s → %d de %d productos%s",
+                                med, dosis_pedida, len(prods), antes,
+                                f' · aviso: {aviso_dosis}' if aviso_dosis else "",
+                            )
+                        # FILTRAR POR EL ENVASE (cuántas tabletas trae la caja).
+                        # El motor del catálogo ignora los números igual que ignoraba la
+                        # dosis: el cliente pidió "4 MG x 30 Tab" y recibía también el
+                        # envase de 10. Mismo patrón que la dosis: se busca con el nombre
+                        # LIMPIO y se filtra DESPUÉS sobre lo devuelto.
+                        # ORDEN: primero el ENVASE, porque la dosis necesita saberlo para
+                        # no confundirse con él (ver el guard de abajo).
+                        envase_pedido = (
+                            envase_por_term.get(med) or _envase_pedido_en_linea(med)
+                        )
+                        dosis_pedida = (
+                            dosis_por_term.get(med)
+                            or _dosis_sin_unidad(med)
+                            or _extraer_dosis(med)
+                        )
+                        # UN NÚMERO IGUAL AL ENVASE NO ES UNA DOSIS.
+                        # El término puede acabar con el tamaño de caja cuando el cliente
+                        # lo escribió ('metformina de 500 x 30' → término 'metformina 30'):
+                        # leer ese '30' como concentración filtraba los productos por el
+                        # número 30 y devolvía las concentraciones mezcladas otra vez
+                        # (medido: 'dosis 30 → 15 de 20', TODOS los envases de 30 con
+                        # 500/850/1000/1 MG dentro). La dosis real —'500'— viene de la
+                        # LÍNEA, vía `_dosis_antes_del_envase`.
+                        if dosis_pedida and envase_pedido and dosis_pedida == envase_pedido:
+                            dosis_pedida = ""
+                        aviso_envase = ""
+                        if envase_pedido:
+                            antes_e = len(prods)
+                            # El aviso se calcula ANTES de filtrar, sobre la lista completa:
+                            # necesita saber qué envases HAY para poder decir "lo tengo en".
+                            aviso_envase = _aviso_envase_agotado(prods, envase_pedido)
+                            prods = _filtrar_por_envase(prods, envase_pedido)
+                            logger.info(
+                                "receta: '%s' envase %s → %d de %d productos%s",
+                                med, envase_pedido, len(prods), antes_e,
+                                f' · aviso: {aviso_envase}' if aviso_envase else "",
+                            )
+                        # EL TÍTULO LLEVA LA GRAFÍA DEL CATÁLOGO, no la que escribió el
+                        # cliente. Si hubo corrección por typo ('hidrocoticida' →
+                        # 'hidroclorotiazida'), encabezar con el typo repetiría el error en
+                        # la respuesta y el cliente no sabría qué producto se le está
+                        # ofreciendo. El encabezado identifica el grupo; debe ser el nombre
+                        # con el que el producto existe.
+                        # LA FORMA PEDIDA, EN EL TÍTULO. Si el cliente pidió "apiret en
+                        # suspensión" y no hay suspensión, el aviso lo dice y el encabezado
+                        # no puede seguir prometiéndola (misma regla que con la dosis).
+                        aviso_forma_receta = getattr(runtime, "aviso_forma", "") or ""
+                        _base_titulo = runtime.corregido_a or med
+                        if aviso_forma_receta:
+                            _base_titulo = _termino_sin_forma(_base_titulo)
+                        titulo = _base_titulo.upper()
+                        # EL TÍTULO NO LLEVA NI LA PALABRA DE LA CAJA NI EL LABORATORIO.
+                        # Caso real (conv 7, provider 05, 2026-10-27): la foto de
+                        # 'Fexofenadina Clorhidrato CALOX' se leyó como
+                        # 'Medicamento Fexofenadina Clorhidrato Calox' y el encabezado de la
+                        # lista salió así, con 'MEDICAMENTO' delante y la marca detrás.
+                        # 'Medicamento Genérico' es texto de la caja, y CALOX es el
+                        # laboratorio: se comprueba contra los productos devueltos, que son
+                        # los que confirman que ese token cierra los títulos (ver
+                        # `_es_nombre_de_laboratorio`). Nunca se quita el fármaco.
                         if prods:
-                            grupos.append((med.upper(), prods))
+                            titulo = _titulo_de_lista(titulo, prods)
+                            # Y si NINGÚN producto lleva el nombre pedido (el cliente
+                            # escribió 'epirinolactona' y el catálogo tiene
+                            # ESPIRONOLACTONA), el encabezado pasa a la marca real: el
+                            # mensaje no puede encabezar con una palabra que no es la del
+                            # producto. Misma regla que `_lista_con_aviso`.
+                            titulo = _titulo_por_marcas(prods, titulo)
+                            # Y si la CONCENTRACIÓN pedida no está, el encabezado la
+                            # pierde: el mensaje avisa "no tengo de 20 mg" y a la vez
+                            # encabezaba "RIVAROXABAN 20 MG" (foto del envase, provider 32,
+                            # 2026-10-29). Misma regla que `_avisos_de_lista`.
+                            if aviso_dosis and dosis_pedida:
+                                titulo = _titulo_sin_dosis(titulo, dosis_pedida)
+                        if prods:
+                            grupos.append((titulo, prods))
+                            # Los dos avisos van juntos si los dos aplican: la
+                            # concentración pedida no está Y el envase tampoco.
+                            _avisos_titulo = " ".join(
+                                a for a in (
+                                    aviso_forma_receta, aviso_dosis, aviso_envase
+                                ) if a
+                            )
+                            if _avisos_titulo:
+                                avisos[titulo.strip().upper()] = _avisos_titulo
+                            # ¿PIDIÓ ALGO QUE NO TENGO? El motor del catálogo se cae al OR
+                            # cuando la búsqueda exacta no da nada, así que una marca que no
+                            # existe desaparece en SILENCIO y el cliente recibe otras marcas
+                            # bajo el título de lo que pidió. Se comprueba sobre el término
+                            # EFECTIVO (el corregido, si hubo corrección): así 'acido
+                            # acetalicio' no avisa, porque la corrección a acetilsalicílico
+                            # sí está en los productos devueltos.
+                            _term_ef = getattr(runtime, "corregido_a", None) or med
+                            _ausente = _nucleo_ausente(_term_ef, prods)
+                            if _ausente:
+                                logger.info(
+                                    "receta: '%s' no está en NINGUNO de los %d productos "
+                                    "— aviso 'no lo tengo'", _ausente, len(prods),
+                                )
+                                _av = _aviso_no_lo_tengo(_term_ef, _ausente)
+                                _clave = titulo.strip().upper()
+                                avisos[_clave] = (
+                                    f"{avisos[_clave]}\n{_av}" if _clave in avisos else _av
+                                )
+                            # ¿EL CLIENTE PIDIÓ AGREGARLO? ("le agregas 3 cajas de
+                            # glymar de 4 MG"). Solo se añade si (a) lo pidió con un
+                            # verbo de agregar, (b) dijo CUÁNTAS unidades y (c) hay UN
+                            # ÚNICO candidato — si hay varios, no se adivina: se le
+                            # ofrece la lista para que elija.
+                            if _tambien_pide_agregar(user_text):
+                                _cant = _cantidad_pedida(med)
+                                if _cant and len(prods) == 1:
+                                    agregables.append((titulo, prods[0], _cant))
+                                elif _cant:
+                                    logger.info(
+                                        "receta: '%s' se pidió agregar x%d pero hay %d "
+                                        "candidatos — no se adivina",
+                                        med, _cant, len(prods),
+                                    )
                         else:
                             logger.info("receta: %s no está en el catálogo", med)
-                            no_disponibles.append(med)
+                            no_disponibles.append(titulo)
+                        # ¿ESTE GRUPO YA SE LO AGREGAMOS? Si el cliente dijo "quiero la
+                        # opción 9" (de esta misma lista) y además pregunta el precio de
+                        # otra cosa, no se le repite la lista entera que acaba de ver.
+                        # El grupo ya se había añadido arriba: se quita.
+                        if grupos and _grupo_ya_en_carrito(grupos[-1][1], runtime):
+                            logger.info(
+                                "receta: '%s' ya está en el carrito por elección de opción "
+                                "— no se repite la lista", grupos[-1][0],
+                            )
+                            grupos.pop()
                     if grupos:
                         # Guardar la lista GLOBAL de opciones (en el MISMO orden
                         # que ve el cliente: medicamento por medicamento, cada
@@ -1383,7 +2286,59 @@ async def _tool_loop(
                         if opciones_global:
                             runtime.last_options = opciones_global
                             runtime.last_product = opciones_global[0]
-                        receta_final = _formatear_receta(grupos, no_disponibles)
+                        # ---- AGREGAR LO QUE EL CLIENTE PIDIÓ Y DARLE EL RESUMEN ----
+                        #
+                        # Caso real (conv 2109, provider 19, 2026-10-17 03:37):
+                        #     cliente: "Me puedes dar el resumen de esto y le agregas
+                        #               3 cajas de glymar de 4 MG y 2 toallas securezza x 15"
+                        # El cliente dio una ORDEN explícita ("le agregas") con cantidad y
+                        # producto. Antes se le ofrecía la lista y tenía que volver a
+                        # confirmar; y el resumen del carrito no salía en esa respuesta.
+                        # Ahora se añaden (solo los que tienen UN único candidato y
+                        # cantidad dicha por el cliente) y se responde con el resumen, que
+                        # ya los incluye.
+                        if agregables:
+                            hechos: list[str] = []
+                            for _tit, _prod, _cant in agregables:
+                                args_add: dict[str, Any] = {
+                                    "productId": _prod.get("productId"),
+                                    "producto": _prod.get("producto") or "",
+                                    "cantidad": _cant,
+                                    "presentacion": _prod.get("presentacion") or "",
+                                    "laboratorio": _prod.get("laboratorio") or "",
+                                }
+                                if _prod.get("precio") is not None:
+                                    args_add["precioUsd"] = _prod["precio"]
+                                if _prod.get("precioBs") is not None:
+                                    args_add["precioBs"] = _prod["precioBs"]
+                                await runtime.execute("agregar_al_carrito", args_add)
+                                logger.info(
+                                    "receta: el cliente lo pidió — agrego '%s' x%d",
+                                    args_add["producto"], _cant,
+                                )
+                                hechos.append(f"- {_cant} de {args_add['producto']}")
+                            result = await runtime.execute("ver_carrito", {})
+                            if runtime.cart_summary_text:
+                                receta_final = (
+                                    "✅ Agregado al pedido:\n"
+                                    + "\n".join(hechos)
+                                    + "\n\n"
+                                    + runtime.cart_summary_text
+                                )
+                                await _send(
+                                    ctx,
+                                    runtime._conv.id,
+                                    runtime._crm_conv_id,
+                                    _con_confirmacion_carrito(
+                                        _titulo_sin_dosis_negada(receta_final), runtime
+                                    ),
+                                )
+                                return None  # turno atendido
+                        receta_final = _formatear_receta(grupos, no_disponibles, avisos)
+                        # La receta se envía DIRECTO desde aquí, así que no pasa por el
+                        # post-proceso de `run_turn`: el encabezado se corrige aquí.
+                        receta_final = _titulo_sin_dosis_negada(receta_final)
+                        receta_final = _con_confirmacion_carrito(receta_final, runtime)
                         await _send(
                             ctx,
                             runtime._conv.id,
@@ -1391,6 +2346,26 @@ async def _tool_loop(
                             receta_final,
                         )
                         return None  # turno atendido: no dejar que el LLM reescriba
+                    if not no_disponibles and terminos_descartados:
+                        # LA IMAGEN NO DEJÓ NINGÚN MEDICAMENTO QUE BUSCAR.
+                        # O el OCR leyó solo la marca ('nombre del medicamento calox') o solo
+                        # la sal ('clorhidrato'). Cotizar eso devuelve un catálogo al azar, así
+                        # que lo honesto es pedir el nombre tal como está en la caja.
+                        # Caso real (provider 32, 2026-10-27): la foto de una FEXOFENADINA
+                        # CLORHIDRATO CALOX se respondió con 20 productos de la marca CALOX.
+                        logger.info(
+                            "receta: la imagen no dejó ningún medicamento buscable "
+                            "(descartados: %s) — pido el nombre", terminos_descartados,
+                        )
+                        await _send(
+                            ctx,
+                            runtime._conv.id,
+                            runtime._crm_conv_id,
+                            "No consigo leer el nombre del medicamento en la imagen. 🙏\n"
+                            "¿Me lo escribes como aparece en la caja? "
+                            "(por ejemplo: FEXOFENADINA CLORHIDRATO 120 MG)",
+                        )
+                        return None  # turno atendido
                 ocr_term = _extraer_termino_ocr(user_text)
                 # Guardar el término del OCR para el turno SIGUIENTE: el cliente
                 # suele preguntar después "¿el producto de la foto lo tienes?"
@@ -1489,8 +2464,21 @@ async def _tool_loop(
                 trans_term_2 = _extraer_termino_transcripcion(user_text)
                 if trans_term_2:
                     term = trans_term_2
-                elif _parece_consulta_medicamento(user_text):
+                elif _parece_consulta_medicamento(user_text) and not _lead_esta_cerrando(
+                    _texto_cliente_sin_marcadores(user_text)
+                ):
                     term = _extraer_termino_medicamento(user_text)
+                # EL TÍTULO TIENE QUE SER EL FÁRMACO, NO LA FRASE. `_extraer_termino_medicamento`
+                # quita verbos de consulta y relleno, pero NO el ruido del HABLA (muletillas,
+                # coletillas) — eso solo lo hace `_limpiar_transcripcion`. Con una nota de voz
+                # el término conservaba la frase y el ENCABEZADO de la respuesta era:
+                #     EN QUÉ LA VENDA SOL? LA CAJA TRAE DOS
+                # (caso real conv 2834). El cliente lee eso como el nombre del producto.
+                # Se vuelve a pasar por el limpiador de audio para que quede 'venda'.
+                if term and _texto_transcripcion_completo(user_text):
+                    term_audio = _extraer_termino_medicamento(_limpiar_transcripcion(term))
+                    if term_audio:
+                        term = term_audio
                 # El cliente REFERENCIA una imagen anterior ("el producto de la
                 # foto lo tienes?") sin aportar un fármaco. Buscar con las
                 # palabras de la pregunta devuelve basura por SUBSTRING: 'foto'
@@ -1498,7 +2486,7 @@ async def _tool_loop(
                 # tengo el producto de la foto" mostrando ese oftálmico. Se usa
                 # el término del OCR de la imagen que el cliente SÍ mandó.
                 if _parece_referencia_sin_farmaco(user_text):
-                    anterior = runtime.last_ocr_term or prev_last_ocr_term
+                    anterior = runtime.last_ocr_term or runtime.prev_last_ocr_term
                     if anterior:
                         logger.info(
                             "referencia a imagen: buscando con el OCR previo '%s' "
@@ -1599,6 +2587,93 @@ async def _tool_loop(
             }
         )
         for tc in reply.tool_calls:
+            # GUARD DEL PASO DE ENTREGA: no se puede mostrar el RESUMEN sin haber
+            # preguntado antes cómo quiere recibir el pedido. Igual que el guard de
+            # finalizar, va en el DESPACHO de tools porque el modelo puede llamar
+            # ver_carrito por su cuenta y saltarse la pregunta — que es exactamente
+            # lo que hace cuando el cliente dice "no" (medido: el modelo responde
+            # "Perfecto, cuando estés listo puedo ayudarte a finalizar" sin tool, o
+            # llama finalizar_pedido/ver_carrito directamente).
+            #
+            # Se intercepta antes de ejecutar: se envía el menú 1/2 y el turno
+            # termina ahí. El resumen se mostrará en el turno siguiente, ya con el
+            # método elegido (y la dirección si es delivery).
+            if (
+                farmacia
+                and tc.name == "ver_carrito"
+                and runtime._conv.delivery_method is None
+                and not runtime._conv.delivery_pending
+                and not runtime.delivery_pregunta_enviada
+            ):
+                items_e = await ctx.store.cart_items(
+                    runtime._conv.id, session_hours=ctx.settings.cart_session_hours
+                )
+                if items_e:
+                    logger.info(
+                        "guard entrega: el LLM iba a mostrar el resumen sin preguntar "
+                        "la entrega (%d producto(s)) — pregunto delivery/retiro",
+                        len(items_e),
+                    )
+                    await _preguntar_metodo_entrega(ctx, runtime)
+                    return None
+            # GUARD: NO SE PUEDE FINALIZAR SIN HABER MOSTRADO EL RESUMEN.
+            #
+            # El cliente debe ver nombre, cajas y subtotal de cada medicamento ANTES
+            # de que el pedido quede registrado. Si el LLM llama finalizar_pedido de
+            # una vez, el cliente recibe solo "Tu pedido ha sido registrado. Total:
+            # $1.80" — sin detalle — y el pedido ya se cerró (cart_clear), así que el
+            # resumen es IMPOSIBLE de recuperar después.
+            #
+            # Caso real (provider 05, 2026-10): el agente preguntó "¿Deseas buscar otro
+            # medicamento? (SI/NO)", el cliente dijo "No" y el LLM llamó
+            # finalizar_pedido directamente (medido 5/5 con el modelo real). El
+            # backstop que fuerza el resumen vive en el bloque `if not reply.tool_calls`,
+            # así que NUNCA se evaluó: el modelo llamó una tool y se saltó todos los
+            # backstops. El cliente vio su pedido registrado sin ver qué compró.
+            #
+            # Se sustituye la llamada por el resumen y se le da otra ronda al LLM para
+            # que lo presente; el cliente confirma en el turno siguiente y ahí sí
+            # finaliza (con `cart_summary_shown` ya activo).
+            if (
+                farmacia
+                and tc.name == "finalizar_pedido"
+                and not runtime.summary_forced
+                and (
+                    not runtime._conv.cart_summary_shown
+                    or runtime._conv.delivery_method is None
+                )
+            ):
+                items_cart = await ctx.store.cart_items(
+                    runtime._conv.id, session_hours=ctx.settings.cart_session_hours
+                )
+                # Solo se exige el resumen si HAY algo que resumir: sin carrito,
+                # finalizar_pedido devuelve 'carrito_vacio' y no hay nada que mostrar.
+                if items_cart:
+                    # Si el cliente aún no eligió CÓMO recibirlo, primero el paso de
+                    # entrega. Un pedido sin método de entrega deja al humano sin saber
+                    # si despachar o preparar para retiro.
+                    if runtime._conv.delivery_method is None:
+                        logger.info(
+                            "guard finalizar: sin método de entrega — pregunto "
+                            "delivery/retiro antes de cerrar"
+                        )
+                        await _preguntar_metodo_entrega(ctx, runtime)
+                        return None
+                    runtime.summary_forced = True
+                    logger.info(
+                        "guard finalizar: el LLM quiso finalizar sin mostrar el resumen "
+                        "(%d producto(s)) — fuerzo ver_carrito antes de cerrar",
+                        len(items_cart),
+                    )
+                    result = await runtime.execute("ver_carrito", {})
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(result, ensure_ascii=False, default=str),
+                        }
+                    )
+                    continue
             result = await runtime.execute(tc.name, tc.arguments)
             messages.append(
                 {
@@ -1607,6 +2682,14 @@ async def _tool_loop(
                     "content": json.dumps(result, ensure_ascii=False, default=str),
                 }
             )
+    # Si el cliente describía un producto sin nombrarlo, el silencio es lo peor que puede
+    # pasar: se manda la pregunta canónica.
+    if getattr(runtime, "pide_recomendacion", False):
+        logger.warning(
+            "turno: demasiadas rondas y el cliente describía el producto sin nombrarlo — "
+            "se manda la pregunta canónica en vez de silencio"
+        )
+        return PREGUNTA_RECOMENDACION
     logger.warning("turno: demasiadas rondas de herramientas — corto sin texto")
     return None
 
@@ -1623,7 +2706,7 @@ async def _send(ctx: AppContext, conv_id: int, crm_conv_id: str, text: str) -> b
     4831 chars). Se divide en partes por línea vacía (párrafos) SIN cortar
     opciones de la lista por la mitad; cada parte ≤ WA_MAX_CHARS.
     """
-    partes = _partir_mensaje_largo(text, WA_MAX_CHARS)
+    partes = _partir_mensaje_largo(a_formato_whatsapp(text), WA_MAX_CHARS)
     # Modo laboratorio (endpoint /api/chat): captura las respuestas en el
     # outbox en vez de enviarlas por WhatsApp. No reenvía, no encola
     # pending_send, no toca la ventana ni la API.
@@ -1673,7 +2756,12 @@ async def _safe_handoff(ctx: AppContext, crm_conv_id: str, reason: str) -> None:
 # la consulta y el modelo conteste con datos reales, nunca inventados.
 
 _VERBOS_MEDICAMENTO = re.compile(
-    r"\b(tienen|tenéis|hay|consigo|me dan|me consigues|tienes|busco|buscando|"
+    # VERBOS DE PASE A HUMANO: pedir el pase no es pedir un medicamento. Sin esto,
+    # "Puedes por favor pasarlo al equipo" buscaba 'pasarlo' en el catálogo.
+    r"\b(pasar|pasarlo|pasarla|pasarlos|pasarlas|pasame|pásame|paseme|páseme|pasa|"
+    r"pasen|transferir|transferirlo|derivar|derivarlo|derivalo|derivelo|escalar|"
+    r"escalalo|escalelo|atender|"
+    r"atiendelo|atiéndelo|tienen|tenéis|hay|consigo|me dan|me consigues|tienes|busco|buscando|"
     r"buscar|buscas|necesito|quisiera|quiero|quería|queremos|saber|"
     r"venden|vendes|disponible|disponibles|disponen|disponemos|cuesta|cuestan|precio|"
     r"pueden conseguir|traen|consigues|conseguir|tengo|tiene|hay|mande|"
@@ -1683,13 +2771,123 @@ _VERBOS_MEDICAMENTO = re.compile(
 
 # Palabras de relleno (saludos, cortesía, muletillas) que NUNCA son un
 # medicamento. Impide que el backstop busque "hola" o "buenas".
+# VOCATIVO / CARIÑO: el cliente saluda y llama al agente "mi amor", "corazón", "cariño".
+# Caso real (provider 32, 2026-10-29): "Buenas tardes!! Mi amor que precio tiene la
+# nitrofurantoina de 50mg y la vitamina C" → el agente buscó 'AMOR NITROFURANTOINA 50MG',
+# avisó "No tengo NITROFURANTOINA. De AMOR 50MG hay esto" y cotizó TE AMO PRESERV. 3PCS.
+VOCATIVOS_T = {
+    "amor", "cariño", "carino", "corazon", "corazón", "bebe", "bebé", "preciosa",
+    "precioso", "linda", "lindo", "hermosa", "hermoso", "bonita", "bonito",
+    "principe", "príncipe", "reina", "rey", "amiga", "amigo", "senora", "señora",
+    "senor", "señor", "doctor", "doctora", "licenciada", "licenciado", "jefe", "jefa",
+    "vecina", "vecino", "pana", "panita", "compatriota",
+}
+# INTENCIÓN DE COMPRA: no es un medicamento.
+INTENCION_COMPRA_T = {
+    "quiero", "queria", "quería", "quisiera", "querer", "querría", "querria",
+    "deseo", "deseamos", "llevo", "llevare", "llevaré", "llevaria", "llevaría",
+    "apartame", "apártame", "separame", "sepárame", "encargame", "encárgame",
+}
+# REFERENCIA A LA LISTA ANTERIOR: 'de la opción 9', 'la número 3'.
+REFERENCIA_LISTA_T = {
+    "opcion", "opción", "opciones", "opcioncita", "numerito",
+}
+
 _FILLER = {
     "hola", "buenas", "buen", "buenos", "buena", "dia", "dias", "tardes",
     "noches", "gracias", "por", "favor", "quisiera", "podria", "puede",
+    # FRASE DE CONSULTA: el cliente ANUNCIA la lista antes de enumerarla
+    # ("por favor me podrías cotizar los siguientes medicamentos. Glimepiride...,
+    # candesatan..., ..."). Sin filtrarlas, esa frase se buscaba como si fuera UN
+    # medicamento y el cliente veía "⚠️ No disponibles: COTIZAR SIGUIENTES MEDICAMENTOS".
+    # MEDIDO en los 7 providers activos: 0 productos reales. Los 4 aciertos de 'cotizar'
+    # en el 27 eran CORTA UÑA/CORTAUÑA y los 3 de 'presupuesto' en el 28 eran
+    # PRESTOBARBA: falsos positivos del matcher difuso, o sea el bug que se quiere evitar.
+    "cotizar", "cotizame", "cotizacion", "cotizaciones", "cotizarlos",
+    # Vocativo, intención de compra y referencia a la lista (gemelos de tools).
+    *VOCATIVOS_T, *INTENCION_COMPRA_T, *REFERENCIA_LISTA_T,
+    "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
+    # RÓTULOS DEL CAMPO: el OCR devuelve '**Nombre del medicamento:** Fexofenadina
+    # Clorhidrato CALOX' y el término quedaba 'nombre del fexofenadina clorhidrato calox'.
+    # Con solo la marca ('nombre del medicamento calox') el término era 'nombre del calox' y
+    # el detector de laboratorio no lo reconocía (veía tres palabras). Son TRES listas
+    # duplicadas: aquí, en tools._PALABRAS_FUNCIONALES y en relevancia._FUNCIONALES — hay
+    # que tocar las tres. Caso real provider 32, 2026-10-27.
+    "nombre", "nombres", "rotulo", "etiqueta", "descripcion", "presentacion",
+    # ACCESORIOS Y CONSUMIBLES DE UN EQUIPO, NO MEDICAMENTOS. Caso real (provider 32,
+    # 2026-10-27): "¿el Glucómetro HLM-78 viene con las plaquitas, el lápiz y la pulla o
+    # solo el aparato?" → el troceador sacó ['lapiz', 'pulla aparato'] y el cliente recibió
+    # 20 LÁPICES de cejas y labiales, más "no disponibles: PULLA APARATO". Ninguna de estas
+    # palabras identifica un fármaco por sí sola.
+    # OJO: 'tiras' y 'lancetas' NO van aquí — se venden sueltas y son productos reales.
+    "lapiz", "lapices", "lapicero", "lapiceros", "pulla", "pullas",
+    # 'tratamiento' no es un producto: el catálogo está lleno de TRATAMIENTO CAPILAR.
+    "tratamiento", "tratamientos", "tratamientos capilares",
+    # CANTIDADES: 'las tres', 'los dos', 'quiero tres'. NO son medicamentos y el matcher
+    # difuso los apoya en cualquier cosa (caso real: 'tres' → LITTLE TREES → 15
+    # ambientadores cotizados como medicamentos, provider 32).
+    "uno", "una", "unos", "unas", "dos", "tres", "cuatro", "cinco", "seis", "siete",
+    "ocho", "nueve", "diez", "once", "doce", "quince", "veinte", "ambos", "ambas",
+    "par", "pares", "trio", "docena", "mitad", "todas", "todos",
+    # "TIENEN A LA VENTA …" es la forma más común de preguntar si vendes algo: 'venta'
+    # no forma parte del nombre y descoloca al matcher (provider 32, 2026-10-29:
+    # 'venta aceite oregano' devolvía 5 productos de otra cosa).
+    "venta", "ventas", "vende", "vendes", "vendia", "vendían",
+    # 'todo pediátrico' del final de una lista no es parte del nombre del último
+    # medicamento (encabezado real: "CEFIXIMA SUSP TODO PEDIATRICO"), y 'todo' por sí solo
+    # es lo que metía DESODORANTE DOVE en una consulta conversacional.
+    "todo", "toda",
+    # EL EQUIPO / EL PERSONAL: pedir el pase no nombra un producto ("transferir a un
+    # asesor" dejaba 'asesor' como término de búsqueda).
+    "asesor", "asesora", "supervisor", "encargado", "encargada", "staff",
+    # ADVERBIOS/CUANTIFICADORES del habla: 'gracias, muy amable' dejaba el término 'muy'
+    # y el matcher difuso lo apoyaba en cualquier cosa.
+    "muy", "tan", "bastante", "demasiado", "algo", "mucho", "mucha", "muchos", "muchas",
+    "poco", "poca", "pocos", "pocas", "tambien", "también", "solo", "solamente",
+    # FOTO/IMAGEN: pedir una foto no es pedir un producto. Buscar 'fotos' en el catálogo
+    # devolvía cualquier cosa (caso real provider 32: "Me puede enviar unas fotos" →
+    # "Actualmente no tenemos linternas"). Hay guard propio (`_pide_foto`).
+    "foto", "fotos", "fotografia", "fotografias", "imagen", "imagenes", "selfie",
+    "plaquita", "plaquitas", "tirita", "tiritas",
+    "aparato", "aparatos", "equipo", "maquina", "maquinita",
+    "estuche", "maletin", "cargador", "cable", "bateria", "baterias",
+    "adaptador", "funda", "repuesto", "repuestos",
+
+    # 'resumen' NO es un medicamento. En "dame el resumen de esto y le agregas 3 cajas
+    # de glymar" el troceador lo tomaba como un producto más y el cliente leía
+    # "⚠️ No disponibles en el catálogo: RESUMEN".
+    "resumen", "resumenes", "resúmenes",
+    # 'costo'/'porf' NO son medicamentos. Caso real (conv 2109, provider 19):
+    # "tiene disponible crema dental sensodyne y que costo porf" → el troceador partía ahí y
+    # cotizaba "COSTO PORF" con AMPICILINA 1GR (POR 1 AMPOLLA) y ANTILAX (POR 10 TABLETAS):
+    # 'porf' (por favor) casa con el "POR" de los nombres. Y 'costo' daba 0 productos, o sea
+    # tampoco es un medicamento. MEDIDO: 'costo' → 0; 'porf' → 2 (ambos por el "POR").
+    "porf", "porfa", "porfavor", "porfis", "favorcito",
+    "costo", "costos", "costar", "costaria", "costarían", "costaban",
+    # ENVASE NO ES EL MEDICAMENTO. "quiero una caja de eszoz" se convertía en el
+    # término 'caja eszoz' y el cliente leía
+    #     ⚠️ No disponibles en el catálogo: CAJA ESZOZ
+    # — el envase presentado como si fuera el nombre del fármaco. Caso real (conv 7,
+    # provider 05): "quiero una caja de eszoz, leprit, bumetin, evigax 125 mg, milax
+    # 120 gr, bargonil 10 gr". `_PALABRAS_FUNCIONALES` de tools.py YA tenía 'caja' y
+    # 'cajas'; esta lista es su gemela y no las tenía, así que el camino de
+    # `_extraer_termino_medicamento` (que mira ESTA) las dejaba pasar.
+    # Ojo: la cantidad y el envase se siguen leyendo del texto CRUDO en
+    # `_pedido_de_envase` (que no usa `_FILLER`), así que quitarlas aquí no pierde
+    # ni "3 cajas" ni el filtro de envase.
+    "caja", "cajas", "cajita", "cajitas", "blister", "blisters",
+    "frasco", "frascos", "pomo", "pomos", "paquete", "paquetes",
     "me", "le", "la", "de", "el", "los", "las", "para", "que", "con",
     "una", "un", "en", "y", "o", "a", "si", "no", "como", "cuanto", "es",
     "son", "tiene", "tienen", "hay", "está", "estan", "disponible",
     "disponibles", "precio", "cuesta", "cuestan", "venden", "necesito",
+    # Formas del verbo PODER y otras conjugaciones que faltaban: la lista tenía
+    # 'puede'/'pueden'/'podrias' pero NO 'puedes', así que encabezaba la respuesta.
+    # Caso real (provider 27): "Buenas tardes, puedes darme precio de las gotas
+    # oftalmicas Clarasol." → el título salía con el verbo delante.
+    "puedes", "podrian", "podríamos", "podriamos", "se podra", "se podría",
+    "tienes", "tiene", "tienen", "tengo", "quisieras", "quieres", "quiere",
+    "quisiera", "necesitas", "necesita", "buscas", "busca", "buscamos",
     "busco", "buscando", "buscar", "buscas", "quiero", "quisiera", "consigo",
     "pueden", "consigues", "conseguir", "tengo", "tambien", "algo", "otro",
     "otra", "mas", "más", "cual", "cuales", "donde", "cuando", "quien",
@@ -1706,7 +2904,67 @@ _FILLER = {
     "voy", "vas", "vamos", "compro", "comprar", "comprare", "deseo",
     "interesa", "interesada", "interesado", "olvidalo", "dejalo", "adios",
     "chao", "luego", "vemos", "bendiciones", "amable", "atentamente",
+    # Verbos de CONSULTA que el cliente escribe antes del medicamento y que no
+    # estaban: 'Ok me INDICA el precio del fulgran' → el término salía
+    # 'indica del fulgran' y el TÍTULO de la respuesta era "INDICA DEL FULGRAN",
+    # presentado al cliente como si fuera el nombre del producto (conv 2826).
+    # Son vocabulario del motivo, nunca parte de un nombre comercial: se midió
+    # contra el catálogo real del provider 27 y ninguna aparece en nombres.
+    "indica", "indico", "indique", "indicas", "indiquen", "indícame", "indicame",
+    "menciona", "mencioname", "mencione", "cotiza", "cotizame", "cotizacion",
+    "averigua", "averiguame", "averiguar", "consultar", "consulta", "consulto",
+    "sabes", "sabe", "dice", "decir", "decirme", "saberme", "confirmame",
+    # FORMAS VERBALES CON PRONOMBRE (enclítico). La lista tenía el infinitivo
+    # ('dar') y la forma imperativa ('dame') no, así que el verbo ENCABEZABA la
+    # respuesta: caso real (provider 27)
+    #     "Buenas tardes, puedes darme precio de las gotas oftalmicas Clarasol."
+    #     → título "DARME GOTAS OFTALMICAS CLARASOL"
+    # Medido contra el catálogo: ninguna de estas formas aparece dentro de un nombre
+    # de producto. OJO: 'da' NO se añade — aparece dentro de 'BOCADILLO DE GUAYABA'
+    # y el matcher del catálogo es SUBSTRING.
+    "darme", "darte", "darnos", "darme", "damelo", "damela", "damelos", "damelas",
+    "dame", "damele", "regalame", "regalamelo", "regalas", "regale", "manejas",
+    "maneja", "consigues", "consigue", "consigueme", "podrias", "podriame",
+    # 'dar' y sus formas: MEDIDO — no estaban en _FILLER, _FILLER_INICIAL ni
+    # _VERBOS_MEDICAMENTO, así que encabezaban el título del medicamento. Caso real (conv 2109,
+    # provider 19): "me puedes dar el precio del beprospem" →
+    #     _extraer_termino_medicamento = 'dar del beprospem'  → el cliente veía
+    #     "DAR DEL BEPROSPEM" sobre los productos BEPROSPEN. Sin 'dar' queda 'beprospem'.
+    # (La nota vieja del proyecto decía que 'dar' ya estaba filtrado; era falsa: solo estaba
+    # en _PALABRAS_FUNCIONALES, que usa otro guard y no limpia el título.)
+    "dar", "darme", "darte", "darnos", "darle", "denme", "den", "daria", "darias",
+    # VERBOS DE ENTREGA/RESPUESTA: el cliente que CIERRA dice "ya me diste el precio".
+    # Caso real (conv 2109, provider 19): "Ya me diste el precio, gracias" →
+    #     _extraer_termino_medicamento = 'diste'   ← ¡un verbo como término de búsqueda!
+    #     y el catálogo devolvió 1 producto por búsqueda DIFUSA; el agente inventó
+    #     "Asumí que buscas DISCOLAYTE" y le mostró COLAYTE SOBRE X 69,7 GR DISCOLAYTE.
+    # Sin estos verbos, el mensaje se queda sin término y NO se fuerza ninguna búsqueda.
+    # MEDIDO: ninguno aparece como token en un nombre de producto del catálogo.
+    "diste", "distes", "dio", "dieron", "entregaste", "entrego", "entregaron",
+    "mandaste", "mando", "mandaron", "enviaste", "envio", "enviaron",
+    "respondiste", "respondio", "contestaste", "contesto",
+    "indicaste", "indico", "dijiste", "dijo", "dijeron", "comentaste", "comento",
+    # FUTURO/CONDICIONAL con que el cliente PREGUNTA ('¿Será que tienen X?',
+    # '¿Podrá darme X?', '¿Habrá X?'). Caso real (conv 2287, provider 19):
+    #     'Será que tienen vitamina e  de vivas' → el término salía 'será vitamina vivas',
+    #     que da 0 resultados; sin el 'será' es 'vitamina vivas', que SÍ resuelve a
+    #     'VIT E 400 MG X 15 CAPS BLANDAS VIVAX' (el producto que pedía).
+    # Medido contra el catálogo real: NINGUNA de estas formas aparece como token en un nombre
+    # de producto, así que filtrarlas no borra ningún término legítimo.
+    "sera", "será", "seran", "serán", "seria", "sería", "serian", "serían",
+    "podra", "podrá", "podran", "podrán", "podria", "podría", "podrian", "podrían",
+    "habra", "habrá", "habran", "habrán", "tendra", "tendrá", "tendran", "tendrán",
+    "estara", "estará", "estaran", "estarán", "abran", "abrÁ", "abrá",
+    "quisiera", "querría", "quiza", "quizá", "quizas", "quizás", "acaso",
 }
+
+# Preposiciones y artículos que pueden QUEDAR AL PRINCIPIO del término cuando el cliente
+# escribe "el precio DEL fulgran": el recorte deja 'del fulgran'. Se quitan SOLO al
+# inicio — nunca en medio, porque 'del' aparece DENTRO de nombres reales del catálogo
+# ('JUGO DEL VALLE', 'MIOVIT VITAMINAS DEL COMPLEJO B'). Medido: 3 productos reales lo
+# contienen en medio y NINGUNO empieza por él, así que quitarlo al principio no puede
+# borrar el término de una búsqueda legítima.
+_FILLER_INICIAL = {"del", "de", "la", "el", "los", "las", "un", "una", "al"}
 
 # Unidades de medida / presentación: cuando el usuario responde con una
 # CANTIDAD (p. ej. "2 cajas", "3 unidades", "1 blíster"), NO está buscando un
@@ -1717,6 +2975,39 @@ _UNIDADES_MEDIDA = re.compile(
     r"comprimidos|comprimido|ampollas|ampolla|frasco|frascos|tubo|tubos|"
     r"unidades|piezas|pieza|pack|sobre|sobres|grageas|gragea|cápsulas|capsulas)\b",
     re.IGNORECASE,
+)
+
+
+def _opciones_no_encajan(
+    elecciones: list[tuple[int, int]] | None, opciones: list[dict[str, Any]] | None
+) -> bool:
+    """El cliente cita números de opción que NO existen en la lista actual.
+
+    Cuando pasa, el cliente está leyendo OTRA lista —una anterior, o la de su pantalla—
+    y resolver por número es puro azar: las opciones que caen dentro del rango se añaden
+    (a un producto equivocado) y las demás se descartan en silencio.
+
+    Caso real (conv 2109, provider 19, 2026-10-17 03:33):
+        cliente: "X 1 caja opción 6, x 3 opción 12, x 1 opción 16, x 1 opción 18,
+                  x 1 opción 23, x 1 opción 27"
+        agente : "He agregado al carrito: 1 caja de COLAYTE SOBRE X 69,7 GR DISCOLAYTE"
+    El cliente citaba la lista de 29 opciones que tenía delante; `last_options` guardaba
+    una de **7**. La opción 6 cabía en las dos, y esa casualidad metió un COLAYTE (de una
+    sesión del 9-oct) en el carrito. El cliente respondió "yo no pedí el colayte".
+
+    Ante la duda NO se añade nada: mejor pedirle que repita los números que meterle un
+    producto que no pidió.
+    """
+    if not elecciones:
+        return False
+    if not opciones:
+        return True
+    return max(op for _, op in elecciones) > len(opciones)
+
+
+MENSAJE_OPCIONES_NO_ENCAJAN = (
+    "⚠️ Ojo: esas opciones no coinciden con la última lista que te envié.\n\n"
+    "¿Me repites los números, o mejor me dices el nombre del medicamento y lo busco?"
 )
 
 
@@ -1762,6 +3053,43 @@ def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
     if not es_eleccion:
         return None
 
+    # ---- FORMA CON LA PALABRA "opción" ------------------------------------------
+    # En "<cantidad> caja(s) opción <M>" la cantidad va ANTES de la palabra y el número
+    # de opción DESPUÉS. El escaneo genérico de números de más abajo se come el primero
+    # como si fuera una opción: la cantidad hacía de opción Y se perdía la cantidad.
+    #
+    # Caso real (conv 2109, provider 19, 2026-10-17 03:33):
+    #     "X 1 caja opción 6, x 3 opción 12, x 1 opción 16, x 1 opción 18,
+    #      x 1 opción 23, x 1 opción 27"
+    #     antes → [(1,1), (1,6), (1,3), (1,12), (1,16), (1,18), (1,23), (1,27)]
+    #             ocho entradas donde el cliente escribió seis: la opción 1 es FANTASMA
+    #             ("1 caja") y la opción 12 iba con cantidad 3, no 1.
+    #     ahora → [(1,6), (3,12), (1,16), (1,18), (1,23), (1,27)]
+    if "opci" in t:
+        pares: list[tuple[int, int]] = []
+        for m_op in re.finditer(r"opci[oó]n\s+(\d{1,2})", t):
+            opcion = int(m_op.group(1))
+            cantidad = 1
+            # La cantidad es el número inmediatamente anterior ("x 3 opción 12" → 3).
+            ventana = t[max(0, m_op.start() - 14):m_op.start()]
+            m_cant_antes = re.search(
+                r"(\d{1,2})\s*(?:cajas?|unidades?)?\s*(?:de\s+la\s+|la\s+)?\s*$", ventana
+            )
+            if m_cant_antes:
+                v = int(m_cant_antes.group(1))
+                if 1 <= v <= 99:
+                    cantidad = v
+            pares.append((cantidad, opcion))
+            # "…opción 5 y 7": el 7 va con la MISMA cantidad. La 'y' tiene que ir pegada
+            # al número de opción para no comerse el arranque del bloque siguiente.
+            m_mas = re.match(r"\s*[,y]\s*(\d{1,2})\b", t[m_op.end():])
+            if m_mas:
+                v2 = int(m_mas.group(1))
+                if 1 <= v2 <= 99 and (cantidad, v2) not in pares:
+                    pares.append((cantidad, v2))
+        if pares:
+            return pares
+
     # CANTIDADES POR GRUPO: parsear bloques "N caja(s) de X,Y,Z" que pueden
     # repetirse unidos por "y", p.ej. "2 cajas de 1 y 1 caja de 3,4,5 y 7".
     # Se separa en grupos donde CADA grupo tiene su propia cantidad explícita.
@@ -1783,6 +3111,10 @@ def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
             cantidad = max(1, int(m_cant.group(1)))
         resto = grupo
         resto = re.sub(r"\d+\s*(?:caja|cajas|unidad|unidades)\s+de\b", " ", resto, count=1)
+        # Un número pegado a "caja(s)/unidad(es)" es una CANTIDAD, nunca una opción —
+        # aunque no lleve el "de" ("x 2 cajas 3" → cantidad 2, opción 3). Sin esto, la
+        # cantidad entra en la lista de opciones y se agrega un producto fantasma.
+        resto = re.sub(r"\b\d{1,2}\s*(?:cajas?|unidades?)\b", " ", resto)
         # Opciones: números de 1-2 dígitos en el resto.
         for n in re.findall(r"\b(\d{1,2})\b", resto):
             v = int(n)
@@ -1912,6 +3244,16 @@ _INTENTO_VER_RESUMEN = re.compile(
     re.IGNORECASE,
 )
 
+# Verbos de AGREGAR productos. Ver `_tambien_pide_agregar`.
+_RE_PIDE_AGREGAR = re.compile(
+    r"\b(agrega|agregas|agregar|agregame|agrégame|agregale|agrégale|agregalo|"
+    r"añade|añades|añadir|añademe|añademela|añádele|"
+    r"suma|sumas|sumale|súmale|sumame|sumamele|"
+    r"incluye|incluyes|incluir|incluyeme|"
+    r"ponme|pones|mete|meteme|adiciona|adicionar)\b",
+    re.IGNORECASE,
+)
+
 
 def _quiere_info_horario(texto: str) -> bool:
     """True si el cliente pregunta el HORARIO de la farmacia.
@@ -1952,6 +3294,31 @@ def _quiere_info_horario(texto: str) -> bool:
             r"a\s+qu[eé]\s+hora|me\s+pueden|decir|informaci[oó]n|cu[aá]l)", t))
     # Sin la palabra "horario"/"hora": solo cuenta si habla de abrir/cerrar.
     return abrir_cerrar
+
+
+def _tambien_pide_agregar(texto: str) -> bool:
+    """¿El cliente, ADEMÁS, está agregando productos al carrito?
+
+    Sirve para NO preguntar el método de entrega cuando el pedido aún está creciendo.
+    Preguntar "¿cómo prefieres recibirlo?" mientras el cliente todavía dicta productos
+    corta el pedido a la mitad y **se traga lo que pidió**.
+
+    Caso real (conv 2109, provider 19, 2026-10-17 03:37):
+        cliente: "Me puedes dar el resumen de esto y le agregas 3 cajas de glymar
+                  de 4 MG y 2 toallas securezza x 15"
+        agente : "Antes de cerrar tu pedido, ¿cómo prefieres recibirlo? 1️⃣ 2️⃣"
+    El cliente pedía tres cosas —el resumen, 3 GLYMAR y 2 SECUREZZA— y solo recibió el
+    menú de entrega. `_quiere_ver_resumen` veía la palabra "resumen" y el guard de la
+    rama 2 cerraba el turno ahí.
+
+    Se detectan los verbos de AGREGAR (agrega/agregas/agregame/añade/sumale/incluye/
+    ponme/mete...). Si el cliente sigue agregando, el turno va al LLM, que sí tiene las
+    tools del carrito; la pregunta de entrega llegará cuando el pedido se cierre de
+    verdad (un "LISTO" o un "dame el resumen" sin más).
+    """
+    if not texto:
+        return False
+    return bool(_RE_PIDE_AGREGAR.search(texto.strip().lower()))
 
 
 def _quiere_ver_resumen(texto: str, tiene_carrito: bool = False) -> bool:
@@ -2073,6 +3440,232 @@ def _pregunta_cierre_resumen(messages: list[dict[str, Any]]) -> bool:
     if not texto:
         return False
     return any(p in texto.lower() for p in _PREGUNTA_CIERRE_RESUMEN)
+
+
+# ------------------------------------------------------------- ENTREGA ---
+# Antes del Resumen del Pedido se pregunta CÓMO quiere recibirlo:
+#   1. Delivery          → se pide la dirección
+#   2. Retirar en Farmacia
+# El resumen final muestra el bloque MÉTODO DE ENTREGA con ese dato.
+
+# "1" suelto o la palabra delivery. El "1"/"2" solo cuenta si NUESTRA pregunta de
+# entrega está pendiente (lo garantiza delivery_pending), así que aquí basta con
+# reconocer las formas explícitas y los números.
+_DELIVERY_NUM = re.compile(r"\s*1\b")
+_PICKUP_NUM = re.compile(r"\s*2\b")
+
+_DELIVERY_PALABRAS = re.compile(
+    r"\b(delivery|delibery|deliberi|env[íi]o|enviar|enviarlo|mandar|mandarlo|"
+    r"a\s+domicilio|domicilio|a\s+mi\s+casa|traerlo|traelo|llevar|llevarlo|"
+    r"despacho|motorizado)\b",
+    re.IGNORECASE,
+)
+
+# Menú del MÉTODO DE ENTREGA y petición de la dirección. Mensajes DETERMINISTAS:
+# se envían tal cual (no pasan por el LLM) para que las opciones 1/2 sean siempre
+# las mismas y el cliente pueda responder con un número.
+MENSAJE_METODO_ENTREGA = (
+    "Antes de cerrar tu pedido, ¿cómo prefieres recibirlo?\n\n"
+    "1️⃣ Delivery (envío a tu dirección)\n"
+    "2️⃣ Retirar en Farmacia\n\n"
+    "Responde *1* o *2*."
+)
+
+MENSAJE_PEDIR_DIRECCION = (
+    "¡Perfecto! 🛵 Envíame la *dirección* donde quieres recibir el pedido "
+    "(calle, número, sector y una referencia si aplica)."
+)
+
+# El cliente pide hablar con una persona del negocio. La respuesta es DETERMINISTA:
+# reconoce la petición, confirma que YA se avisó al equipo y no promete contactos
+# personales (el agente no debe dar teléfonos de empleados). El tono es cálido: el
+# cliente que pide un humano suele estar frustrado o con prisa.
+MENSAJE_HANDOFF_HUMANO = (
+    "¡Claro que sí! Ya avisé al equipo de la farmacia para que te atienda una "
+    "persona directamente. 🙌\n\n"
+    "En breve se comunican contigo por este mismo chat. Si quieres adelantar algo, "
+    "déjame aquí tu consulta y se la paso tal cual."
+)
+
+# ------------------------------------------------------------- HANDOFF ---
+# Detección DETERMINISTA de "quiero hablar con un humano". El prompt ya pide llamar
+# la tool `handoff` "SIEMPRE, a la primera", pero depender del modelo deja el caso al
+# azar: medido en producción (conv 2720, 07-oct), el cliente escribió "Pasame el humano"
+# y el agente respondió "no puedo pasarte el contacto de ninguna persona directamente"
+# SIN hacer el handoff.
+_HANDOFF_PALABRAS_PERSONA = (
+    "humano", "humana", "persona", "personas", "empleado", "empleada",
+    "encargado", "encargada", "gerente", "supervisor", "asesor", "vendedor",
+    "alguien", "dueño", "dueña",
+    # 'el equipo' es el personal del negocio. Caso real (provider 19, 2026-10-29):
+    # "Puedes por favor pasarlo al equipo" no activaba el guard y el agente buscó
+    # 'pasarlo' en el catálogo ("⚠️ No tengo PASARLO").
+    "equipo", "staff", "farmacéutico", "farmaceutico", "químico", "quimico",
+)
+_HANDOFF_VERBOS = (
+    "pasa", "pasame", "pásame", "pasen", "pasenme", "pasarme", "paselo", "pasamelo",
+    "paseme", "páseme", "pasemelo", "quiero", "quisiera", "necesito", "puedo",
+    "deseo", "prefiero", "hablar", "comunicar", "comunicarme", "chatear",
+    "atiendanme", "atiendeme", "tratar",
+    # CON PRONOMBRE: 'pasarlo/pasarla/pasarlos al equipo' es la forma más natural de
+    # pedir el pase y no estaba.
+    "pasarlo", "pasarla", "pasarlos", "pasarlas", "pasarselo", "pasárselo", "pasarle",
+    "transferir", "transferirlo", "derivar", "derivarlo", "escalar", "escalarlo",
+    "atienda", "atender", "atiéndelo", "atiendelo",
+)
+# RAÍCES de los verbos de pase: cubren las formas con pronombre que no se pueden enumerar
+# ('derívalo', 'transferirlo', 'escalalo', 'atendedme', 'pásemelo').
+_HANDOFF_RAICES = (
+    "pas", "transfer", "deriv", "escal", "atien", "atend", "comunic", "hablar", "chate",
+    "quier", "necesit", "pued", "dese", "prefier", "tratar", "contact",
+)
+_PIDE_HUMANO = re.compile(
+    r"(\bpas(?:a|ame|en|arme|elo|enme|eme|ame(?:lo)?)\b[^.]{0,25}\b(?:human|person|"
+    r"emplead|alguien|encargad|due[ñn]|gerente|supervisor|vendedor|asesor|agente)|"
+    r"\b(?:quiero|quisiera|necesito|puedo|deseo|prefiero)\b[^.]{0,25}\b"
+    r"(?:hablar|comunicar(?:me)?|chatear|tratar|atend(?:er|erme))\b[^.]{0,20}"
+    r"\b(?:human|person|emplead|alguien|encargad|gerente|supervisor|real)|"
+    r"\b(?:hablar|comunicar(?:me)?)\s+con\s+(?:un|una|el|la)\s+"
+    r"(?:human|person|emplead|encargad|due[ñn]|gerente|supervisor)|"
+    r"\b(?:atien(?:de|dan)me|atiendanme)\s+(?:un|una)\s+(?:human|person)|"
+    r"\b(?:human|persona)\s+real\b|"
+    r"\bhay\s+(?:alguien|una\s+persona)\s+(?:ah[íi]|disponible)\b|"
+    r"\b(?:no\s+)?quiero\s+(?:un|una)\s+(?:human|person)|"
+    r"\bpasame\s+con\s+(?:alguien|el\s+encargad|el\s+due[ñn])|"
+    r"\bpas(?:a|ame|arlo|arla|arlos|arlas|en|enme|eme|elo)\b[^.]{0,30}"
+    r"\b(?:equipo|staff|personal|farmac[ée]utic\w*|auxiliar)\b)",
+    re.IGNORECASE,
+)
+
+
+def _pide_hablar_con_humano(texto: str) -> bool:
+    """¿El cliente pide EXPLÍCITAMENTE hablar con una persona del negocio?
+
+    Se aplica sobre el texto del cliente SIN marcadores del sistema, para que las
+    instrucciones internas ("pasa al lead a un humano si…") no lo disparen.
+
+    Dos capas: un patrón de frases completas y una red de seguridad por palabras
+    (verbo de petición + palabra de persona) que cubre los typos del cliente.
+    """
+    if not texto:
+        return False
+    t = texto.strip().lower()
+    if _PIDE_HUMANO.search(t):
+        return True
+    palabras = re.findall(r"[a-záéíóúüñ]+", t)
+    if any(p in t for p in _HANDOFF_PALABRAS_PERSONA) and (
+        any(v in t for v in _HANDOFF_VERBOS)
+        or any(w.startswith(_HANDOFF_RAICES) for w in palabras)
+    ):
+        # "te paso con un humano" / "voy a pasarte con alguien" es el AGENTE hablando
+        # (o el historial citado), no una petición del cliente: NO cuenta.
+        if re.search(r"\b(te|le)\s+paso\b|\bvoy\s+a\s+pasarte\b", t):
+            return False
+        return True
+    return False
+_PICKUP_PALABRAS = re.compile(
+    r"\b(retirar|retiro|reto|buscar(?:lo)?|voy\s+a\s+buscar|paso\s+a\s+buscar|"
+    r"paso\s+por|lo\s+recojo|recojo|recoger|en\s+la\s+farmacia|en\s+tienda|"
+    r"presencial|yo\s+lo\s+busco)\b",
+    re.IGNORECASE,
+)
+
+
+def _eleccion_entrega(texto: str) -> str | None:
+    """¿El cliente eligió delivery o retiro? None si no se reconoce.
+
+    Se usa SOLO cuando el agente acaba de preguntar por el método de entrega
+    (`delivery_pending == 'method'`), así que un "1"/"2" suelto es la respuesta a
+    ESA pregunta. Las palabras explícitas también se aceptan por si el cliente
+    contesta "quiero delivery" o "lo retiro yo".
+    """
+    if not texto:
+        return None
+    t = texto.strip().lower()
+    # Número suelto (la respuesta más común al menú 1/2).
+    if re.fullmatch(r"\s*1\s*[.)]?\s*", t):
+        return "delivery"
+    if re.fullmatch(r"\s*2\s*[.)]?\s*", t):
+        return "pickup"
+    # Palabras explícitas. El retiro gana si menciona ambas ("lo retiro, no envío").
+    if _PICKUP_PALABRAS.search(t):
+        return "pickup"
+    if _DELIVERY_PALABRAS.search(t):
+        return "delivery"
+    return None
+
+
+def _pide_el_total(texto: str) -> bool:
+    """¿El cliente está pidiendo el TOTAL / el resumen del pedido?
+
+    Se evalúa cuando el agente ACABA de preguntar cómo quiere recibir el pedido
+    (`delivery_pending == 'method'`) y el cliente, en vez de contestar "1"/"2", pregunta
+    cuánto es. Hay que contestarle lo que pide, no repetirle el menú.
+
+    Caso real (conv 1003, provider 19, 2026-10-16):
+        22:19  cliente: "Cuánto sería el total."
+        22:19  agente : "Antes de cerrar tu pedido, ¿cómo prefieres recibirlo? 1 / 2"
+        22:20  cliente: "Cuánto sería el monto total de los 3 productos ?"
+               agente : (sin respuesta — el menú se repetía)
+    El cliente preguntó el total DOS veces y nunca lo vio.
+
+    NO se usa para decidir si mostrar el resumen: eso ya lo hace `_quiere_ver_resumen`.
+    Esto es solo para reconocer que el cliente está INSISTIENDO con el total mientras hay
+    una pregunta de entrega en vuelo. Por eso es deliberadamente amplio: en ese contexto,
+    'total' o 'monto' sin más ya significan "dame la cuenta".
+    """
+    if not texto:
+        return False
+    t = texto.strip().lower()
+    if _INTENTO_VER_RESUMEN.search(t):
+        return True
+    if re.search(r"\b(total|monto|subtotal|cuenta)\b", t):
+        return True
+    # "cuánto es/sale/vale/sería" sin la palabra total ("¿y cuánto es?", "¿cuánto sale?").
+    # Exige el verbo: un 'cuánto' suelto puede ser una pregunta de dosis ("cuánto de X").
+    return bool(re.search(
+        r"\bcu[aá]nt[oa]s?\s+(?:es|son|sale|salen|vale|valen|ser[íi]a|serian|"
+        r"ser[íi]an|me\s+da|da|queda|quedan|cuesta|cuestan)\b", t))
+
+
+def _parece_direccion(texto: str) -> bool:
+    """¿El texto parece una dirección de entrega?
+
+    Se evalúa cuando el agente pidió la dirección (`delivery_pending=='address'`),
+    así que el mensaje es la respuesta a ESA pregunta. Se exige una señal mínima de
+    dirección para no guardar una consulta de medicamento como si fuera dirección.
+    """
+    if not texto:
+        return False
+    t = texto.strip()
+    if len(t) < 5 or len(t) > 300:
+        return False
+    # Señales típicas de dirección en Venezuela.
+    señales = re.compile(
+        r"(\b(av(?:e|enida)?|calle|callej[oó]n|carrera|carera|urbanizaci[oó]n|urb|"
+        r"sector|barrio|manzana|mz|parcela|pc|residencias|res\.|edificio|edif|"
+        r"torre|apto|apartamento|aparta|piso|pto|casa|cas\.|quinta|qta|villa|"
+        r"vereda|pasaje|pje|transversal|diagonal|bloque|nro|n[uú]mero|#)\b"
+        r"|\d{1,4})",
+        re.IGNORECASE,
+    )
+    return bool(señales.search(t))
+
+
+def _hay_pregunta_de_entrega(runtime: Any) -> bool:
+    """¿El agente está esperando una respuesta del PASO DE ENTREGA?
+
+    Una sola definición para los DOS sitios que resuelven números contra
+    `last_options` (el pre-check antes del LLM y el backstop de la rama sin-tools).
+    Antes la guarda estaba copiada en ambos, con el riesgo de que uno divergiera.
+
+    Mientras haya una pregunta de entrega en vuelo, un "1"/"2" suelto contesta ESA
+    pregunta y NUNCA elige una opción de la lista de medicamentos. Sin esto:
+    "2" (LA SANTE), luego "1" (delivery) → el "1" se resolvía como la opción 1 del
+    catálogo y se agregaba otro medicamento que el cliente no pidió.
+    """
+    pendiente = getattr(getattr(runtime, "_conv", None), "delivery_pending", "") or ""
+    return bool(pendiente or getattr(runtime, "delivery_pendiente", ""))
 
 
 def _agente_pidio_precisar(messages: list[dict[str, Any]]) -> bool:
@@ -2248,6 +3841,40 @@ async def _fallback_farmacia(
     return lista + "\n\n" + MENSAJE_SUGERIDO_CARRITO
 
 
+def _respuesta_envase_agotado(
+    termino: str,
+    env_pedido: str,
+    disponibles: list[str],
+    productos: list[dict[str, Any]],
+) -> str:
+    """Respuesta determinista cuando el cliente pide un TAMAÑO DE CAJA que no hay.
+
+    POR QUÉ EXISTE: el cliente preguntó "No tienes de 10 pastillas?" y el agente
+    re-listó los envases de 30 — los MISMOS que ya había mostrado. El cliente se fue
+    creyendo que sí había respuesta a su pregunta, cuando la había y era "no". Re-listar
+    sin decir el NO es no responder: el cliente no puede distinguir "no tengo" de "no me
+    entendió".
+
+    Se responde en dos partes: (1) el NO explícito con los tamaños que SÍ hay — así el
+    cliente sabe con precisión qué pedir; (2) la lista de lo disponible, para que pueda
+    elegir sin volver a preguntar.
+    """
+    nombre = termino.strip().upper()
+    if disponibles:
+        tam = ", ".join(f"{n} unidades" for n in disponibles)
+        negativo = (
+            f"No tengo {nombre} en envase de {env_pedido} unidades. "
+            f"Lo tengo en: {tam}."
+        )
+    else:
+        negativo = f"No tengo {nombre} en envase de {env_pedido} unidades."
+    partes = [negativo]
+    if productos:
+        partes.append(_formatear_lista_productos(productos, termino))
+        partes.append(MENSAJE_SUGERIDO_CARRITO)
+    return "\n\n".join(partes)
+
+
 def _extraer_refinamiento(texto: str) -> str:
     """Extrae SOLO el refinamiento de presentación del texto: el número+unidad
     de dosis o la forma ('10 mg', '30 tabletas', 'gotas', 'ampolla').
@@ -2275,6 +3902,12 @@ def _extraer_refinamiento(texto: str) -> str:
     if not texto:
         return ""
     t = texto.strip().lower()
+    # ORDEN DE LOS CAMINOS: primero el ENVASE ('de 10 pastillas' → '10'), porque si
+    # cayera al camino de dosis, la forma se traduciría a 'mg' y buscaríamos la dosis
+    # '10 mg' (inexistente) en vez del envase de 10 unidades. Ver `_pedido_de_envase`.
+    env = _pedido_de_envase(t)
+    if env:
+        return env
     # Número + unidad explícita (la forma más fiable, en cualquier orden).
     # Las FORMAS líquidas (jarabe, gotas, ampolla...) entran aquí para que se
     # traduzcan a ml: si se dejan fuera, 'jarabe 120' cae al número suelto y se
@@ -2352,6 +3985,204 @@ _UNIDAD_DE_FORMA = {
 }
 
 
+# Formas CONTABLES de presentación: agrupan unidades dentro de una caja. El número que
+# las acompaña es el TAMAÑO del envase ("10 pastillas" = caja de 10 unidades), NO una
+# dosis. Deliberadamente NO incluye 'unidades', 'blisters', 'sobres', 'frascos': esas
+# palabras acompañan una CANTIDAD DE COMPRA ("quiero 3 unidades"), no una presentación.
+_FORMAS_CONTABLES = (
+    "pastillas", "pastilla", "tabletas", "tableta", "tabs", "tab",
+    "capsulas", "cápsulas", "caps", "cap", "comprimidos", "comprimido",
+    "grageas", "gragea",
+)
+
+# Tamaño de envase: 1-2 cifras (4..99: 7, 10, 14, 20, 28, 30, 60). El mismo umbral que ya
+# usa el camino de la dosis suelta: 3-4 cifras es una DOSIS plausible (160, 500, 650), no
+# un envase. Se empieza en 4 para no confundir una cantidad de compra ('2 pastillas').
+_RE_ENVASE_NUM_FORMA = re.compile(
+    rf"\b([4-9]|[1-9]\d)\s*(?:{'|'.join(_FORMAS_CONTABLES)})\b"
+)
+_RE_ENVASE_FORMA_NUM = re.compile(
+    rf"\b(?:{'|'.join(_FORMAS_CONTABLES)})\s*([4-9]|[1-9]\d)\b"
+)
+# Cantidad de COMPRA: no es un tamaño de envase, la resuelve el carrito.
+_RE_CANTIDAD_COMPRA = re.compile(r"\b\d+\s*(?:cajas?|unidades?|frascos?|paquetes?|blisters?)\b")
+
+# CANTIDAD QUE EL CLIENTE PIDE AL AGREGAR: "le agregas 3 cajas de glymar", "2 toallas
+# securezza". Va ANCLADO AL PRINCIPIO de la línea para no confundirlo con la dosis ni con
+# el envase: '3 cajas glymar 4 mg' → 3, pero 'glimepiride 4 mg 30 tab' → nada.
+# (Es un regex PROPIO, no `_RE_CANTIDAD_COMPRA`: aquel decide si un número es envase y
+# añadirle 'toallas' cambiaría ese juicio.)
+_RE_CANTIDAD_PEDIDA = re.compile(
+    r"^\s*(\d{1,2})\s*"
+    r"(?:cajas?|unidades?|frascos?|paquetes?|blisters?|toallas?|pomos?|tubos?|"
+    r"sobres?|rollos?|cajitas?)\b",
+    re.IGNORECASE,
+)
+
+
+def _cantidad_pedida(texto: str) -> int:
+    """Cuántas unidades pide el cliente en esta línea ('3 cajas de glymar' → 3).
+
+    Devuelve 0 si no hay una cantidad explícita. Sin cantidad explícita NO se agrega
+    nada: el agente ofrecería el producto y esperaría la respuesta, que es lo seguro.
+    """
+    m = _RE_CANTIDAD_PEDIDA.match(texto or "")
+    if not m:
+        return 0
+    try:
+        n = int(m.group(1))
+    except ValueError:
+        return 0
+    return n if 1 <= n <= 99 else 0
+
+
+# El "X N" del título del producto: 'BRASARTAN CTDN 80MG/12.5X10 FARMA' → '10'.
+#
+# La 'x' tiene que ser un token SUELTO. Antes la regex no miraba lo que había a su
+# izquierda, así que la 'x' final del nombre del fármaco se tomaba como separador y
+# la DOSIS pasaba a ser tamaño de envase: en
+#     "evigax 125 mg, ... milax 120 gr"
+# `_envase_de_nombre('evigax 125 mg')` devolvía '125' y 'milax 120 gr' devolvía '120',
+# y el cliente leía
+#     ⚠️ No tengo envase de 125 unidades. Lo tengo en: 10 unidades, 20 unidades.
+# sobre un medicamento de 125 mg. Caso real (conv 7, provider 05).
+_RE_X_ENVASE = re.compile(r"x\s*0*(\d{1,3})\b")
+
+# Unidades que, justo ANTES de la 'x', indican forma compacta de envase:
+# 'DOL PLUS TAB 650MGX10' → 10 cajas. Sin esto, la 'x' pegada a una letra siempre
+# se descartaría y se perderían los envases escritos sin espacio.
+_RE_UNIDAD_ANTES_DE_X = re.compile(r"(?:mg|mgs|gr|grs|g|kg|ml|cc|mcg|ug|ui)$")
+
+# Unidades que convierten el número en DOSIS o peso, nunca en envase:
+# 'MILAX POLVO X 360 GRAMOS' o 'EVIGAX X 120 GR' no piden 360 ni 120 cajas.
+_RE_UNIDAD_DOSIS_TRAS_NUM = re.compile(
+    r"^\s*(?:mg|mgs|gr|grs|g|kg|ml|cc|mcg|ug|ui|gramos?|mililitros?|miligramos?)\b"
+)
+
+
+def _pedido_de_envase(texto: str) -> str:
+    """Extrae el TAMAÑO DE ENVASE que pide el cliente: 'de 10 pastillas' → '10'.
+
+    POR QUÉ ES DISTINTO DE UNA DOSIS: son dos números con la misma forma pero
+    significados opuestos. '650 tabletas' / 'Tabletas 650' es una DOSIS (650 mg), pero
+    '10 pastillas' / 'de 10 tabletas' es CUÁNTAS unidades trae la caja. El agente
+    traducía ambos con `_UNIDAD_DE_FORMA` a 'mg', así que 'de 10 pastillas' se buscaba
+    como la dosis '10 mg' — que no existe — y el catálogo devolvía los envases de 30
+    como si fueran la respuesta (caso real BRASARTAN, conv 2714).
+
+    Desambigua por el RANGO, que es lo que ya hace el resto del módulo: una dosis tiene
+    3-4 cifras y un envase 1-2. Devuelve '' si no hay un pedido de envase claro.
+    """
+    if not texto:
+        return ""
+    t = texto.strip().lower()
+    # "quiero 3 unidades" es una CANTIDAD DE COMPRA, no la presentación.
+    if _RE_CANTIDAD_COMPRA.search(t):
+        return ""
+    m = _RE_ENVASE_NUM_FORMA.search(t) or _RE_ENVASE_FORMA_NUM.search(t)
+    if not m:
+        return ""
+    return m.group(1).lstrip("0") or m.group(1)
+
+
+def _envase_de_nombre(nombre: object) -> str:
+    """El tamaño de envase del título de un producto: '... X 30 CAP' → '30'.
+
+    Dos trampas, las dos medidas en el caso conv 7 (provider 05):
+
+    - La 'x' puede ser la ÚLTIMA LETRA del nombre, no un separador: en
+      'evigax 125 mg' y 'milax 120 gr' la dosis (125, 120) se leía como envase y el
+      cliente recibía "No tengo envase de 125 unidades". Se descarta la 'x' que va
+      pegada a una letra, salvo forma compacta tras una unidad ('650MGX10' → 10).
+    - Si el número lleva unidad de peso/volumen no es un envase: 'MILAX POLVO X 360
+      GRAMOS' son gramos, no 360 cajas.
+    """
+    texto = str(nombre or "").lower()
+    for m in _RE_X_ENVASE.finditer(texto):
+        antes = texto[: m.start()]
+        if antes and antes[-1].isalpha() and not _RE_UNIDAD_ANTES_DE_X.search(antes):
+            continue
+        if _RE_UNIDAD_DOSIS_TRAS_NUM.match(texto[m.end():]):
+            continue
+        return m.group(1).lstrip("0") or m.group(1)
+    return ""
+
+
+def _termino_sin_envase(termino: str, env: str) -> str:
+    """Quita del término el número de ENVASE que un refinamiento anterior le pegó.
+
+    POR QUÉ: `last_term` persiste el término de la búsqueda anterior, y el backstop de
+    refinamiento lo COMPONE ('brasartan' + '10' → 'brasartan 80 mg 10'). Si el guard
+    busca con ese término contaminado, el número de envase va camino del catálogo y puede
+    devolver 0 productos — y entonces la respuesta se quedaría sin la parte más útil: en
+    qué tamaños SÍ lo tenemos.
+
+    Solo se quita el número si es EXACTAMENTE el envase pedido y va SUELTO al final (sin
+    unidad): 'brasartan 80 mg 10' → 'brasartan 80 mg'. La dosis NO se toca: en
+    'acetaminofen 650 mg' el 650 va con unidad y es lo que identifica el producto.
+    """
+    if not termino or not env:
+        return termino
+    limpio = re.sub(rf"\s+0*{re.escape(env)}\s*$", "", termino.strip())
+    return limpio or termino
+
+
+def _trae_medicamento_propio(user_text: str, last_term: str) -> bool:
+    """True si el mensaje del cliente trae un MEDICAMENTO PROPIO (no solo una forma).
+
+    POR QUÉ EXISTE: el backstop de refinamiento compone `term = last_term + refinamiento`
+    para responder a "¿qué miligramo necesitas?". Eso es correcto cuando el cliente solo
+    precisa la presentación ("de 20 mg", "tabletas 650", "el de calox"). Pero si el mensaje
+    trae un fármaco NUEVO, es una CONSULTA NUEVA y usar el término viejo devuelve el producto
+    equivocado.
+
+    Caso real (conv 2287, provider 19):
+        last_term = 'vivas'   (del turno anterior, donde el título fue 'VIVAS')
+        cliente   = "Precio de airfen gotas ped"
+        compuesto = 'vivas' + 'gotas' = 'VIVAS GOTAS'  → 5 productos VIVAX
+    El cliente pedía AIRFEN (2 productos en el catálogo), que estaba en su propio mensaje.
+
+    CÓMO: se extrae el término del mensaje, se le quitan las FORMAS de presentación y las
+    palabras que YA están en `last_term`; si queda alguna palabra con cuerpo de fármaco, es
+    un medicamento nuevo.
+    """
+    if not user_text:
+        return False
+    propio = _extraer_termino_medicamento(user_text) or ""
+    if not propio.strip():
+        return False
+    # Palabras del mensaje que NO aportan un fármaco nuevo.
+    # OJO: aquí van TODAS las formas y TODOS los tamaños de envase, porque el cliente que
+    # solo precisa la presentación ("de 10 pastillas", "jarabe 120") está REFINANDO, no
+    # consultando. Cobertura medida con el caso real de BRASARTAN (conv 2714): si 'pastillas'
+    # no estuviera aquí, "No tienes de 10 pastillas?" quedaría bloqueado y el cliente con
+    # envase de 30 volvería a recibir el de 30.
+    formas = {
+        # formas farmacéuticas
+        "gotas", "jarabe", "jbe", "suspension", "susp", "crema", "gel", "spray",
+        "tabletas", "tableta", "tab", "tabs", "comprimidos", "comprimido", "pastillas",
+        "pastilla", "capsulas", "capsula", "cap", "caps", "cápsulas", "grageas", "perlas",
+        "ampolla", "ampollas", "inyectable", "supositorio", "supositorios", "solucion",
+        "pomada", "unguento", "sobres", "sobre", "polvo", "ovulos", "ovulo", "parche",
+        "locion", "shampoo", "enema", "jalea", "colirio", "gotero", "spray nasal",
+        # unidades de medida
+        "mg", "ml", "mcg", "gr", "gramos", "gramo", "unidades", "unidad", "cajas",
+        "caja", "tabletas.", "cc", "ui", "meq", "pct", "por",
+        # audiencia / presentación comercial
+        "pediatrica", "pediatrico", "pediatricas", "pediatricos", "ped", "pedi",
+        "adulto", "adulta", "adultos", "adultas", "junior", "infantil", "nino", "nina",
+        "forte", "plus", "duo", "retard", "grageas",
+        # palabras funcionales
+        "de", "del", "la", "el", "los", "las", "x", "para", "con", "sin",
+    }
+    previas = set(re.findall(r"[a-záéíóúüñ0-9]+", _normalizar_tildes((last_term or "").lower())))
+    nuevas = [
+        w for w in re.findall(r"[a-záéíóúüñ]{4,}", _normalizar_tildes(propio.lower()))
+        if w not in formas and w not in previas
+    ]
+    return bool(nuevas)
+
+
 def _es_refinamiento_presentacion(texto: str) -> bool:
     """True si el texto es un refinamiento de presentación ('30 mg', '50 mg',
     'gotas', 'jarabe', 'Tabletas 650') más que una nueva búsqueda de medicamento.
@@ -2374,6 +4205,10 @@ def _es_refinamiento_presentacion(texto: str) -> bool:
         r"\b(mg|ml|mcg|gotas|tabletas|tab|comprimidos|cápsulas|capsulas|cap)\s*\d+\b",
         t,
     ):
+        return True
+    # PEDIDO DE ENVASE ('de 10 pastillas', 'tabletas 20'): también es precisar la
+    # presentación, aunque el número sea un tamaño de caja y no una dosis.
+    if _pedido_de_envase(t):
         return True
     # Número de dosis suelto ('de 650', 'las de 650'): respuesta a "¿qué miligramo
     # necesitas?" sin repetir la unidad.
@@ -2528,6 +4363,263 @@ def _lead_esta_cerrando(texto: str | None) -> bool:
     if not texto:
         return False
     return bool(_es_negativa_o_despedida(texto) or _CIERRE_DEL_LEAD.search(texto))
+
+
+# ── ANTI-REPETICIÓN DEL TEXTO FINAL ────────────────────────────────────────────────
+# Dos frases que el modelo clava iguales turno tras turno y que el cliente lee como que no
+# le están escuchando:
+#
+#   "¿Tienes el nombre exacto que está en la caja? O si prefieres, ¿busco otra presentación
+#    o medicamento?"     ← se repite aunque ya se dijo que no hay nada
+#   "La farmacia X está en … y trabaja 24 horas."   ← se repite aunque pregunten el TELÉFONO
+#
+# Caso real (provider 32, 2026-10-28 20:39-20:41), ver el docstring del módulo de la sesión.
+_RE_PIDE_NOMBRE_CAJA = re.compile(
+    r"(nombre\s+exacto|nombre\s+que\s+(?:est[áa]|aparece|dice|tiene)\s+en\s+la\s+caja|"
+    r"otra\s+presentaci[oó]n\s+o\s+medicamento|busco\s+otra\s+presentaci[oó]n)",
+    re.IGNORECASE,
+)
+_RE_DIRECCION_HORARIO = re.compile(
+    r"la\s+farmacia[^.\n]{0,90}?(?:est[áa]|queda|se\s+encuentra|atiende)\b[^.\n]{0,140}?"
+    r"(?:trabaja|atiende|abre|cierra|24\s*horas)",
+    re.IGNORECASE,
+)
+_RE_CLIENTE_UBICACION = re.compile(
+    r"\b(d[oó]nde|ubicaci[oó]n|direcci[oó]n|horario|a\s+qu[eé]\s+hora|abren|cierran|"
+    r"24\s*horas|queda|sucursal|local)\b",
+    re.IGNORECASE,
+)
+_RE_CLIENTE_TELEFONO = re.compile(
+    # 'tel[eé]fon\w*' cubre teléfono Y telefónico ("el número telefónico", como escribió el
+    # cliente del caso real: sin esto el fallback no reconocía la pregunta).
+    r"\b(tel[eé]fon\w*|n[uú]mero\s+(?:de\s+|del\s+)?(?:contacto|tel[eé]fon\w*|la\s+farmacia)|"
+    r"contactarlos?|llamarlos?|whatsapp\s+de\s+la\s+farmacia)\b",
+    re.IGNORECASE,
+)
+
+FALLBACK_TELEFONO = (
+    "No manejo el teléfono de la farmacia desde aquí. 🙏 Si quieres, te paso con un humano."
+)
+FALLBACK_PENDIENTE = "Quedo pendiente. ¿Te ayudo con algo más?"
+
+
+def _quitar_frases(texto: str, patron: re.Pattern[str]) -> str:
+    """Quita las frases (separadas por . ! ? o salto) que casan con el patrón."""
+    trozos = re.split(r"(?<=[.!?])\s+|\n{2,}", texto)
+    quedan = [x for x in trozos if x and not patron.search(x)]
+    return "\n\n".join(x.strip() for x in quedan if x.strip()).strip()
+
+
+def _texto_del_bot(history: list[Any], cuantos: int = 2) -> str:
+    """Los últimos mensajes del BOT del historial, unidos."""
+    previos = [
+        str(m.content or "") for m in history
+        if getattr(m, "role", "") == "assistant" and (m.content or "").strip()
+    ]
+    return "\n\n".join(previos[-cuantos:])
+
+
+_RE_AVISO_DOSIS_NEGADA = re.compile(
+    r"no\s+tengo\s+de\s+(\d+(?:[.,]\d+)?\s*(?:mg|mcg|g|ml|ui))", re.IGNORECASE
+)
+_RE_LINEA_DE_LISTA = re.compile(r"💊|\$|\bBs\b|^(?:👉|🛒|✅|⚠️|Ejemplo)", re.IGNORECASE)
+
+
+def _grupo_ya_en_carrito(prods: list[dict[str, Any]], runtime: Any) -> bool:
+    """¿Alguno de estos productos lo agregó el backstop por elección de opción?"""
+    skus = getattr(runtime, "backstop_added_skus", None)
+    if not skus:
+        return False
+    for p in prods or []:
+        sku = str(p.get("productId") or p.get("producto") or "")
+        if sku and sku in skus:
+            return True
+    return False
+
+
+def _con_confirmacion_carrito(texto: str, runtime: Any) -> str:
+    """Antepone lo que el backstop agregó al carrito si la respuesta no lo dice.
+
+    El cliente pidió DOS cosas ("precio de la macrodantina" + "quiero la opción 9") y la
+    respuesta solo traía la lista de precios: el producto se agregó en silencio.
+    """
+    confs = list(getattr(runtime, "cart_confirmaciones", None) or [])
+    if not confs:
+        return texto
+    # OJO con la guarda: el cierre canónico dice "👉 Para agregar al carrito…", así que
+    # buscar 'carrito' + 'agreg' daba positivo SIEMPRE y la confirmación nunca se ponía.
+    # OJO también con el ✅ suelto: el cierre canónico dice "✅ Cuando termines, escribe
+    # LISTO…", así que un ✅ cualquiera tampoco vale como confirmación.
+    if re.search(
+        r"(?i)(?:✅\s*(?:agregad|listo,?\s*agreg)|he\s+agregado|agregu[eé]\s+al|"
+        r"agregad[oa]s?\s+(?:al?\s+)?(?:carrito|pedido)|"
+        r"(?:carrito|pedido)\s+(?:actualizado|con))",
+        texto or "",
+    ):
+        return texto
+    if len(confs) == 1:
+        cabecera = "✅ Agregado al carrito: " + confs[0].lstrip("• ")
+    else:
+        cabecera = "✅ Agregado al carrito:\n" + "\n".join(confs)
+    logger.info("confirmación de carrito antepuesta (%d)", len(confs))
+    return cabecera + "\n\n" + (texto or "")
+
+
+def _titulo_sin_dosis_negada(texto: str) -> str:
+    """Quita del ENCABEZADO la concentración que el propio mensaje acaba de negar.
+
+    El aviso y el título pueden venir de caminos distintos (tool → backstop, o el LLM
+    copiando el formato), así que la corrección se hace sobre el TEXTO FINAL: si el mensaje
+    dice "No tengo de 20 mg" y su primera línea de encabezado es "RIVAROXABAN 20 MG", se
+    queda en "RIVAROXABAN".
+
+    Caso real (provider 32, 2026-10-29, foto del RIVAROXABAN 20 mg DISTRILAB):
+        RIVAROXABAN 20 MG
+        ⚠️ No tengo de 20 mg. Lo tengo en: 15 mg.
+    """
+    m = _RE_AVISO_DOSIS_NEGADA.search(texto or "")
+    if not m:
+        # CASO 2: sin aviso previo, pero el encabezado lleva una concentración que NINGÚN
+        # producto de la lista tiene. Caso real (provider 32, 2026-10-29): el LLM tituló
+        # "RIVAROXABAN 20 MG" sobre dos presentaciones de 15 mg, sin avisar de nada.
+        lineas_txt = (texto or "").splitlines()
+        # El texto de los PRODUCTOS son las líneas de la lista (💊 / precio). Todo lo demás
+        # es encabezado o prosa.
+        productos = " ".join(
+            ln for ln in lineas_txt if _RE_LINEA_DE_LISTA.search(ln.strip())
+        ).lower().replace(" ", "")
+        if not productos:
+            return texto
+        for i, ln in enumerate(lineas_txt):
+            s = ln.strip()
+            if not s or _RE_LINEA_DE_LISTA.search(s):
+                continue
+            dosis_enc = _RE_DOSIS_ENVASE.findall(s)
+            if not dosis_enc:
+                continue  # esta línea no lleva concentración: es prosa
+            for num, unidad in dosis_enc:
+                num_n = num.replace(",", ".")
+                clave = f"{num_n}{unidad.lower()}"
+                if clave not in productos:
+                    logger.info(
+                        "título sin dosis inexistente: quito %s %s de %r",
+                        num, unidad, s[:40],
+                    )
+                    lineas_txt[i] = _RE_DOSIS_ENVASE.sub("", s).strip(" -–,:.*")
+                    return "\n".join(lineas_txt)
+            return texto  # la primera línea con dosis SÍ existe en la lista
+        return texto
+    dosis = m.group(1).strip()
+    num = (re.match(r"[\d.,]+", dosis) or re.match(r"", dosis)).group(0)
+    if not num:
+        return texto
+    patron = re.compile(
+        rf"\s*\b{re.escape(num)}\s*(?:mg|mcg|g|ml|ui)\b", re.IGNORECASE
+    )
+    lineas = texto.splitlines()
+    for i, ln in enumerate(lineas):
+        s = ln.strip()
+        if not s or _RE_LINEA_DE_LISTA.search(s):
+            continue
+        if patron.search(s):
+            lineas[i] = patron.sub("", s).strip(" -–,:.")
+            logger.info(
+                "título sin la dosis negada: %r → %r", s[:40], lineas[i][:40]
+            )
+            break
+    return "\n".join(lineas)
+
+
+def _quitar_repeticiones(texto: str, user_text: str, history: list[Any]) -> str:
+    """No repetir lo que ya se dijo y no colar la dirección cuando no la pidieron."""
+    if not texto:
+        return texto
+    previo = _texto_del_bot(history)
+    cliente = _texto_cliente_sin_marcadores(user_text) or user_text or ""
+
+    # 1) La MISMA pregunta de siempre (nombre de la caja / otra presentación).
+    if _RE_PIDE_NOMBRE_CAJA.search(texto) and _RE_PIDE_NOMBRE_CAJA.search(previo):
+        logger.info("anti-repetición: quito la pregunta del nombre de la caja (ya se hizo)")
+        texto = _quitar_frases(texto, _RE_PIDE_NOMBRE_CAJA)
+
+    # 2) Dirección/horario cuando NO los pidieron y ya se dieron antes.
+    if (
+        _RE_DIRECCION_HORARIO.search(texto)
+        and not _RE_CLIENTE_UBICACION.search(cliente)
+        and _RE_DIRECCION_HORARIO.search(previo)
+    ):
+        logger.info("anti-repetición: quito la dirección/horario (ya se dio y no la pidieron)")
+        texto = _quitar_frases(texto, _RE_DIRECCION_HORARIO)
+
+    if _RE_PIDE_NOMBRE_CAJA.search(texto) or _RE_DIRECCION_HORARIO.search(texto):
+        texto = texto.strip()
+    if texto and re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]{3,}", texto):
+        return texto
+    # Se quedó vacío: se responde a lo que SÍ preguntó, sin muletillas.
+    if _RE_CLIENTE_TELEFONO.search(cliente):
+        return FALLBACK_TELEFONO
+    return FALLBACK_PENDIENTE
+
+
+# ── «NO ES EL MEDICAMENTO QUE PEDISTE» ─────────────────────────────────────────────
+# Caso real (provider 32, 2026-10-28 20:59): el cliente pidió ESPIRAMICINA, el buscador no
+# devolvió nada y el modelo "asumió" ESPIRONOLACTONA y cotizó diez presentaciones del diurético
+# como si fuera el antibiótico. Dos fármacos distintos: eso no es un typo, es una dispensación
+# equivocada.
+#
+# El umbral se compara sobre el NÚCLEO del término (la primera palabra significativa) con la
+# misma medida que `tools._UMBRAL_NUCLEO_MISMO_FARMACO`: por encima de 0.75 se considera el
+# mismo fármaco escrito de otra forma ('atamle'→'atamel', 'omeprasol'→'omeprazol').
+def _farmaco_distinto(user_text: str, runtime: Any) -> str | None:
+    """El término del cliente si lo que se cotizó es OTRO fármaco. None si todo cuadra."""
+    if getattr(runtime, "busqueda_por_principio", False):
+        return None  # marca → principio activo: cambio legítimo
+    term_buscado = str(getattr(runtime, "last_term", "") or "").strip()
+    if not term_buscado or not getattr(runtime, "last_products", None):
+        return None  # sin productos cotizados no hay nada que corregir
+    cliente = _extraer_termino_medicamento(
+        _texto_cliente_sin_marcadores(user_text) or user_text or ""
+    )
+    if not cliente or not _termino_es_medicamento_plausible(cliente):
+        return None
+    if _es_solo_saludo(cliente) or _es_solo_saludo(cliente.split()[0]):
+        return None  # 'gracias muy amable' no es un fármaco
+    # Se comparan las PALABRAS CON CONTENIDO, y basta con que UNA pareja se parezca: antes
+    # se miraba solo la primera palabra, así que 'venta aceite oregano' (el cliente dijo
+    # "tienen a la venta…") contra 'aceite oregano' daba 'venta' vs 'aceite' y el guard
+    # concluía que era OTRO fármaco cuando era el mismo producto.
+    _FUNC_COMP = set(_FILLER) | set(_VIAS_ADMINISTRACION) | set(_CATEGORIAS_TERAPEUTICAS)
+    cli_palabras = [
+        w for w in re.findall(r"[a-záéíóúüñ0-9]+", cliente.lower())
+        if len(w) >= 3 and w not in _FUNC_COMP
+    ] or (cliente.split() or [""])
+    bus_palabras = [
+        w for w in re.findall(r"[a-záéíóúüñ0-9]+", term_buscado.lower())
+        if len(w) >= 3 and w not in _FUNC_COMP
+    ] or (term_buscado.split() or [""])
+    ratio = max(
+        (
+            difflib.SequenceMatcher(None, a, b).ratio()
+            for a in cli_palabras
+            for b in bus_palabras
+        ),
+        default=0.0,
+    )
+    if ratio >= 0.75:
+        return None
+    logger.info(
+        "otro fármaco: el cliente pidió '%s' y se cotizó '%s' (similitud %.2f) — se corrige",
+        cliente, term_buscado, ratio,
+    )
+    return cliente
+
+
+def _respuesta_no_es_ese_farmaco(cliente: str) -> str:
+    return (
+        f"⚠️ No tengo {cliente.upper()}. No te ofrezco otro medicamento parecido para no "
+        "confundirte: son cosas distintas.\n"
+        "¿Me confirmas el nombre tal como viene en la caja, o te paso con un auxiliar?"
+    )
 
 
 def _quitar_repregunta_tras_cierre(texto: str, ultimo_del_lead: str | None) -> str:
@@ -2822,8 +4914,32 @@ def _build_state_block(
         total = sum((it.precio_usd or 0) * it.cantidad for it in cart)
         lines.append(f"- Carrito actual: {items_str}. Total parcial: ${total:.2f}.")
 
+    # MÉTODO DE ENTREGA. Se le dice al modelo en qué punto del paso va, para que no
+    # invente la entrega ni contradiga lo que ya eligió el cliente.
+    if conv.delivery_pending == "method":
+        lines.append(
+            "- ENTREGA: le preguntaste cómo quiere recibir el pedido (1. Delivery / "
+            "2. Retirar en Farmacia) y aún NO responde. No avances al resumen."
+        )
+    elif conv.delivery_pending == "address":
+        lines.append(
+            "- ENTREGA: el cliente eligió DELIVERY y le pediste la dirección; aún no "
+            "la dio. No avances al resumen."
+        )
+    elif conv.delivery_method == "delivery":
+        dir_ = conv.delivery_address or "(sin dirección registrada)"
+        lines.append(f"- ENTREGA: DELIVERY a '{dir_}'. Ya está registrada.")
+    elif conv.delivery_method == "pickup":
+        lines.append("- ENTREGA: RETIRAR EN FARMACIA. Ya está registrado.")
+
     # Si no hay estado relevante (sin producto, término ni carrito), no inyectar
-    if not conv.last_product and not conv.last_term and not cart:
+    if (
+        not conv.last_product
+        and not conv.last_term
+        and not cart
+        and not conv.delivery_method
+        and not conv.delivery_pending
+    ):
         return ""
 
     lines.append("Usa este estado para responder con coherencia. NO inventes productos, precios ni cantidades que no estén aquí.")
@@ -2932,8 +5048,21 @@ def _formato_no_canonico(texto: str, products: list[dict[str, Any]]) -> bool:
     correctos → ningún backstop previo actuó, pero el formato viola el estándar
     de presentación (precio venezolano coma decimal + Bs + emoji por opción) y
     el usuario lo espera fijo.
+
+    DEBE ENUMERAR ALGO. Este backstop SUSTITUYE el texto por la lista del catálogo,
+    así que solo tiene sentido si el texto ERA una enumeración mal formateada. Antes
+    bastaba con que hubiera 2+ productos y el texto no tuviera 💊: una CORTESÍA
+    ("¡Con gusto! Que te vaya bien 😊") cumplía ambas condiciones y era reemplazada
+    por el catálogo completo. Caso real (conv 2826): el cliente se despidió con "Ok
+    gracias pasaré por allá" y recibió NAPROXENO otra vez — la misma lista que ya
+    había visto, en lugar del adiós.
     """
     if not texto or len(products) < 2:
+        return False
+    # El texto tiene que estar ENUMERANDO: varias líneas, o referencias a los
+    # productos/precios. Un texto de una sola frase sin ninguna mención no es una
+    # enumeración mal formateada, es otra cosa (una cortesía, una pregunta).
+    if not _enumera_productos(texto, products):
         return False
     if "💊" not in texto:
         return True
@@ -2941,6 +5070,20 @@ def _formato_no_canonico(texto: str, products: list[dict[str, Any]]) -> bool:
     # Canónico: cada opción es '💊 N. ...' seguida de '   $X,XX  |  Bs Y'.
     lineas = [ln for ln in texto.splitlines() if "💊" in ln]
     if len(lineas) < 2:
+        return True
+    # EL NÚMERO DE OPCIÓN. El formato canónico es '💊 N. NOMBRE', y el número no es
+    # decorativo: es lo que el cliente cita para pedir ("quiero 2 cajas de la opción 3").
+    #
+    # Caso real (FarmaUnion, provider 19): la respuesta traía
+    #     💊 GOTAS NASAL (AIRFEN) PEDIATRICA X 15 ML
+    #        $6,64  |  Bs 5.820,86
+    #     💊 GOTAS NASALES (AIRFEN) X 15 ML ADULT
+    #        $7,99  |  Bs 7.009,07
+    # El PRECIO estaba bien formado, así que el chequeo de abajo daba 'canónico' y este
+    # backstop no actuaba: el cliente recibía opciones SIN numerar y sin el bloque de cierre
+    # ('👉 Para agregar al carrito…', '🛒 ¿Otro medicamento?', '✅ LISTO'), imposible de citar.
+    sin_numero = [ln for ln in lineas if not re.search(r"💊\s*\d+\s*[.)]", ln)]
+    if sin_numero:
         return True
     # Verificar que al menos la mayoría de las opciones tienen la línea de
     # precio en el formato 'USD | Bs' inmediatamente después.
@@ -2952,6 +5095,42 @@ def _formato_no_canonico(texto: str, products: list[dict[str, Any]]) -> bool:
         if re.search(r"\$.*\|.*Bs", siguiente):
             ok_formato += 1
     return ok_formato < len(lineas)
+
+
+def _enumera_productos(texto: str, products: list[dict[str, Any]]) -> bool:
+    """True si el texto parece estar LISTANDO los productos (no solo mencionarlos).
+
+    Un texto que enumera trae varias líneas o repite la estructura de la lista (números
+    de opción, precios, nombres de producto). Una cortesía de una línea, una pregunta, o
+    una respuesta conversacional NO enumeran — y por eso no deben ser reemplazadas por la
+    lista del catálogo.
+
+    Se usa en los backstops que SUSTITUYEN el texto: sin este filtro cualquier respuesta
+    corta con 2+ productos de la consulta anterior entra y el cliente recibe el catálogo
+    en vez de la frase que correspondía.
+    """
+    t = texto.strip()
+    if not t:
+        return False
+    # 3+ líneas con contenido: es una enumeración (la lista canónica o el intento del LLM).
+    lineas = [ln for ln in t.splitlines() if ln.strip()]
+    if len(lineas) >= 3:
+        return True
+    # 2 líneas ya es sospechoso de lista si alguna cita un precio.
+    if len(lineas) == 2 and re.search(r"\$\s*\d", t):
+        return True
+    # Una sola línea/parrafo: solo cuenta si enumera con números de opción o cita precios.
+    if re.search(r"(?:^|\n)\s*\d{1,2}\s*[.)-]\s+\S", t):
+        return True
+    if re.search(r"\$\s*\d", t):
+        return True
+    # O si nombra 2+ productos distintos de la consulta.
+    tl = t.lower()
+    nombrados = sum(
+        1 for p in products
+        if str(p.get("producto") or p.get("nombre") or "").lower()[:18] in tl
+    )
+    return nombrados >= 2
 
 
 def _cita_precio_inventado(
@@ -3170,6 +5349,15 @@ def _limpiar_transcripcion(texto: str) -> str:
     dosis), que son las únicas que deben llegar al catálogo.
     """
     palabras = re.findall(r"[a-záéíóúüñ0-9]+", texto.lower())
+    # QUITAR TILDES ANTES DE COMPARAR contra `_FILLER` y `_MULETILLAS_HABLA`. Esas listas
+    # están escritas SIN tildes ("dias", "que", "mas"), pero la transcripción trae las
+    # tildes del habla ("días", "qué", "más"). Comparando en crudo no coinciden, así que
+    # las muletillas SOBREVIVEN y llegan al catálogo. Caso real (conv 2834):
+    #     "Buenos días mi amor, en qué precio tienen la venda sol?..."
+    #     → 'días qué venda sol caja trae dos'   ← 'días' y 'qué' se colaron
+    # y el catálogo, con el matcher difuso, devolvió GALLETA SODA EL SOL / ADRENALINA SOL /
+    # ALUMBRE en vez de las VENDAS. Con 'venda' solo, devuelve las 3 vendas correctas.
+    palabras = [_normalizar_tildes(w) for w in palabras]
     # Unidad HABLADA → abreviatura ('miligramos' → 'mg'). Sin esto el número que
     # la precede se descarta por corto y la dosis se pierde (ver UNIDADES_HABLADAS).
     palabras = [_normalizar_unidad(w) for w in palabras]
@@ -3201,7 +5389,64 @@ def _limpiar_transcripcion(texto: str) -> str:
         if len(w) < 3:
             continue
         utiles.append(w)
+    # COLETILLA DEL HABLA: "la caja TRAE dos", "la caja viene con dos". Es una pregunta
+    # conversacional sobre el ENVASE, no parte del nombre del producto. Se corta el término
+    # en el patrón, porque dejarlo producía títulos como
+    #     EN QUÉ LA VENDA SOL? LA CAJA TRAE DOS
+    # (caso real conv 2834): el cliente lee la frase entera como nombre del producto.
+    #
+    # POR QUÉ POR PATRÓN Y NO POR PALABRA: medido contra el catálogo real, 'caja' es token
+    # de 'DIOSMINA-HESPER 450/50 MG CAJA X 10 TAB' y 'dos' de 'FRON DOS KETACONAZOL'. Quitar
+    # esas palabras sueltas rompería esas búsquedas. Lo que NO existe es la secuencia
+    # 'caja' + verbo de habla, así que cortar ahí es seguro.
+    corte = re.search(
+        r"\b(?:caja|empaque|envase|frase)\s+(?:trae|tiene|viene|traen|tienen|vienen)\b",
+        " ".join(utiles),
+    )
+    if corte:
+        utiles = " ".join(utiles)[: corte.start()].split()
     return " ".join(utiles)
+
+
+def _medicamentos_de_transcripcion(texto: str) -> list[str]:
+    """Medicamentos REALES dentro de la transcripción de una nota de voz.
+
+    POR QUÉ NO SIRVE EL TROCEO NORMAL: el habla es una frase conversacional con comas, no
+    una receta. Trocear por comas/y produce piezas que no son medicamentos. Caso real
+    (conv 2834), "Buenos días mi amor, en qué precio tienen la venda sol? La caja trae dos,
+    verdad?" daba:
+        ['días amor', 'en qué la venda sol? La caja trae dos', 'verdad']
+    y el cliente recibió "⚠️ No disponibles en el catálogo: DÍAS AMOR, VERDAD" con el
+    título "EN QUÉ LA VENDA SOL? LA CAJA TRAE DOS" — el saludo, la coletilla y la pregunta
+    entera presentados como medicamentos.
+
+    CÓMO: cada pieza se pasa por el pipeline de AUDIO (limpiar el ruido del habla + extraer
+    el término) y se exige que parezca un medicamento de verdad. Las piezas que quedan
+    vacías o son frases se descartan. Medido: así 0 de 5 consultas habladas se trocean,
+    mientras las 3 recetas habladas reales ('necesito esoz, leprit y evigax') siguen
+    devolviendo sus 3 medicamentos.
+
+    Devuelve [] cuando no hay 2+ medicamentos: una consulta de UN medicamento no es una
+    receta y debe seguir el camino normal (que ya limpia la transcripción).
+    """
+    if not texto:
+        return []
+    piezas = [p.strip() for p in _lineas_lista_medicamentos(texto) if p.strip()]
+    if len(piezas) < 2:
+        return []
+    out: list[str] = []
+    for p in piezas:
+        # El pipeline del audio: quita muletillas del habla y verbos de consulta.
+        limpio = _extraer_termino_medicamento(_limpiar_transcripcion(p))
+        if not limpio:
+            continue
+        # Descartar frases ('en qué la venda sol caja trae dos' no es un medicamento).
+        if not _termino_es_medicamento_plausible(limpio):
+            continue
+        if limpio not in out:
+            out.append(limpio)
+    # Menos de 2 medicamentos REALES no es una receta.
+    return out if len(out) >= 2 else []
 
 
 def _texto_transcripcion_completo(user_text: str) -> str:
@@ -3283,11 +5528,20 @@ _LINEAS_DESCRIPTIVAS = (
     "dosis", "descripción", "descripcion", "código", "codigo", "cpe",
     # texto promocional/del envase
     "antibiótico", "antibiotico", "antimicótico", "antimicotico", "antiprotozoario",
+    # ETIQUETAS DE USO: describen para quién/cómo es, no son otro medicamento.
+    # 'USO PEDIÁTRICO' salía como un grupo propio en la foto del frasco de amoxicilina
+    # (provider 32, 2026-10-29).
+    "uso pediátrico", "uso pediatrico", "uso adulto", "uso oral", "uso tópico", "uso topico",
+    "uso vaginal", "uso oftálmico", "uso oftalmico", "vía oral", "via oral",
+    "vía de administración oral", "polvo para", "polvo para suspensión",
+    "polvo para suspension", "suspensión oral", "suspension oral", "solución oral",
+    "solucion oral", "para suspensión oral", "para suspension oral",
 )
 # Una línea que empieza por una FORMA farmacéutica es presentación del mismo producto.
 _RE_SOLO_FORMA = re.compile(
     r"^\s*\d*\s*(?:óvulos?|ovulos?|supositorios?|cápsulas?|capsulas?|tabletas?|"
-    r"comprimidos?|sobres?|ampollas?|frascos?|tubos?|gotas?|crema|gel)\b",
+    r"comprimidos?|sobres?|ampollas?|frascos?|tubos?|gotas?|crema|gel|polvos?|"
+    r"suspensión|suspension|solución|solucion|jarabe|emulsión|emulsion)\b",
     re.IGNORECASE,
 )
 
@@ -3321,6 +5575,31 @@ def _lineas_candidatas_medicamento(ocr: str) -> list[str]:
         l.strip() for l in (ocr or "").splitlines()
         if l.strip() and not _es_linea_descriptiva(l)
     ]
+
+
+_RE_DOSIS_ENVASE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(mg|mcg|gr|g|ml|ui)\b", re.IGNORECASE
+)
+
+
+def _dosis_unica_del_envase(lineas: list[str]) -> str:
+    """La concentración del envase SI hay UNA sola ('20 mg').
+
+    Caso real (provider 32, 2026-10-29): la foto del RIVAROXABAN 20 mg devolvía la lista de
+    15 mg SIN decir que la de 20 no está — porque el término de la caja se quedaba en
+    'rivaroxaban' y la dosis que el cliente veía en la caja se perdía. Con la dosis en el
+    término, `_aviso_dosis_agotada` avisa: "No tengo de 20 mg. Lo tengo en: 15 mg".
+
+    Si hay VARIAS concentraciones (combinaciones tipo '400 mg - 57 mg/5 ml') se devuelve ''
+    para no ensuciar el término.
+    """
+    vistas: list[str] = []
+    for linea in lineas:
+        for m in _RE_DOSIS_ENVASE.finditer(linea or ""):
+            valor = f"{m.group(1).replace(',', '.')} {m.group(2).lower()}"
+            if valor not in vistas:
+                vistas.append(valor)
+    return vistas[0] if len(vistas) == 1 else ""
 
 
 async def _medicamentos_de_ocr(
@@ -3358,21 +5637,119 @@ async def _medicamentos_de_ocr(
             if not componentes:
                 return [term], "caja (el OCR solo trae el nombre)"
             # ¿algún producto del catálogo cubre TAMBIÉN los otros componentes?
+            #
+            # SOLO cuentan los componentes con palabra ÚTIL (≥5 letras) y que no sean
+            # descriptivos: así el laboratorio ('QUIM-FAR' → quim/far de 4 y 3 letras) y
+            # las etiquetas ('POLVO PARA SUSPENSIÓN ORAL', 'USO PEDIÁTRICO') no impiden
+            # reconocer la caja. Antes exigía cubrirlos TODOS y ninguna caja daba «caja».
+            # Un componente solo cuenta si puede ser OTRO medicamento: se descartan las
+            # etiquetas, las SALES ('clorhidrato', que la caja imprime bajo el nombre), las
+            # categorías ('antialérgico') y el LABORATORIO ('CALOX', 'QUIM-FAR').
+            from app.tools import (  # noqa: PLC0415
+                _PALABRAS_FUNCIONALES as _FUNC,
+                _SALES_FARMACEUTICAS as _SALES,
+                _CATEGORIAS_TERAPEUTICAS as _CATS,
+            )
+
+            def _comp_es_otro_farmaco(comp: str) -> bool:
+                # SIN TILDES: las listas guardan 'generico'/'antialergico' y la caja escribe
+                # 'Genérico'/'Antialérgico'; sin normalizar no se reconocían y la caja de una
+                # FEXOFENADINA se partía en dos medicamentos.
+                palabras = [
+                    _normalizar_tildes(w)
+                    for w in re.findall(r"[a-záéíóúüñ]{5,}", comp.lower())
+                ]
+                if not palabras:
+                    return False
+                if all(w in _SALES or w in _CATS or w in _FUNC for w in palabras):
+                    return False
+                # `_es_nombre_de_laboratorio` espera dicts con 'producto'/'laboratorio';
+                # el `buscar` de este módulo devuelve nombres. Se normaliza aquí.
+                _prods = [
+                    x if isinstance(x, dict) else {"producto": str(x)} for x in productos
+                ]
+                if _es_nombre_de_laboratorio(comp, _prods):
+                    return False
+                return True
+
+            utiles_componentes = [
+                comp for comp in componentes
+                if not _es_linea_descriptiva(comp) and _comp_es_otro_farmaco(comp)
+            ]
             for prod in productos:
-                palabras_ok = True
-                for comp in componentes:
-                    utiles = re.findall(r"[a-záéíóúüñ]{5,}", comp.lower())
-                    if not utiles:
-                        continue
-                    if not any(es_relevante(w, prod) for w in utiles):
-                        palabras_ok = False
-                        break
-                if palabras_ok:
-                    return [term], "caja (un producto cubre todos los componentes)"
+                if all(
+                    any(es_relevante(w, prod)
+                        for w in re.findall(r"[a-záéíóúüñ]{5,}", comp.lower()))
+                    for comp in utiles_componentes
+                ):
+                    # El término lleva también los componentes que el producto cubre
+                    # ('AMOXICILINA' + 'ÁCIDO CLAVULÁNICO'): buscar solo 'amoxicilina'
+                    # devuelve la monoterapia mezclada con la combinación.
+                    completo = " ".join([nombre] + utiles_componentes)
+                    term_caja = " ".join(
+                        re.findall(
+                            r"[a-záéíóúüñ0-9]+",
+                            _limpiar_etiquetas_ocr(completo).lower(),
+                        )
+                    )
+                    base = term_caja or term
+                    dosis_env = _dosis_unica_del_envase(lineas)
+                    if dosis_env and dosis_env not in base:
+                        base = f"{base} {dosis_env}"
+                    return [base], (
+                        "caja (un producto cubre los componentes del envase)"
+                    )
+
+    # ANTES DE RENDIRSE: ¿el envase se llama con TODOS los componentes juntos?
+    # La búsqueda por el primer nombre devuelve solo la monoterapia (medido: 'amoxicilina'
+    # trae 19 presentaciones sueltas y NINGUNA de la combinación, que es lo que había en la
+    # foto), así que la cobertura no encuentra producto. Si el nombre completo SÍ existe en
+    # el catálogo, entonces el envase es UN producto.
+    # Los componentes con PALABRA (≥5 letras) son los que pueden formar parte del nombre;
+    # '60 ml' o '400 mg - 57 mg/5 ml' son volumen/dosis y solo ensucian la búsqueda.
+    componentes_nombre = [
+        c for c in lineas[1:]
+        if not _es_linea_descriptiva(c) and re.findall(r"[a-záéíóúüñ]{5,}", c.lower())
+    ]
+    if term and componentes_nombre:
+        completo = " ".join([nombre] + componentes_nombre)
+        term_completo = " ".join(
+            re.findall(r"[a-záéíóúüñ0-9]+", _limpiar_etiquetas_ocr(completo).lower())
+        )
+        if term_completo and term_completo != term:
+            try:
+                prods_completo = await buscar(term_completo)
+            except Exception:  # noqa: BLE001
+                prods_completo = []
+            # NO basta con que la búsqueda devuelva algo (el matcher es difuso: con
+            # 'esoz leprit bumetin' devuelve productos sueltos y una RECETA de 3 se
+            # colapsaba en una). El producto tiene que cubrir TODAS las palabras de todos
+            # los componentes.
+            # Incluye TAMBIÉN las palabras del NOMBRE: si solo se exigen las del
+            # componente, 'LOSARTAN 50 MG / METFORMINA 850 MG' (dos medicamentos) se
+            # colapsaba en uno porque hay productos de metformina.
+            todas = [
+                w
+                for c in [nombre] + componentes_nombre
+                for w in re.findall(r"[a-záéíóúüñ]{5,}", c.lower())
+            ]
+            if prods_completo and todas and any(
+                all(es_relevante(w, p) for w in todas) for p in prods_completo
+            ):
+                dosis_env = _dosis_unica_del_envase(lineas)
+                base = term_completo
+                if dosis_env and dosis_env not in base:
+                    base = f"{base} {dosis_env}"
+                return [base], (
+                    "caja (el envase se llama con todos los componentes)"
+                )
 
     # Receta: se devuelven las líneas como medicamentos independientes, con la misma
     # lógica que ya usaba el backstop.
-    meds = _parsear_medicamentos_receta(ocr)
+    #
+    # Se reusan las líneas YA FILTRADAS: pasar el OCR crudo colaba 'POLVO SUSPENSION' y
+    # 'USO PEDIATRICO' como medicamentos (los mismos que `_es_linea_descriptiva` descarta).
+    meds = _parsear_medicamentos_receta("\n".join(lineas))
     if not meds and _parece_lista_medicamentos(ocr):
         meds = _parsear_medicamentos_receta(
             "\n".join(_lineas_lista_medicamentos(ocr))
@@ -3589,34 +5966,951 @@ def _es_negativa_o_despedida(texto: str) -> bool:
     )
 
 
-def _parece_lista_medicamentos(texto: str) -> bool:
-    """True si el texto parece una lista de 2+ medicamentos (receta en texto,
-    no una consulta simple). Detecta separadores de lista: comas, 'y',
-    'ademas', saltos de línea con nombres propios.
+# Vocabulario del MOTIVO: precio, disponibilidad, "¿tienes...?". NO acota la consulta a
+# un producto — solo dice por qué lo pregunta. Se descarta para contar medicamentos.
+# Caso real (provider 27, 2026-10): "Precio de valsartan 80 hidroclorotiazida 12.5 y
+# omeprazol" respondía SOLO omeprazol, porque 'precio' está en `_VERBOS_MEDICAMENTO` y
+# eso hacía que `_parece_lista_medicamentos` cortara con False. La consulta pedía DOS
+# medicamentos (valsartán+hidroclorotiazida es una combinación, y omeprazol aparte).
+_VERBOS_MOTIVO = re.compile(
+    r"\b(?:precio|precios|cuesta|cuestan|cuanto|cuánto|vale|valen|"
+    r"disponible|disponibles|disponen|disponemos|tienen|tienes|tiene|tenemos|"
+    r"venden|vendes|consigo|consigues|conseguir|hay|manejan|trabajan|"
+    r"necesito|busco|quiero|quisiera|dame|me das|"
+    # AGREGAR AL CARRITO. El cliente que ya está armando el pedido pide AÑADIR, y ese
+    # verbo se quedaba pegado al producto: 'agregas 3 cajas glymar 4 mg' se buscaba como
+    # 'agregas 3 glymar 4 mg', y como el catálogo exige TODOS los tokens, la relevancia
+    # lo descartaba y GLYMAR salía como "no disponible".
+    # Caso real (conv 2109, 2026-10-17): "…y le agregas 3 cajas de glymar de 4 MG y 2
+    # toallas securezza x 15" → el agente respondió
+    #     "⚠️ No disponibles en el catálogo: RESUMEN, AGREGAS 3 CAJAS GLYMAR 4 MG"
+    r"agrega|agregas|agregar|agregale|agrégale|agregalo|agregame|agrégame|"
+    r"añade|añades|añadir|añademe|añádele|"
+    r"sumale|súmale|sumame|incluye|incluyes|incluir|ponme|mete|adiciona)\b",
+    re.IGNORECASE,
+)
+# Separadores de ENUMERACIÓN de medicamentos.
+_RE_SEP_LISTA = re.compile(
+    r"[,;]"
+    r"|(?:\s+y\s+)"
+    # ' e ' es conjunción, PERO NO cuando es la VITAMINA E. Caso real (conv 2287,
+    # provider 19): "Será que tienen vitamina e  de vivas" se partía en
+    #     ['Será que tienen vitamina', 'de vivas']
+    # y cada trozo se buscaba como un medicamento distinto: 'será vitamina' → 0 (y el
+    # cliente recibía "⚠️ No disponibles: SERÁ VITAMINA") y 'vivas' → 5 productos VIVAX
+    # encabezados por 'VIVAS'. El cliente pedía VITAMINA E de la marca VIVAX, que ESTÁ en
+    # el catálogo ('VIT E 400 MG X 15 CAPS BLANDAS VIVAX').
+    # Se excluye con LOOKBEHIND ('vitamina' 8 letras, 'vit' 3: longitudes fijas, válidas).
+    r"|(?:(?<!vitamina)(?<!vit)\s+e\s+)"
+    r"|(?:ademas|además)"
+    # FIN DE FRASE: son DOS peticiones distintas. Caso real (provider 32, 2026-10-29):
+    #     "Precio de la macrodantina?? Voy a querer una vitamina C de la opción 9"
+    # se buscaba como UN medicamento ('macrodantina vitamina c 9') y el cliente recibía
+    # "⚠️ No tengo MACRODANTINA VITAMINA C 9".
+    r"|[?!]+",
+    re.IGNORECASE,
+)
 
-    'esoz, leprit y evigax' / 'ESOZ\nLEPRIT\nEVIGAX' → True
-    'tienes atamel forte?' → False (consulta simple)
+
+def _sin_motivo(texto: str) -> str:
+    """Quita el vocabulario del MOTIVO (precio, cuánto cuesta, tienes...)."""
+    return _VERBOS_MOTIVO.sub(" ", texto or "")
+
+
+def _sin_vocativo(texto: str) -> str:
+    """Quita un VOCATIVO inicial: el nombre de la persona a la que se habla.
+
+    Caso real (conv 2109, provider 19):
+        cliente: "Robi, me puedes dar el precio del beprospem"
+        agente : ⚠️ No disponibles en el catálogo: ROBI
+                 DAR DEL BEPROSPEM
+                 💊 1. BEPROSPEN 7 MG AMPOLLA X 1 ML C0N JER
+    El producto se encontró, pero el cliente veía 'ROBI' presentado como un medicamento que
+    no tenemos. 'Robi' no es un fármaco: es a quien el cliente le habla.
+
+    POR QUÉ: la COMA parte el mensaje en ['Robi', 'me puedes dar...'] y el camino de LISTA
+    busca cada trozo como un medicamento distinto. `_parsear_medicamentos_receta('Robi')`
+    devuelve ['robi'], así que el trozo no se descarta.
+
+    CUÁNDO: solo si (a) lo que precede a la coma son UNA O DOS palabras y (b) el resto es una
+    consulta COMPLETA (trae un verbo de consulta). Así las listas reales no se tocan:
+        'esoz, leprit y evigax'      → el resto no trae verbo  → NO se toca (sigue lista)
+        'atamel, ibuprofeno'         → el resto no trae verbo  → NO se toca
+        'Robi, me puedes dar ...'    → el resto trae 'dar'     → se quita el vocativo
+
+    DOS palabras, no una: el vocativo real casi nunca es un solo token. MEDIDO:
+        'mi amor, me das el omeprazol'  → con 1 palabra NO se tocaba y quedaba
+                                          ⚠️ No disponibles: AMOR (el mismo bug que 'ROBI')
+        'Buenas tardes, puedes darme precio de las gotas oftalmicas Clarasol'
+                                        → con 2 palabras se quita el saludo y el término sigue
+                                          siendo 'gotas oftalmicas clarasol' (verificado)
+    """
+    m = re.match(
+        r"^\s*((?:[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+\s+){0,1}[A-Za-zÁÉÍÓÚÑÜáéíóúñü]{2,20})"
+        r"\s*,\s*(.+)$",
+        texto or "",
+        re.DOTALL,
+    )
+    if not m:
+        return texto
+    resto = m.group(2).strip()
+    if not resto:
+        return texto
+    # SIN TILDES para evaluar los verbos: las listas de verbos vienen sin tildes, así que
+    # 'podrías' NUNCA casaba con `\bpodrias\b` y el vocativo no se quitaba. Caso real
+    # (conv 2109): "Hola Robi, buenas tardes, por favor me podrías cotizar..." dejaba
+    # 'Hola Robi' como trozo → 'ROBI' presentado como medicamento que no tenemos.
+    resto_norm = (
+        resto.lower()
+        .replace("á", "a").replace("é", "e").replace("í", "i")
+        .replace("ó", "o").replace("ú", "u").replace("ü", "u")
+    )
+    tiene_verbo = bool(
+        re.search(_VERBOS_MEDICAMENTO.pattern, resto_norm, re.IGNORECASE)
+        or re.search(_VERBOS_MOTIVO.pattern, resto_norm, re.IGNORECASE)
+        or re.search(
+            r"\b(?:dar|dame|darme|darte|darnos|denme|puedes|podrias|podria|podriamos|"
+            r"cotizar|cotizame|presupuesto|quiero|"
+            r"quisiera|necesito|busco|tienes|hay)\b",
+            resto_norm,
+            re.IGNORECASE,
+        )
+    )
+    return resto if tiene_verbo else texto
+
+
+def _medicamentos_enumerados(texto: str) -> list[str]:
+    """Medicamentos de una consulta que ENUMERA varios (con separadores).
+
+    'Precio de valsartan 80 hidroclorotiazida 12.5 y omeprazol'
+      → ['valsartan 80 hidroclorotiazida 12', 'omeprazol']
+    """
+    if not texto:
+        return []
+    trozos = [p.strip() for p in _RE_SEP_LISTA.split(texto) if p.strip()]
+    if len(trozos) < 2:
+        return []
+    out: list[str] = []
+    for trozo in trozos:
+        de = _parsear_medicamentos_receta(_sin_motivo(trozo))
+        if de:
+            out.extend(de)
+        else:
+            # Un trozo sin medicamento reconocido puede ser continuación del anterior
+            # ('valsartan 80' + 'hidroclorotiazida 12.5' describen la MISMA combinación).
+            #
+            # PERO tiene que PARECER un medicamento. Antes bastaba una palabra de 5+
+            # letras, y con eso se colaba CUALQUIER frase: en
+            #     "Buenas tardes, puedes darme precio de las gotas oftalmicas Clarasol."
+            # el SALUDO 'Buenas tardes' pasaba el filtro y el cliente recibía
+            #     ⚠️ No disponibles en el catálogo: BUENAS TARDES
+            # o sea el saludo presentado como un medicamento que no tenemos.
+            limpio = " ".join(_sin_motivo(trozo).split())
+            if not limpio or not re.search(r"[a-záéíóúüñ]{5,}", limpio):
+                continue
+            # El motivo se quita ANTES de decidir: en 'puedes darme precio de las gotas
+            # oftalmicas Clarasol' lo que sobra es el verbo, no el fármaco.
+            cand = _limpiar_termino_medicamento(limpio) or limpio
+            # Un saludo ('buenas tardes') NO es un medicamento.
+            if _es_solo_saludo(cand) or _es_solo_saludo(limpio):
+                continue
+            # Título = el fármaco, no la frase del cliente ('gotas oftalmicas clarasol').
+            cand = _extraer_termino_medicamento(cand) or cand
+            if _termino_es_medicamento_plausible(cand):
+                out.append(cand)
+    return out
+
+
+def _filtrar_por_dosis(
+    products: list[dict[str, Any]], dosis: str
+) -> list[dict[str, Any]]:
+    """Deja solo los productos cuya CONCENTRACIÓN coincide con la dosis pedida.
+
+    POR QUÉ HACE FALTA FILTRAR LOCALMENTE: buscar con la dosis en el término NO basta.
+    Medido contra el catálogo real del provider 05:
+        'carvedilol 6.25 mg'      → 5 productos, TODOS de 25 mg   (0 coincidencias)
+        'hidroclorotiazida 12.5 mg' → 9 productos, 5 de 12.5 y 4 de 25
+        'candesartan 16 mg'       → 2 productos, ambos de 16 mg   (el único que filtra)
+    El motor del catálogo cae al grupo difuso y matchea por el FÁRMACO ignorando el número,
+    así que devuelve concentraciones mezcladas. Caso real: el cliente pidió 3 medicamentos
+    con su dosis y recibió todas las concentraciones de cada uno.
+
+    Si el filtro deja 0 productos NO se descarta todo: se devuelve la lista completa, porque
+    es mejor ofrecer las concentraciones disponibles (el cliente elige) que negar el
+    medicamento por una dosis que este catálogo quizá no maneja.
+    """
+    if not dosis or not products:
+        return products
+    objetivo = dosis.replace(",", ".").strip()
+    out: list[dict[str, Any]] = []
+    for p in products:
+        nom = str(p.get("producto") or p.get("nombre") or p.get("title") or "")
+        # Concentraciones escritas en el título: '12.5MG', '6,25', '80/12,5', '80 MG'.
+        nums = {
+            n.replace(",", ".")
+            for n in re.findall(r"\d+(?:[.,]\d+)?", nom)
+        }
+        if objetivo in nums:
+            out.append(p)
+    return out or products
+
+
+def _filtrar_por_envase(
+    products: list[dict[str, Any]], envase: str
+) -> list[dict[str, Any]]:
+    """Deja solo los productos cuyo ENVASE coincide con el que pidió el cliente.
+
+    Es el hermano de `_filtrar_por_dosis`, y hace la misma falta: el motor del catálogo
+    matchea por el FÁRMACO e IGNORA los números, así que devuelve los envases mezclados.
+
+    Caso real (conv 2109, provider 19): el cliente pidió
+        "Glimepiride de. 4 MG x 30 Tab"
+    y recibía 4 opciones, la primera de ellas `GLIMEPIRIDA 4 MG X 10 TAB` — 10 tabletas
+    cuando pidió 30. Medido en ese catálogo: 'candesatan 30 tab' devuelve 12 productos
+    (10 de envase 30 y 2 de envase 10); 'amlodipina 5 mg 30 tab' devuelve 6 (4 de 30 y
+    2 de 10).
+
+    Si el filtro deja 0 productos NO se descarta todo: se devuelve la lista completa. Es
+    mejor ofrecer los envases que hay (el cliente elige, o se le puede decir que el de 30
+    no está) que negar el medicamento por un envase que este catálogo quizá no maneje.
+
+    Los productos cuyo envase NO se puede leer del título se descartan mientras haya
+    otros que sí coincidan: si el cliente pidió 30, no se le puede confirmar que un
+    producto ilegible trae 30. (Medido: en estos catálogos el título siempre trae el
+    envase, así que no se pierde nada.)
+    """
+    if not envase or not products:
+        return products
+    objetivo = envase.lstrip("0") or envase
+    out = [
+        p for p in products
+        if _envase_de_nombre(p.get("producto") or p.get("nombre") or p.get("title"))
+        == objetivo
+    ]
+    return out or products
+
+
+def _aviso_no_lo_tengo(term: str, ausente: str) -> str:
+    """Aviso cuando el cliente pidió algo que NO está en el catálogo pero hay lista.
+
+    POR QUÉ HACE FALTA: el motor del catálogo exige todos los tokens y, si no los encuentra,
+    reintenta con OR — así que una marca que no existe se cae SILENCIOSAMENTE y el cliente
+    recibe una lista de otras marcas bajo el TÍTULO DE LO QUE PIDIÓ.
+
+    Caso real (conv 2109, provider 19, 2026-10-17 12:01):
+        cliente: "Buenas tardes tiene disponible crema dental sensodyne y que costo porf"
+        agente : "CREMA DENTAL SENSODYNE" seguido de 8 productos... NINGUNO de Sensodyne
+                 (Colgate Triple Acción, Colgate Kids, Tantum Verde...).
+    `sensodyne` da 0 productos en ese catálogo: el título prometía algo que la lista no
+    cumplía. Re-listar sin decir el NO es no responder — la misma regla que el aviso de
+    envase.
+
+    Devuelve '' si no hay nada que avisar.
+    """
+    if not term or not ausente:
+        return ""
+    # La LETRA de la vitamina no es "algo que no tengo": 'vitamina c' producía
+    #     ⚠️ No tengo C. De VITAMINA hay esto:
+    # encima de una lista de VITAMINA C (provider 32, 2026-10-29).
+    if len(ausente.strip()) < 2 or _es_letra_de_vitamina(ausente.strip().lower(), term):
+        return ""
+    resto = " ".join(w for w in term.split() if w.lower() != ausente.lower())
+    if resto.strip():
+        return f"⚠️ No tengo {ausente.upper()}. De {resto.upper()} hay esto:"
+    return f"⚠️ No tengo {ausente.upper()}."
+
+
+def _lista_con_aviso(
+    productos: list[dict[str, Any]], term: str, cierre: str = ""
+) -> str:
+    """La lista canónica precedida del aviso, si el cliente pidió algo que NO está.
+
+    POR QUÉ: el motor del catálogo exige todos los tokens y, si no los encuentra, reintenta
+    con OR — así que una marca que no existe se cae SILENCIOSAMENTE y el cliente recibe
+    otras marcas bajo el TÍTULO DE LO QUE PIDIÓ. Y hay un backstop que EMPEORA el problema:
+    cuando el LLM niega disponibilidad y hay productos, le pisa la negativa con la lista.
+    Si el LLM tenía razón, pisarlo es exactamente lo que engaña al cliente.
+
+    Caso real (conv 2109, provider 19, 2026-10-17 12:01):
+        cliente: "Buenas tardes tiene disponible crema dental sensodyne y que costo porf"
+        el LLM : negó disponibilidad — CORRECTAMENTE, 'sensodyne' da 0 productos
+        backstop: "el LLM negó disponibilidad pese a 8 productos — reemplazo con lista real"
+        cliente: "CREMA DENTAL SENSODYNE" + 8 Colgate y Tantum. NINGUNO de Sensodyne.
+
+    Se usa en TODOS los backstops que reemplazan el texto por la lista: si uno avisa y otro
+    no, el mismo mensaje da respuestas distintas según qué backstop salte.
+
+    El título pasa sin el token ausente, para no prometer lo que la lista no trae.
+    """
+    ausente = _nucleo_ausente(term, productos)
+    resto = (
+        " ".join(w for w in term.split() if w.lower() != ausente.lower()).strip()
+        if ausente
+        else ""
+    )
+    avisos_lista, titulo_lista = _avisos_de_lista(productos, resto or term)
+    # La FORMA pedida (suspensión, tabletas, gotas…) también se avisa aquí: es el punto
+    # único de los seis backstops. Los productos llegan ya acotados por la tool.
+    _fam_f, _etq_f = _forma_pedida(resto or term)
+    # Se acota TAMBIÉN aquí (no solo avisar): la tool ya devuelve los productos filtrados,
+    # así que esto es idempotente — pero deja el punto único de los backstops correcto por
+    # sí mismo, sin depender de que quien llama lo haya hecho antes.
+    if _fam_f and productos:
+        productos = _filtrar_por_forma(productos, _fam_f)
+    aviso_forma_lista = _aviso_forma(productos, resto or term, _etq_f) if _fam_f else ""
+    if aviso_forma_lista:
+        avisos_lista = " ".join(
+            a for a in (aviso_forma_lista, avisos_lista) if a
+        )
+        # El encabezado pierde la forma que se acaba de negar. La comparación va sin
+        # tildes: el término y el título del cliente no tienen por qué coincidir en
+        # acentos ('APIRET SUSPENSION' vs etiqueta 'suspensión').
+        _etq_norm = _normalizar_tildes((_etq_f or "").lower())
+        if _etq_norm and _etq_norm in _normalizar_tildes((titulo_lista or "").lower()):
+            titulo_lista = _termino_sin_forma(titulo_lista)
+    # El encabezado no puede prometer un nombre que ningún producto lleva.
+    titulo_lista = _titulo_por_marcas(productos, titulo_lista)
+    cuerpo = _formatear_lista_productos(productos, titulo_lista)
+    if ausente:
+        cuerpo = _aviso_no_lo_tengo(term, ausente) + "\n\n" + cuerpo
+    if avisos_lista:
+        cuerpo = avisos_lista + "\n\n" + cuerpo
+    return cuerpo + cierre
+
+
+def _titulo_sin_dosis(termino: str, dosis: str) -> str:
+    """Quita del TÍTULO la concentración que el catálogo no tiene.
+
+    Sin esto el mensaje se contradice: avisa de que no hay 600 mg y el encabezado de la
+    lista sigue diciendo 'ACETAMINOFEN 600 MG' sobre productos de 500 y 650.
+    """
+    m = re.match(r"(\d+(?:[.,]\d+)?)\s*([a-z]+)", (dosis or "").strip().lower())
+    if not m or not termino:
+        return termino
+    patron = re.compile(
+        rf"\b{re.escape(m.group(1))}\s*{re.escape(m.group(2))}\b", re.IGNORECASE
+    )
+    limpio = re.sub(r"\s{2,}", " ", patron.sub("", termino)).strip(" ,-")
+    return limpio or termino
+
+
+def _titulo_por_marcas(productos: list[dict[str, Any]], term: str) -> str:
+    """Encabezado con la MARCA real cuando NINGÚN producto lleva el nombre pedido.
+
+    Mismo principio que el título sin dosis: el mensaje no puede encabezar con algo que
+    acaba de negar. Caso real (provider 32, 2026-10-28): «Metronidazol ovulos» → aviso
+    "No tengo METRONIDAZOL en óvulos con ese nombre" y debajo el encabezado
+    "METRONIDAZOL OVULOS", cuando el único producto era OVUMET. Encabeza OVUMET.
+    """
+    if not productos or not term:
+        return term
+    nucleo = ((_termino_sin_forma(term) or term).split() or [""])[0].lower()
+    titulos = [str(p.get("producto") or p.get("nombre") or "") for p in productos]
+    if not nucleo or any(
+        _normalizar_tildes(nucleo) in _normalizar_tildes(x.lower()) for x in titulos if x
+    ):
+        return term  # algún producto sí lleva el nombre: el encabezado está bien
+    marcas: list[str] = []
+    for x in titulos:
+        primera = (x.split() or [""])[0].strip(" -.,:;()[]")
+        if len(primera) >= 3 and primera.upper() not in marcas:
+            marcas.append(primera.upper())
+    return " / ".join(marcas[:2]) if marcas else term
+
+
+def _avisos_de_lista(productos: list[dict[str, Any]], term: str) -> tuple[str, str]:
+    """Avisos que van ENCIMA de una lista y el término que debe usar el TÍTULO.
+
+    Devuelve `(avisos, termino_del_titulo)`. Los avisos son los que pueden aplicar:
+    concentración pedida que no está (`_aviso_dosis_agotada`) y envase pedido que no está
+    (`_aviso_envase_agotado`). Cuando la concentración falta, el título pierde esa
+    concentración: si no, el mensaje avisa del NO y a la vez encabeza con lo que pidió.
+
+    POR QUÉ AQUÍ: `_lista_con_aviso` es el punto único de los seis backstops que
+    reemplazan el texto del LLM por la lista real. Si el aviso se añade en el camino de la
+    receta pero no aquí, el mismo mensaje se responde distinto según qué backstop salte.
+
+    Caso real (conv 7, provider 05, 2026-10-27): "Acetaminofen de 600mg" no está en el
+    catálogo, y la respuesta salió por el backstop de omisión con 11 productos de 650/500
+    mg bajo el título "ACETAMINOFEN 600 MG", sin decir que el de 600 no existe.
+    """
+    if not productos or not term:
+        return "", term
+    partes: list[str] = []
+    titulo = term
+    dosis = _extraer_dosis(term)
+    if dosis:
+        aviso = _aviso_dosis_agotada(productos, dosis)
+        if aviso:
+            partes.append(aviso)
+            titulo = _titulo_sin_dosis(term, dosis)
+    envase = _envase_pedido_en_linea(term)
+    if envase:
+        aviso = _aviso_envase_agotado(productos, envase)
+        if aviso:
+            partes.append(aviso)
+    return " ".join(p for p in partes if p), titulo
+
+
+# Concentración escrita en el título de un producto: '650 MG', '120MG/5ML', '1 G'.
+# La unidad es de DOSIS o peso; nunca TAB/CAP, que son envase.
+_RE_CONCENTRACION_DE_NOMBRE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(mg|mcg|g|gr|ml|cc|ui)\b"
+    r"(?:\s*/\s*(\d+(?:[.,]\d+)?)\s*(ml|cc|g|gr)\b)?",
+    re.IGNORECASE,
+)
+
+
+def _concentracion_de_nombre(nombre: object) -> str:
+    """La concentración de un título de producto: 'ACETAMINOFEN 120MG/5ML X 120ML' → '120 mg/5 ml'.
+
+    Se salta los números de ENVASE: los que van tras la 'x' ('X 10 TAB', 'X 120ML') no
+    son concentración. Conserva la forma con volumen cuando la hay, porque '120 mg/5 ml'
+    de un jarabe no se puede comparar con '500 mg' de una tableta.
+    """
+    texto = str(nombre or "")
+    for m in _RE_CONCENTRACION_DE_NOMBRE.finditer(texto):
+        previo = texto[max(0, m.start() - 3): m.start()].strip().lower()
+        if previo.endswith("x"):
+            continue
+        num = m.group(1).replace(",", ".")
+        unidad = m.group(2).lower()
+        base = f"{num} {unidad}"
+        if m.group(3):
+            base += f"/{m.group(3).replace(',', '.')} {m.group(4).lower()}"
+        return base
+    return ""
+
+
+# Palabras que la CAJA imprime pero que no son el nombre del medicamento.
+# 'Medicamento Genérico' ocupa una línea entera de la caja y el OCR la devuelve pegada al
+# nombre ('Medicamento Fexofenadina Clorhidrato Calox'). Caso real 2026-10-27.
+_PALABRAS_DE_CAJA = {
+    "medicamento", "medicamentos", "generico", "genericos", "generica", "genericas",
+    # Etiquetas: el OCR devuelve el rótulo del campo pegado al nombre. Caso real: la misma
+    # caja de FEXOFENADINA se leyó 'Nombre del Fexofenadina Clorhidrato Calox'.
+    "nombre", "del", "descripcion", "producto", "presentacion",
+}
+
+
+def _cierra_siempre_los_titulos(token: str, productos: list[dict[str, Any]]) -> bool:
+    """¿Ese token aparece en los títulos y SIEMPRE como última palabra?
+
+    Es la firma del LABORATORIO: la marca se escribe al final del título
+    ('ACETAMINOFEN 500 MG X 10 TAB CALOX') y el fármaco, nunca — el fármaco abre el título
+    o va dentro de un paréntesis. Basta UNA aparición: en una búsqueda de 3 productos puede
+    ser que la marca aparezca en uno solo.
+
+    Caso en que NO debe disparar: 'acido folico', donde 'FOLICO' cierra algunos títulos
+    ('NONAFOL 5 MG X 30 TAB (ACIDO FOLICO)') pero en otros va en medio → no siempre cierra.
+    """
+    if not token:
+        return False
+    apariciones = 0
+    for p in productos:
+        toks = _tokens_de_titulo(
+            _titulo_normalizado(p.get("producto") or p.get("nombre") or p.get("title"))
+        )
+        if token in toks:
+            apariciones += 1
+            if toks[-1] != token:
+                return False
+    return apariciones >= 1
+
+
+# ── ¿EL EQUIPO VIENE CON LOS MATERIALES? ──────────────────────────────────────────
+# El catálogo no guarda el CONTENIDO de la caja: en `products-providers` el doc de un
+# glucómetro solo trae ProductTitle ("GLUCOMETRO GLM-78 X 1UND GLUCARE"), precio y stock.
+# Así que el agente no puede asegurar qué incluye — pero sí puede ofrecer los CONSUMIBLES
+# que vende por separado, que es lo que hace un humano de mostrador.
+#
+# Caso real (provider 32, 2026-10-27):
+#   "Digo q si el Glucómetro viene con todos los materiales o solo el aparato"
+_EQUIPOS_CONSUMIBLES: dict[str, tuple[str, ...]] = {
+    "glucometro": ("tiras reactivas", "lancetas"),
+    "glucometros": ("tiras reactivas", "lancetas"),
+}
+
+_RE_PREGUNTA_CONTENIDO = re.compile(
+    r"\b(viene\s+con|vienen\s+con|incluye|incluyen|trae|traen|contiene|contienen|"
+    r"completo|completa|kit|accesorios?|materiales?|aditamentos?|"
+    r"solo\s+el\s+aparato|sola\s+la\s+maquina|unicamente\s+el\s+aparato)\b",
+    re.IGNORECASE,
+)
+
+
+def _pregunta_por_contenido(texto: str) -> bool:
+    """¿El cliente pregunta qué INCLUYE el producto (caja/kit/accesorios)?"""
+    return bool(_RE_PREGUNTA_CONTENIDO.search(_normalizar_tildes((texto or "").lower())))
+
+
+def _familia_de_equipo(nombre: str) -> str | None:
+    """Familia de equipo del término/producto, si es un aparato con consumibles."""
+    n = _normalizar_tildes((nombre or "").lower())
+    for familia in _EQUIPOS_CONSUMIBLES:
+        if re.search(rf"\b{re.escape(familia)}\b", n):
+            return familia
+    return None
+
+
+# ── ¿EL CLIENTE PIDE UNA FOTO DEL PRODUCTO? ───────────────────────────────────────
+# El agente NO puede enviar fotos desde el catálogo (los productos del tenant no traen
+# imagen utilizable), así que decir "aquí tienes la foto" es una alucinación; y buscar
+# "fotos" en el catálogo devuelve cualquier cosa (FOTORRETIN, linternas).
+#
+# Caso real (provider 32, 2026-10-27):
+#   "Tendrás una foto"            → "Aquí tienes la foto del producto Atamel…" (falsa)
+#   "Me puede enviar unas fotos"  → "Actualmente no tenemos linternas en nuestro catálogo"
+_RE_PIDE_FOTO = re.compile(
+    r"\b(?:"
+    r"puede[sn]?|podrias?|podrian|podria|tendras|tendra|tienes|tiene[n]?|"
+    r"enviar|envias|envies|enviame|enviarme|mandar|mandas|mandame|mandarme|"
+    r"dame|necesito|quisiera|quiero|solicito|solicitar|consigo|hay"
+    r")\b[^.?!]{0,45}\b(?:foto|fotos|fotografia|imagen|imagenes)\b"
+    r"|\b(?:foto|fotos|imagen|imagenes)\b[^.?!]{0,25}\?",
+    re.IGNORECASE,
+)
+
+RESPUESTA_FOTO = (
+    "¡Con gusto! En un momento le enviaremos la foto del producto solicitado. 🙌"
+)
+
+
+# ── RECETA ESCRITA A MANO ─────────────────────────────────────────────────────────
+# La letra a mano NO se lee con fiabilidad: el OCR adivina nombres y el agente acaba
+# cotizando fármacos que nadie recetó. Caso real (provider 32, 2026-10-28): receta
+# manuscrita de ISTRILAB ("Amonicilina… Broncef… Budicort gotas… Nistatina… Vit D3…").
+#
+# Regla del usuario: cuando la receta es manuscrita, NO se traduce — se avisa que un
+# auxiliar atiende. El marcador lo pone `media.MARCA_MANUSCRITA` cuando el OCR declara
+# que el texto es manuscrito.
+PREGUNTA_RECOMENDACION = (
+    "Para buscarlo bien necesito el nombre o la marca del producto. 🙏 "
+    "¿Cuál es? (por ejemplo el champú, la crema o el tratamiento que usas)"
+)
+
+
+RESPUESTA_RECETA_MANUSCRITA = (
+    "Recibí tu receta. 🙏 Como está escrita a mano, prefiero no interpretarla antes que "
+    "darte un medicamento equivocado.\n"
+    "En un momento un auxiliar te atiende y te la cotiza. ✅"
+)
+
+RESPUESTA_RECETA_DUDOSA = (
+    "Recibí tu receta. 🙏 No logro leerla con seguridad y prefiero no arriesgarme a darte "
+    "un medicamento equivocado.\n"
+    "En un momento un auxiliar te atiende y te la cotiza. ✅"
+)
+
+
+def _receta_ilegible(user_text: str) -> str | None:
+    """Tipo de receta que NO se transcribe: 'mano', 'dudosa' o None.
+
+    El marcador lo pone `media` cuando el OCR parece receta y la comprobación de
+    legibilidad dice que no se puede leer con seguridad.
+    """
+    t = user_text or ""
+    if "RECETA ESCRITA A MANO" in t:
+        return "mano"
+    if "RECETA DE LECTURA DUDOSA" in t:
+        return "dudosa"
+    return None
+
+
+def _pide_foto(texto: str) -> bool:
+    """¿El cliente pide una FOTO/imagen del producto? (no cuando él la envía)."""
+    t = _normalizar_tildes((texto or "").lower())
+    if not t:
+        return False
+    # 'foto' tiene que aparecer; el patrón exige además un verbo de petición o pregunta.
+    if "foto" not in t and "imagen" not in t and "fotografia" not in t:
+        return False
+    return bool(_RE_PIDE_FOTO.search(t))
+
+
+def _familia_de_pregunta_contenido(
+    user_text: str, last_term: str | None, last_product: Any
+) -> str | None:
+    """Familia del equipo si el cliente pregunta por el CONTENIDO de ESE equipo.
+
+    Devuelve None si no aplica. El caso «el cliente repite el mismo aparato» NO es una
+    consulta nueva: `_trae_medicamento_propio` devuelve True porque el mensaje nombra un
+    producto ('Digo q si el Glucómetro viene con todos los materiales…'), y sin esta
+    excepción el guard no disparaba nunca.
+    """
+    if not _pregunta_por_contenido(user_text):
+        return None
+    en_ctx = str(last_term or "")
+    if isinstance(last_product, dict):
+        en_ctx = f"{en_ctx} {last_product.get('producto') or last_product.get('nombre') or ''}"
+    # El equipo puede estar en el contexto (el turno anterior) o nombrado en el propio
+    # mensaje: "¿el glucómetro viene con las tiras?" tiene que funcionar también como
+    # primera consulta, sin un turno previo que lo haya listado.
+    familia = _familia_de_equipo(en_ctx) or _familia_de_equipo(user_text)
+    if not familia:
+        return None
+    # Si además pide OTRO medicamento, manda el flujo normal: no se puede dejar su
+    # petición sin atender por contestar la duda del aparato.
+    for term in _medicamentos_enumerados(user_text):
+        if (
+            term
+            and _termino_es_medicamento_plausible(term)
+            and _familia_de_equipo(term) != familia
+        ):
+            return None
+    return familia
+
+
+def _respuesta_contenido_equipo(producto: str, consumibles: list[dict[str, Any]]) -> str:
+    """Respuesta humana a «¿el aparato viene con los materiales?».
+
+    Honesta en lo que el catálogo NO dice (el contenido de la caja) y ÚTIL en lo que sí
+    sabe (los insumos que se venden aparte). Un mostrador contesta exactamente así.
+    """
+    nombre = (producto or "el aparato").strip().upper()
+    partes = [
+        f"Te cuento: en el catálogo el {nombre} figura como una unidad y no detalla qué "
+        "trae la caja, así que no puedo confirmarte si viene con todos los materiales. "
+        "Si quieres, se lo consulto a la farmacia. 🙏"
+    ]
+    if consumibles:
+        partes.append("")
+        partes.append("Lo que sí tengo por separado:")
+        # Se reutiliza el formateador canónico y se descarta su encabezado: aquí ya lo
+        # pone la frase de arriba.
+        bloque = _formatear_lista_productos(consumibles, "_")
+        partes.append(bloque.split("\n", 1)[1] if "\n" in bloque else bloque)
+        partes.append("")
+        partes.append("¿Te los agrego al pedido?")
+    return "\n".join(partes)
+
+
+def _titulo_de_lista(titulo: str, productos: list[dict[str, Any]]) -> str:
+    """Encabezado de la lista sin el texto de la caja ni el laboratorio.
+
+    Caso real (conv 7, provider 05, 2026-10-27): la foto de una caja de
+    `Fexofenadina Clorhidrato CALOX` se leyó como `Medicamento Fexofenadina Clorhidrato
+    Calox`, y el encabezado salió tal cual: 'MEDICAMENTO' delante ('Medicamento Genérico'
+    es texto de la caja) y la marca detrás.
+
+    El laboratorio NO se detecta por una lista de marcas: se confirma contra los productos
+    devueltos con `_es_nombre_de_laboratorio`, que exige que ese token CIERRE la mayoría de
+    los títulos. Así 'CALOX' se quita y 'FEXOFENADINA' nunca se toca, porque el fármaco abre
+    el título, no lo cierra. Nunca se deja el título vacío ni con una sola palabra.
+    """
+    palabras = [w for w in re.split(r"\s+", (titulo or "").strip()) if w]
+    if not palabras:
+        return titulo
+    limpio = [
+        w for w in palabras
+        if _normalizar_tildes(w.lower()).strip(" -.,;:()[]") not in _PALABRAS_DE_CAJA
+    ]
+    if not limpio:
+        return titulo
+    if len(limpio) > 2:
+        ultimo = _normalizar_tildes(limpio[-1].lower()).strip(" -.,;:()[]")
+        if ultimo and (
+            _es_nombre_de_laboratorio(ultimo, productos)
+            or _cierra_siempre_los_titulos(ultimo, productos)
+        ):
+            limpio = limpio[:-1]
+    return " ".join(limpio).strip() or titulo
+
+
+def _aviso_dosis_agotada(products: list[dict[str, Any]], dosis: str) -> str:
+    """Aviso cuando el cliente pidió una CONCENTRACIÓN que el catálogo no tiene.
+
+    POR QUÉ HACE FALTA: `_filtrar_por_dosis` tiene el mismo fallback que el de envase —
+    si nada coincide, devuelve la lista completa para no negar el medicamento. Pero sin
+    este aviso el cliente pide 'Acetaminofen de 600 mg' y recibe una lista de 650 y 500 mg
+    bajo el título 'ACETAMINOFEN 600MG': cree que le están ofreciendo lo que pidió. Es el
+    fallo de «re-listar sin decir el NO», el mismo que ya se arregló para el envase.
+
+    Caso real (conv 7, provider 05, 2026-10-27):
+        "Acetaminofen de 600mg" → 11 productos de 650, 500, 120, 150 y 180 mg, sin aviso.
+
+    Devuelve '' si la concentración pedida SÍ está, o si no se puede leer ninguna del
+    catálogo (en ese caso no hay nada cierto que prometer).
+    """
+    if not dosis or not products:
+        return ""
+    objetivo = dosis.replace(",", ".").strip()
+    m = re.match(r"(\d+(?:\.\d+)?)", objetivo)
+    if not m:
+        return ""
+    num = m.group(1)
+    solidos: list[str] = []
+    liquidos: list[str] = []
+    for p in products:
+        titulo = str(p.get("producto") or p.get("nombre") or p.get("title") or "")
+        conc = _concentracion_de_nombre(titulo)
+        if not conc:
+            continue
+        es_liquido = "/" in conc or re.search(
+            r"\b(?:jbe|jarabe|susp|suspension|suspensión|gotas|gts|solucion|solución)\b",
+            titulo,
+            re.IGNORECASE,
+        )
+        destino = liquidos if es_liquido else solidos
+        if conc not in destino:
+            destino.append(conc)
+    if not solidos and not liquidos:
+        return ""
+    vistos = {c.split()[0].replace(",", ".") for c in solidos + liquidos}
+    if num in vistos:
+        return ""
+
+    def orden(lista: list[str]) -> list[str]:
+        try:
+            return sorted(lista, key=lambda c: float(c.split()[0].replace(",", ".")))
+        except (ValueError, IndexError):
+            return lista
+
+    solidos, liquidos = orden(solidos), orden(liquidos)
+    # La pedida se muestra con unidad si el cliente la escribió; si no, con la unidad de
+    # la primera alternativa disponible (es la familia del mismo fármaco).
+    referencia = (solidos or liquidos)[0]
+    pedida = objetivo if re.search(r"[a-z]", objetivo) else f"{num} {referencia.split()[1]}"
+    if solidos and liquidos:
+        detalle = (
+            f"{', '.join(solidos)}. También en jarabe/gotas: {', '.join(liquidos)}"
+        )
+    else:
+        detalle = ", ".join(solidos or liquidos)
+    return f"⚠️ No tengo de {pedida}. Lo tengo en: {detalle}."
+
+
+def _aviso_envase_agotado(products: list[dict[str, Any]], envase: str) -> str:
+    """Aviso cuando el cliente pidió un envase que NO existe: 'Lo tengo en: 30 unidades.'
+
+    POR QUÉ HACE FALTA: `_filtrar_por_envase` tiene un fallback —si ningún producto tiene el
+    envase pedido, devuelve la lista completa— para no negar el medicamento. Pero sin este
+    aviso el cliente ve el envase de 30 SIN QUE NADIE LE DIGA que el de 60 que pidió no
+    está: no puede distinguir «no lo tengo en 60» de «no me entendió». Es el mismo fallo que
+    ya se arregló en el guard de envase (`_respuesta_envase_agotado`): re-listar sin decir el
+    NO es no responder.
+
+    Caso real (conv 2109, provider 19): el cliente pidió 'flextrin x 60' y el catálogo solo
+    tiene FLEXTRIN X 30 CAPS BLANDAS. Recibía el de 30 a secas.
+
+    Devuelve '' si no hay nada que avisar (el envase pedido SÍ está, o no se pidió ninguno).
+    """
+    if not envase or not products:
+        return ""
+    tamanos: list[str] = []
+    for p in products:
+        tam = _envase_de_nombre(
+            p.get("producto") or p.get("nombre") or p.get("title")
+        )
+        if tam and tam not in tamanos:
+            tamanos.append(tam)
+    if not tamanos or envase in tamanos:
+        return ""
+    try:
+        tamanos = sorted(tamanos, key=int)
+    except ValueError:
+        tamanos = sorted(tamanos)
+    detalle = ", ".join(f"{t} unidades" for t in tamanos)
+    return f"⚠️ No tengo envase de {envase} unidades. Lo tengo en: {detalle}."
+
+
+def _envase_pedido_en_linea(linea: str) -> str:
+    """El envase que el cliente pidió en ESA línea de la consulta.
+
+    Se prueba primero `_pedido_de_envase` (que exige la forma escrita: 'de 10 pastillas',
+    '30 tabletas') y solo si no hay nada se cae a la forma 'X N', que es como escribe la
+    mayoría: 'x 30 Tab', 'metformina de 500 x 30', 'flextrin x 60'.
+
+    POR QUÉ NO SE TOCA `_pedido_de_envase`: esa función alimenta el GUARD de envase
+    agotado, que decide cuándo se le responde al cliente "no lo tengo en envase de N".
+    Ampliarla cambiaría cuándo dispara ese mensaje. Aquí solo se necesita saber el número
+    para filtrar, así que la ampliación se queda local.
+    """
+    pedido = _pedido_de_envase(linea)
+    if pedido:
+        return pedido
+    # La forma 'X N' se resuelve con `_envase_de_nombre`, que ya sabe que la 'x' final
+    # del nombre NO es separador ('evigax 125 mg' → 125 es DOSIS, no 125 cajas) y que
+    # un número con unidad de peso/volumen tampoco es envase. Antes había aquí una
+    # segunda copia del parseo, sin esas salvaguardas: el mismo texto se leía bien por
+    # un camino y mal por el otro (caso conv 7, provider 05).
+    return _envase_de_nombre(linea)
+
+
+# Regex de la DOSIS escrita ANTES del envase: en "<nombre> <n> x <m>", el número que
+# precede al 'x' es la dosis y el que sigue es el tamaño de caja.
+_RE_DOSIS_ANTES_DE_ENVASE = re.compile(r"\b(\d+(?:[.,]\d+)?)\s*x\s*\d+\b", re.IGNORECASE)
+
+
+def _dosis_antes_del_envase(texto: str) -> str:
+    """La DOSIS del patrón '<nombre> <dosis> x <envase> <forma>' — sin unidad escrita.
+
+    El cliente suele escribir la dosis SIN 'mg' cuando ya la acompaña del envase:
+        'candesatan 16 x 30 Tab'   → 16 es la dosis (candesartán 16 mg), 30 el envase
+        'metformina de  500 x 30'  → 500 la dosis, 30 el envase
+    `_extraer_dosis` exige la unidad (`4 MG`), así que en estos dos casos no devolvía
+    nada y el filtro de concentración NO se aplicaba: el cliente pedía metformina 500 y
+    recibía 850, 1000 y hasta 1 MG mezclados (caso real conv 2109, provider 19).
+
+    El 'x' es el desambiguador que da el propio cliente: el número ANTES es la dosis y
+    el DE DESPUÉS el envase (`_pedido_de_envase`). Sin 'x' no se asume nada:
+    'flextrin x 60' no tiene dosis, y '2 cajas de metformina 500' lo cubre el guard de
+    cantidad de compra.
+    """
+    m = _RE_DOSIS_ANTES_DE_ENVASE.search(texto or "")
+    return m.group(1) if m else ""
+
+
+# --- RECLAMO: el cliente corrige lo que YA recibió; no pide nada nuevo ---
+# Caso real (conv cv_5xcp1rqrsxiegmd4evcz):
+#     cliente: "Buenos días, eso no es lo que pedi"
+#     agente : "⚠️ No disponibles en el catálogo: DÍAS" + "PEDI" + 20 PEDIATRICOS
+# El mensaje es un RECLAMO. `_parece_lista_medicamentos` no lo cubría porque solo excluye
+# negativa y despedida, y un reclamo no es ninguna de las dos. Al trocearlo por la coma, las
+# piezas ('días', 'pedi') se consultaban como medicamentos.
+_RE_RECLAMO = re.compile(
+    r"(?:eso|esto|ese|esa)\s+no\s+(?:es|era|fue)\s+lo\s+que"
+    r"(?:\s+(?:pedi|pedí|queria|quería|quiero|solicite|solicité|pedia|pedir|mande|envie))?"
+    r"|no\s+es\s+lo\s+que\s+(?:pedi|pedí|queria|quería|quiero|solicite|solicité)"
+    r"|no\s+(?:era|es)\s+(?:eso|esto|lo\s+que)"
+    r"|yo\s+(?:pedi|pedí|queria|quería)\s+(?:otra|otro|esto|eso)"
+    r"|me\s+(?:diste|mando|enviaste|dieron)\s+otra\s+cosa"
+    r"|(?:otra|otro)\s+vez\s+(?:mal|equivocado)"
+    r"|(?:esta|está)\s+mal\s+(?:la\s+)?(?:respuesta|opción|busqueda|búsqueda)"
+    r"|no\s+era\s+(?:eso|ese|esta|este)",
+    re.IGNORECASE,
+)
+
+# --- CORTESÍA EXPLICATIVA: bendiciones y buenos deseos, sin datos de producto ---
+# Caso real (misma conversación, 02-Oct), cliente:
+#     "Buen día, y dios le bendiga su día, si puedes por favor verificar el nombre se
+#      escribe así somazina, es del grupo leti"
+# el agente buscó 'DEL GRUPO LETI' y 'DÍA' y respondió con 20 PEDIATRICOS. La consulta real
+# (SOMAZINA) ya se había atendido; esto es conversación.
+#
+# NO se filtra 'día'/'dias' como palabra: medido, es token de 'LINOFEME COMPRIMIDOS 21 DIAS'.
+# Se detecta la FRASE de bendición.
+_RE_BENDICION = re.compile(
+    r"(?:dios\s+le\s+bendiga|que\s+dios|bendiciones|dios\s+te\s+bendiga"
+    r"|que\s+(?:tengas?|pases?)\s+(?:un\s+)?(?:buen|feliz|lindo))",
+    re.IGNORECASE,
+)
+
+
+def _es_reclamo_o_cortesia(texto: str) -> bool:
+    """True si el mensaje es un RECLAMO o CORTESÍA, no una consulta de medicamento.
+
+    POR QUÉ: estos mensajes son conversación y el troceo por comas convierte sus pedazos en
+    "medicamentos" que se consultan y se presentan como no disponibles, con una lista de
+    productos que nadie pidió. Dos casos reales (conv cv_5xcp1rqrsxiegmd4evcz):
+        "Buenos días, eso no es lo que pedi"          → buscó 'días', 'pedi'
+        "Buen día, y dios le bendiga su día, ... es del grupo leti" → buscó 'del grupo leti', 'día'
+    en ambos el cliente recibió 20 productos PEDIATRICOS.
+
+    NO basta con filtrar las palabras: medido contra el catálogo, 'pedi' es token de
+    'APETININ JBE PEDI' y 'dias' de 'LINOFEME COMPRIMIDOS 21 DIAS'. Hay que reconocer el
+    MENSAJE, no la palabra.
+
+    Un reclamo o una bendición no piden un producto NUEVO. Si además trae un fármaco real
+    ('Buenos días, necesito atamel forte'), el término se busca por el camino normal.
     """
     if not texto:
         return False
-    t = texto.strip().lower()
-    # Una LISTA de medicamentos es una enumeración de nombres, SIN verbo de
-    # consulta. Si el texto tiene "tiene/tienes/hay/busco..." es una consulta
-    # simple (aunque lleve comas y "y": "depomedrol 125mg o 500 MG, marca y
-    # precio" NO es una receta).
-    if _VERBOS_MEDICAMENTO.search(t):
+    t = texto.strip()
+    return bool(_RE_RECLAMO.search(t) or _RE_BENDICION.search(t))
+
+
+def _medicamentos_con_dosis(texto: str) -> list[tuple[str, str]]:
+    """Medicamentos de una consulta enumerada, cada uno con la dosis que el cliente pidió.
+
+    Devuelve [(termino_limpio, dosis_sin_unidad)]. La dosis va SEPARADA del término a
+    propósito: el término debe ir limpio para que la cascada de typos resuelva el nombre
+    (medido: pegar la dosis convierte 'hidrocoticida 12.5 mg' en 'hidrocoticida 12 5 mg' y
+    ya no encuentra el fármaco), y la dosis se aplica después filtrando los productos.
+
+    Caso real (provider 05): "Dame precio de hidrocoticida de 12.5 / Cardesartan de 16 /
+    Cardevidol 6.25" — el cliente dijo la dosis de cada uno y recibía todas las
+    concentraciones mezcladas.
+    """
+    if not texto:
+        return []
+    pares: list[tuple[str, str]] = []
+    vistos: set[str] = set()
+    for linea in _lineas_lista_medicamentos(texto):
+        limpia = _sin_motivo(linea)
+        term = _extraer_termino_medicamento(limpia)
+        if not term or not _termino_es_medicamento_plausible(term):
+            continue
+        # La dosis se busca en la LÍNEA (donde vive el número), no en el término ya limpio.
+        # OJO: tiene que ser la LÍNEA. El término limpio ya perdió el número cuando el
+        # cliente escribió la dosis sin unidad ('candesatan 16 x 30 Tab' → 'candesatan
+        # 30 tab'), así que ahí no hay nada que encontrar.
+        # Y `_dosis_antes_del_envase` va ANTES de los respaldos sobre el TÉRMINO: el
+        # término puede acabar con el tamaño de caja ('metformina 30') y colarse como si
+        # fuera la concentración, pisando el '500' que sí está en la línea.
+        dosis = (
+            _extraer_dosis(linea)
+            or _dosis_antes_del_envase(linea)
+            or _dosis_sin_unidad(limpia)
+            or _dosis_sin_unidad(term)
+        )
+        if term in vistos:
+            continue
+        vistos.add(term)
+        pares.append((term, dosis))
+    return pares
+
+
+def _parece_lista_medicamentos(texto: str) -> bool:
+    """True si la consulta ENUMERA 2+ medicamentos (aunque pida el precio).
+
+    'esoz, leprit y evigax'                          → True
+    'Precio de valsartan 80 hidroclorotiazida y omeprazol' → True  ← el caso reportado
+    'tienes atamel forte?'                          → False (consulta simple)
+    'precio del atamel'                             → False (un solo medicamento)
+
+    OJO — el verbo de consulta NO descalifica la lista. Antes esto cortaba con False en
+    cuanto aparecía 'precio'/'tienes', así que pedir el precio de VARIOS medicamentos se
+    trataba como consulta simple y el agente respondía solo UNO. Lo que decide es
+    CUÁNTOS medicamentos distintos menciona, no el motivo por el que los pide.
+    """
+    if not texto:
         return False
-    # Separadores de lista explícitos (comas, 'y', 'ademas')
-    if re.search(r"[,;]|(?:\s+y\s+)|(?:ademas)", t):
-        # Separar por comas primero (una línea puede tener varios medicamentos)
-        trozos = re.split(r"[,;]+|\s+y\s+", texto, flags=re.IGNORECASE)
-        terminos = _parsear_medicamentos_receta("\n".join(p.strip() for p in trozos if p.strip()))
-        return len(terminos) >= 2
-    # Múltiples líneas con contenido (sin ser OCR)
+    # Una NEGATIVA o despedida NUNCA es una lista. Sin este guard,
+    # "No gracias no las voy a comprar y disculpe" se partía por la 'y' y el agente
+    # respondía "No disponibles: DISCULPE VOY COMPRAR" más una lista de chocolates.
+    if _es_negativa_o_despedida(texto):
+        return False
+    # UN RECLAMO O UNA CORTESÍA TAMPOCO ES UNA LISTA. Casos reales (conv
+    # cv_5xcp1rqrsxiegmd4evcz): "Buenos días, eso no es lo que pedi" buscó 'días' y 'pedi', y
+    # "y dios le bendiga su día ... es del grupo leti" buscó 'del grupo leti' y 'día'. En
+    # ambos el cliente recibió 20 productos PEDIATRICOS que no pidió. Es conversación, y sus
+    # pedazos parecen medicamentos solo por el troceo.
+    #
+    # OJO: si el mensaje trae TAMBIÉN un fármaco real, sigue siendo consulta. Se exige que
+    # no haya un término de medicamento plausible en el texto.
+    if _es_reclamo_o_cortesia(texto):
+        # Se QUITAN los tramos que son reclamo/bendición y se mira si queda algún fármaco.
+        # Sin quitarlos, 'Buenos días, eso no es lo que pedi' dejaba el resto
+        # 'buenos dias pedi', que pasa el filtro de plausibilidad (3 palabras, ninguna
+        # funcional) aunque no sea un medicamento. Al quitar el reclamo queda 'Buenos días,'
+        # y ahí sí se ve que no pide nada.
+        #
+        # Así "no es lo que pedí, necesito atamel forte" SIGUE siendo consulta: al quitar el
+        # reclamo queda 'necesito atamel forte', con un fármaco real.
+        resto = _RE_BENDICION.sub(" ", _RE_RECLAMO.sub(" ", texto))
+        resto = _limpiar_termino_medicamento(_sin_motivo(resto)) or ""
+        if not _termino_es_medicamento_plausible(resto):
+            return False
+
+    # Con separadores de enumeración: contar los medicamentos de cada trozo.
+    if _RE_SEP_LISTA.search(texto):
+        return len(_medicamentos_enumerados(texto)) >= 2
+
+    # Sin separadores: varias LÍNEAS con medicamento (receta escrita en vertical).
     lineas = [l.strip() for l in texto.splitlines() if l.strip()]
     if len(lineas) >= 2:
-        terminos = _parsear_medicamentos_receta(texto)
-        return len(terminos) >= 2
+        return len(_parsear_medicamentos_receta(_sin_motivo(texto))) >= 2
     return False
 
 
@@ -3880,6 +7174,19 @@ def _parsear_medicamentos_receta(texto: str) -> list[str]:
         # receta y el agente respondía con una lista de medicamentos.
         if term and not _termino_es_medicamento_plausible(term):
             continue
+        # LA DOSIS CON UNIDAD SE CONSERVA; LA QUE VA SIN UNIDAD **NO** SE PEGA AQUÍ.
+        #
+        # `_extraer_termino_medicamento` ya conserva '20 mg' (número + unidad). Pero
+        # cuando el cliente escribe la dosis SIN 'mg' ("Cardesartan de 16"), el número se
+        # descarta y el término queda sin dosis.
+        #
+        # NO se reinyecta aquí a propósito: se MEDIÓ que pegar la dosis rompe la corrección
+        # de typos. `_quitar_saludos` convierte el decimal en un espacio
+        # ('hidrocoticida 12.5 mg' → 'hidrocoticida 12 5 mg') y la cascada de typos ya no
+        # encuentra el fármaco → 0 productos. El typo necesita el nombre LIMPIO.
+        #
+        # La dosis se aplica DESPUÉS, filtrando los productos devueltos
+        # (`_filtrar_por_dosis` en el bucle de la receta). Ver `_dosis_sin_unidad`.
         if term and term not in vistos:
             vistos.add(term)
             out.append(term)
@@ -3889,6 +7196,7 @@ def _parsear_medicamentos_receta(texto: str) -> list[str]:
 def _formatear_receta(
     grupos: list[tuple[str, list[dict[str, Any]]]],
     no_disponibles: list[str] | None = None,
+    avisos: dict[str, str] | None = None,
 ) -> str:
     """Genera la respuesta de receta en formato determinista, con numeración
     GLOBAL corrida entre medicamentos:
@@ -3925,6 +7233,12 @@ def _formatear_receta(
             ),
         )
         lineas.append(titulo.strip().upper())
+        # El aviso va pegado a su medicamento: el cliente acaba de leer el nombre y
+        # necesita saber que el envase que pidió no está, ANTES de la lista.
+        _aviso = (avisos or {}).get(titulo.strip().upper())
+        if _aviso:
+            lineas.append(_aviso)
+            lineas.append("")
         for p in ordenados:
             n += 1
             nombre = str(p.get("producto") or p.get("title") or "").strip()
@@ -3955,7 +7269,18 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
     """
     if not texto:
         return None
-    palabras = re.findall(r"[a-záéíóúüñ0-9]+", texto.lower())
+    # La FRASE de indicación ('tos seca', 'dolor de cabeza') no es parte del nombre: describe
+    # para qué sirve. Sin quitarla, el TÍTULO y el término arrastraban la enfermedad
+    # ('BROXOL TOS SECA') y la búsqueda se degradaba de 11 productos a 3 basura.
+    texto = _sin_frase_de_indicacion(
+        texto.lower()
+        .replace("á", "a").replace("é", "e").replace("í", "i")
+        .replace("ó", "o").replace("ú", "u")
+    )
+    # 'de la opción 9' es una REFERENCIA A LA LISTA, no una dosis: el '9' no puede entrar
+    # en el término (el catálogo recibía 'macrodantina vitamina c 9').
+    texto = re.sub(r"\b(?:opci[oó]n|opciones|n[uú]mero)\s+\d+", " ", texto)
+    palabras = re.findall(r"[a-záéíóúüñ0-9]+", texto)
     # La unidad HABLADA se normaliza ANTES de decidir ("nifedipina 30 miligramos"
     # → "nifedipina 30 mg"). Sin esto el 30 se descarta por ir seguido de una
     # palabra que no está en la lista de unidades y la dosis se pierde.
@@ -3963,7 +7288,10 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
     # Verbos de consulta, relleno y apelativos de cortesía: nunca son parte del
     # medicamento.
     verbos = set(re.findall(r"[a-záéíóúüñ]+", _VERBOS_MEDICAMENTO.pattern))
-    excluidas = _FILLER | verbos | _APELATIVOS
+    excluidas = (
+        _FILLER | verbos | _VIAS_ADMINISTRACION | _CATEGORIAS_TERAPEUTICAS
+        | _APELATIVOS
+    )
     # Unidades de dosis que SÍ son parte del término: mg, ml, mcg, gotas, etc.
     unidades = {"mg", "ml", "mcg", "gotas", "ampolla", "ampollas", "jarabe",
                 "tabletas", "tab", "capsulas", "cap", "crema", "spray",
@@ -3972,6 +7300,11 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
     for i, w in enumerate(palabras):
         # Unidades (mg, ml, tab...) son cortas pero válidas
         if w in unidades:
+            terminos.append(w)
+            continue
+        # LA LETRA DE LA VITAMINA. 'la vitamina C' se quedaba en 'vitamina' y el cliente
+        # recibía 20 productos de Vitamina E, K, B12 y colágeno (provider 32, 2026-10-29).
+        if _es_letra_de_vitamina(w, " ".join(palabras)):
             terminos.append(w)
             continue
         if len(w) < 3:
@@ -3983,18 +7316,13 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
                 and palabras[i + 1] in unidades
             ):
                 terminos.append(w)
-            # F14.1: la LETRA de la vitamina es parte del nombre y DISCRIMINA el
-            # producto — "vitamina C" y "vitamina K" son medicamentos distintos y
-            # el catálogo filtra por esa letra. Descartarla por corta dejaba el
-            # término en "vitamina", y el cliente que pidió la C recibía también
-            # las K. Solo se conserva tras la palabra "vitamina" (nunca suelta:
-            # 'y c' de cualquier frase no es un fármaco).
-            elif (
-                len(w) == 1
-                and w in "abcdefgk"
-                and i > 0
-                and _sin_tildes(palabras[i - 1]) in {"vitamina", "vitaminas"}
-            ):
+                continue
+            # CÓDIGO del nombre ('d3', 'k2', 'b6'): corto pero identifica el producto.
+            # Sin esto, 'vitamina d3/k2' se reducía a 'vitamina' y el cliente recibía
+            # multivitaminas, B12 y hasta JABÓN CON PROVITAMINA B5. (Hay una regla
+            # gemela en `_limpiar_termino_medicamento`; las dos limpian el término por
+            # caminos distintos y las dos tienen que conservarlo.)
+            if any(c.isdigit() for c in w):
                 terminos.append(w)
             continue
         if _sin_tildes(w) in excluidas:
@@ -4004,6 +7332,18 @@ def _extraer_termino_medicamento(texto: str) -> str | None:
                 terminos.append(w)
             continue
         terminos.append(w)
+    if not terminos:
+        return None
+    # PRIMERAS palabras funcionales FUERA: 'el precio DEL fulgran' deja 'del fulgran'.
+    # Se quitan solo al INICIO (nunca en medio: 'del' vive dentro de nombres reales
+    # como 'JUGO DEL VALLE'). Se midió que ningún producto del catálogo EMPIEZA por
+    # estas palabras, así que quitarlas aquí no puede borrar un término legítimo.
+    while terminos and terminos[0] in _FILLER_INICIAL:
+        terminos.pop(0)
+    # Igual al final: 'naproxeno por favor' ya está cubierto por _FILLER, pero una
+    # preposición suelta al cierre ('... de') no aporta nada al matcher.
+    while terminos and terminos[-1] in _FILLER_INICIAL:
+        terminos.pop()
     if not terminos:
         return None
     return " ".join(terminos)

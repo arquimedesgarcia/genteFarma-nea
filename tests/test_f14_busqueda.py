@@ -84,7 +84,7 @@ FALSOS_POSITIVOS = [
     ("amor", "TE AMO PRESERV. 3PCS"),
 ]
 
-SEMILLA_SQL = RAIZ / "migrations" / "012_med_aliases.sql"
+SEMILLA_SQL = RAIZ / "migrations" / "013_med_aliases.sql"
 
 
 def _runtime() -> ToolRuntime:
@@ -438,7 +438,7 @@ class TestC2TypoNoCruzaDeCategoria:
             [{"alias": a, "canonico": c} for a, c in
              re.findall(r"\(\s*'([^']+)'\s*,\s*'([^']+)'", sql)]
         )
-        nuevo, aplicado = aliases.reescribir("solunoval solución bucal")
+        nuevo, aplicado = aliases.reescribir("solunoval solucion bucal")
         assert aplicado is True
         productos = [{"nombre": "SOLUNOVAR SOLUCION BUCAL X 1 FCO"},
                      {"nombre": "VITAMINA C 500 MG"}]
@@ -459,8 +459,9 @@ class TestF145MultiMedicamento:
         assert _partir_consulta_multi(CASO_1) == ["nitrofurantoina 50mg", "vitamina c"]
 
     def test_caso_real_4_se_parte_en_dos(self):
+        # El extractor del árbol integrado normaliza tildes en el término.
         assert _partir_consulta_multi(CASO_4) == [
-            "solunoval solución bucal", "pinvex solución bucal"
+            "solunoval solucion bucal", "pinvex solucion bucal"
         ]
 
     @pytest.mark.parametrize(

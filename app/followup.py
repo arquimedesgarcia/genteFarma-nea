@@ -20,6 +20,7 @@ from app.prompt import FOLLOWUP_INSTRUCTION, build_system_prompt
 from app.state import AppContext, Conversation, utcnow
 from app.turn import conversation_lock
 from app.turn import _agent_tz
+from app.wtext import a_formato_whatsapp
 
 logger = logging.getLogger("nea.followup")
 
@@ -335,7 +336,7 @@ class FollowupWorker:
             )
             return
         try:
-            await ctx.crm.send_message(str(crm_conv_id), text)
+            await ctx.crm.send_message(str(crm_conv_id), a_formato_whatsapp(text))
         except CrmConflict as exc:
             logger.info("followup %s: bloqueado por el CRM (%s)", conv.wa_identity, exc.code)
             return

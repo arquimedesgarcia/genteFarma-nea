@@ -8,10 +8,11 @@ Artefactos de esta fase (todo reproducible):
 | Archivo | Qué es |
 |---|---|
 | `eval/f14-busqueda/simular_casos.py` | simulación determinista de los 4 casos reales (sin LLM); corre por `--root` contra el árbol previo y el actual |
-| `eval/f14-busqueda/antes.json` / `ahora.json` | salida cruda de esa simulación en los dos árboles |
+| `eval/f14-busqueda/antes.json` / `ahora.json` | salida cruda de esa simulación: base `1026506` y árbol final mergeado |
+| `eval/f14-busqueda/cliente-9880917.json` | salida cruda del árbol del cliente (los 241 commits) para comparar los tres |
 | `eval/f14-busqueda/sonda_catalogo.py` | sonda contra el catálogo real del CRM desde dentro del contenedor |
 | `tests/test_f14_busqueda.py` + `tests/conftest.py` | 99 regresiones de los 4 casos reales, sus bordes y las NO-regresiones |
-| `migrations/012_med_aliases.sql` | tabla `med_aliases` + semilla curada (17 pares) |
+| `migrations/013_med_aliases.sql` | tabla `med_aliases` + semilla curada (17 pares) |
 
 ---
 
@@ -44,7 +45,7 @@ que ofrecer") + instrucción de apertura en el resultado de `buscar_medicamento`
 (`_formatear_instrucciones_busqueda`). El matching del caso 4 estaba bien: el
 fallo era abrir con "No tengo SOLUNOVAL BUCAL" y listar resultados debajo.
 
-### F14.4 — Alias de escritura DATA-DRIVEN (`app/aliases.py`, migración 012)
+### F14.4 — Alias de escritura DATA-DRIVEN (`app/aliases.py`, migración 013)
 - Tabla `med_aliases` (alias, canonico, origen, nota), sembrada en la migración
   e idempotente (`ON CONFLICT (alias) DO NOTHING`). Se carga al arranque
   (`app/main.py` → `cargar_desde_store`), siempre sin poder tumbar el arranque.
@@ -101,7 +102,57 @@ de discurso) y ninguno es solo co-formulación. Guardas que evitan falsos cortes
 Medido por `simular_casos.py` con el árbol previo (`git archive HEAD`) y el
 actual. Salida cruda: `antes.json` / `ahora.json`.
 
-| Caso (texto real del cliente) | Antes | Después |
+### 2.0 Integración con los 241 commits del cliente (importante)
+
+Al ir a pushear apareció que `origin/desarrollo` había avanzado **241 commits**
+(`9880917`, incluida la sincronización con `main`). Ese árbol **ya resolvía parte
+de F14** y era más fuerte en algunos puntos, así que el merge
+(`f14-prev-merge` → `desarrollo`) quedó con **lo de ellos + lo mío donde aporta**.
+Medido con el mismo arnés (`cliente-9880917.json`):
+
+| Caso | base `1026506` | cliente `9880917` | F14 mergeado |
+|---|---|---|---|
+| C1 · término extraído | `amor nitrofurantoina 50mg vitamina` | `nitrofurantoina 50mg vitamina c` | `nitrofurantoina 50mg vitamina c` |
+| C1 · división en 2 consultas | `[]` (concatenada) | `[]` (lista detectada por su `_parece_lista_medicamentos`) | `['nitrofurantoina 50mg', 'vitamina c']` |
+| C1 · `TE AMO PRESERV` como resultado | sí | no (ya lo arreglaron) | no |
+| C2 · "vivacina" → filtrados | `VITAMINA K`, `VITAMINA C` | **`VITAMINA K`, `VITAMINA C`** | **`[]`** |
+| C3 · "opción N" detectada | — | — (no existe) | **sí** |
+| C4 · división en 2 consultas | `[]` | `[]` | `['solunoval solucion bucal', 'pinvex solucion bucal']` |
+| Typos que ya funcionaban | 11/11 | 11/11 | 11/11 |
+| Falsos positivos históricos | 4/5 | 5/5 | 5/5 |
+
+Qué se conservó de ellos (y por qué no se duplicó):
+
+- **Letra de la vitamina**: su `_es_letra_de_vitamina` (+ `d3`/`k2` y el guard
+  `_relevante_letra_de_vitamina`) es más completa que la mía → **se descartó mi
+  variante** y queda la suya.
+- **Apelativos en texto escrito**: ya quitaban "amor" de la extracción y del
+  filtro de relevancia → mi `_APELATIVOS` se mantiene solo como lista explícita
+  adicional (no cambia el resultado medido).
+- **Tildes**: su extractor ya normaliza ("solunoval solucion bucal").
+- **Rescate escalonado y fármaco cabeza** en `filtrar_relevantes`: se conserva
+  entero, y mis flags (`permitir_typo`, `typo_estricto`) se tejen dentro de ese
+  rescate.
+- Migración: su `012_delivery.sql` ocupaba el número 012, así que la mía pasó a
+  **`013_med_aliases.sql`**.
+- Añadido por el merge: `ToolRuntime.texto_cliente` se inicializa en
+  `__init__` (su `_forma_del_pedido` lo leía pero solo lo escribía el turno →
+  `AttributeError` si el runtime se usa fuera del turno, como en los tests).
+
+Qué aporta F14 sobre su árbol (lo que sigue pendiente ahí):
+
+1. **C2 — el fuzzy de 2 ediciones ya no cruza de categoría** (`vivacina` sigue
+   devolviendo VITAMINA K/C en su árbol).
+2. **F14.2 — "opción N" como compra confirmada** con prioridad sobre la búsqueda.
+3. **F14.4 — tabla de alias `med_aliases`** (data-driven, con fail-safe).
+4. **F14.3 — redacción**: la instrucción del resultado de la búsqueda (apertura
+   con lo que SÍ hay; prohibido "está agotado" y la memoria inventada).
+5. **F14.5 — partición por conectores** (cubre casos donde su detección de listas
+   no llega, p. ej. con verbo de consulta en medio).
+
+### 2.1 Detalle por caso
+
+| Caso (texto real del cliente) | Antes (base) | Después (mergeado) |
 |---|---|---|
 | 1 · "Buenas tardes!! Mi amor que precio tiene la nitrofurantoina de 50mg y la vitamina C" | término `amor nitrofurantoina 50mg vitamina`; `TE AMO PRESERV. 3PCS` (un preservativo) pasaba el filtro; 1 sola búsqueda | término único `nitrofurantoina 50mg vitamina c`; `TE AMO PRESERV.` descartado; **2 búsquedas**: `nitrofurantoina 50mg` + `vitamina c` |
 | 2 · "vivacina" | `VITAMINA K` y `VITAMINA C` (fuzzy de 2 ediciones) | sin resultados (0 productos); ni vitaminas ni invención |
@@ -140,7 +191,7 @@ levantado con una **DB desechable** (`nea-db-qa-f14`, volumen propio) para no
 tocar `nea_data`. Log de arranque:
 
 ```
-nea.db: migración: aplicando 012_med_aliases.sql
+nea.db: migración: aplicando 013_med_aliases.sql
 nea.main: migraciones aplicadas — DB lista
 nea.aliases: aliases: 17 pares cargados de med_aliases
 ```
@@ -285,6 +336,6 @@ python eval/f14-busqueda/simular_casos.py --root . --out eval/f14-busqueda/ahora
 # 2) regresiones
 .venv-test/Scripts/python.exe -m pytest tests -q
 # 3) contenedor: migración + carga de alias al boot
-docker compose build nea && docker logs <nea> 2>&1 | grep -E "012_med_aliases|aliases:"
+docker compose build nea && docker logs <nea> 2>&1 | grep -E "013_med_aliases|aliases:"
 # 4) Laboratorio: ver skill vocero-nea-qa (proxy Nous :11500, juez LongCat)
 ```
