@@ -73,6 +73,21 @@ COMPRENSION_R = {
     "confundi", "confundido", "confundida", "duda", "dudas",
 }
 
+# FELICITACIONES / DESPEDIDA DE BUENAS NOCHES: "Feliz noche, ¿el precio de la buscapina?"
+# no es un medicamento llamado "FELIZ NOCHE BUSCAPINA" (provider 32, 2026-10-29).
+FELICITACION_R = {
+    "feliz", "felicidad", "felices", "abrazo", "abrazos", "beso", "besitos", "besos",
+    "bendiciones", "bendicion", "próspero", "prospero", "prospera", "éxito", "exito",
+    "exitos", "excelente", "excelentes", "lindas", "hermosos", "bonita", "bonito",
+}
+
+# SALUDOS DE TIEMPO EN SINGULAR: "buenas noches" ya estaba, el 'noche' suelto y
+# 'feliz noche' no. Son la misma muletilla (provider 32, 2026-10-29).
+SALUDO_TIEMPO_R = {
+    "noche", "tarde", "dia", "día", "manana", "mañana", "madrugada",
+    "nochecita", "medio dia", "medio dia",
+}
+
 _FUNCIONALES = {
     # RÓTULOS DEL CAMPO que el OCR devuelve pegados al contenido
     # ('nombre del medicamento fexofenadina clorhidrato calox'). Sin esto se cuelan como
@@ -83,6 +98,8 @@ _FUNCIONALES = {
     *VOCATIVOS_R, *INTENCION_COMPRA_R, *REFERENCIA_LISTA_R,
     *POR_SEPARADO_R,
     *COMPRENSION_R,
+    *FELICITACION_R,
+    *SALUDO_TIEMPO_R,
     "medicamento", "medicamentos",
 
     # ACCESORIOS Y CONSUMIBLES DE UN EQUIPO, NO MEDICAMENTOS. Caso real (provider 32,
