@@ -360,12 +360,17 @@ async def run_turn(
     parts: list[str] = []
     image_uris: list[str] = []
     for m in inbound:
+        # El TEXTO entra siempre, incluso cuando trae caption de la foto:
+        # "necesito precio de este medicamento" + imagen en el MISMO mensaje.
         if m.text:
             parts.append(m.text)
-            continue
         # Un mensaje con imagen (base64 inyectada por el puente Evolution o
         # media_id de Meta) se procesa como media aunque type sea "text" y el
-        # texto venga vacío (foto de receta sin caption). Igual para audio.
+        # texto venga vacío (foto de receta sin caption) — o con texto (caption).
+        # Caso real (provider 32, 2026-10-29): el caption + la foto en el mismo
+        # mensaje dejaban la foto SIN procesar y el agente pedía el nombre que
+        # ya estaba en la imagen ("¿me puedes decir el nombre del medicamento?").
+        # Igual para audio.
         if m.image_base64 or m.media_id or m.audio_base64:
             part = await media.describe_item(ctx, m)
             if part.text:
@@ -374,7 +379,7 @@ async def run_turn(
                 image_uris.append(part.image_data_uri)
             continue
         if m.type in ("text", "button", "interactive"):
-            continue  # texto vacío raro: nada que procesar
+            continue  # texto sin media: nada que procesar
         part = await media.describe_item(ctx, m)
         if part.text:
             parts.append(part.text)
