@@ -334,10 +334,9 @@ En las 5 corridas F14 (A, B, E, H, I) los **4 casos de guarda**
 ## 5. Entrega
 
 - **Pusheado** a `desarrollo` de **rsomoza01** (`origin`) y de **gentefarma**:
-  HEAD `337ac81` — verificado con `git ls-remote` que ambos remotos son idénticos
-  al local.
-- Commits: `3ed1425` (F14) · `4f651f0` + `337ac81` (merges con los 241+4 commits
-  del cliente) · `e1de06a` (artefactos de la corrida J).
+  el commit del código es `3ed1425` (F14) + merges `4f651f0`/`337ac81`; este
+  reporte cierra con `0f4da4a` + el ajuste de esta línea. Verificado con
+  `git ls-remote` que ambos remotos quedaron idénticos al local.
 - Rama de seguridad local `f14-prev-merge` (el estado de F14 antes de integrar).
 - Entorno de laboratorio dejado listo: contenedor `vocerocrm-nea-j` (healthy) con
   su DB desechable `nea-db-qa-j` en la red `vocerocrm_default`; el resto de
