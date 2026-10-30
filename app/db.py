@@ -487,6 +487,54 @@ class PgStore:
             result_count, added_to_cart,
         )
 
+    # ----------------------------------------------------------- alias (F14.4) ---
+
+    async def list_med_aliases(self) -> list[dict[str, Any]]:
+        """Todos los alias de escritura (tabla `med_aliases`, migración 012)."""
+        rows = await self.pool.fetch(
+            """
+            SELECT alias, canonico, origen FROM med_aliases
+            ORDER BY length(alias) DESC
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def derivar_aliases(
+        self, ventana_minutos: int = 30, min_largo: int = 5
+    ) -> list[dict[str, Any]]:
+        """Candidatos alias→canónico derivados del log `med_queries` (F14.4).
+
+        Regla: una consulta SIN resultados que, en la MISMA conversación y
+        dentro de la ventana, se resolvió después con otra grafía (con
+        resultados o agregada al carrito). Devuelve los candidatos para
+        REVISIÓN HUMANA — no inserta nada por su cuenta: un alias desactiva el
+        fuzzy, así que un canónico errado devuelve cero resultados.
+
+        Con `med_queries` del entorno de QA (2026-09-29) devuelve 0 filas: en
+        ese log ninguna consulta fallida se resolvió después. El par
+        'fexofenasina'→'fexofenadina' se sembró a mano desde ahí (misma
+        conversación, dos grafías) y queda documentado en la migración.
+        """
+        rows = await self.pool.fetch(
+            """
+            SELECT f.term AS alias, o.term AS canonico, count(*) AS veces,
+                   min(o.product_name) AS producto
+            FROM med_queries f
+            JOIN med_queries o
+              ON o.conversation_id = f.conversation_id
+             AND o.created_at > f.created_at
+             AND o.created_at < f.created_at + ($1 || ' minutes')::interval
+             AND (o.result_count > 0 OR o.added_to_cart)
+            WHERE f.result_count = 0
+              AND length(f.term) BETWEEN $2 AND 30
+              AND lower(f.term) <> lower(o.term)
+            GROUP BY f.term, o.term
+            ORDER BY veces DESC
+            """,
+            str(int(ventana_minutos)), int(min_largo),
+        )
+        return [dict(r) for r in rows]
+
     async def top_med_summary(
         self,
         provider_id: str,
