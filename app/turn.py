@@ -360,12 +360,17 @@ async def run_turn(
     parts: list[str] = []
     image_uris: list[str] = []
     for m in inbound:
+        # El TEXTO entra siempre, incluso cuando trae caption de la foto:
+        # "necesito precio de este medicamento" + imagen en el MISMO mensaje.
         if m.text:
             parts.append(m.text)
-            continue
         # Un mensaje con imagen (base64 inyectada por el puente Evolution o
         # media_id de Meta) se procesa como media aunque type sea "text" y el
-        # texto venga vacío (foto de receta sin caption). Igual para audio.
+        # texto venga vacío (foto de receta sin caption) — o con texto (caption).
+        # Caso real (provider 32, 2026-10-29): el caption + la foto en el mismo
+        # mensaje dejaban la foto SIN procesar y el agente pedía el nombre que
+        # ya estaba en la imagen ("¿me puedes decir el nombre del medicamento?").
+        # Igual para audio.
         if m.image_base64 or m.media_id or m.audio_base64:
             part = await media.describe_item(ctx, m)
             if part.text:
@@ -374,7 +379,7 @@ async def run_turn(
                 image_uris.append(part.image_data_uri)
             continue
         if m.type in ("text", "button", "interactive"):
-            continue  # texto vacío raro: nada que procesar
+            continue  # texto sin media: nada que procesar
         part = await media.describe_item(ctx, m)
         if part.text:
             parts.append(part.text)
@@ -1008,7 +1013,13 @@ async def run_turn(
     if farmacia and final_text and runtime.last_products:
         _otro = _farmaco_distinto(user_text, runtime)
         if _otro:
-            final_text = _respuesta_no_es_ese_farmaco(_otro)
+            # La FORMA pedida no sale en el aviso: "No tengo BUSCAPINA AMP" sobre un
+            # 'buscapina amp' se lee como si existiera algo llamado "buscapina amp";
+            # el mensaje honesto nombra el fármaco ("No tengo BUSCAPINA"). Si el término
+            # era solo la forma, se muestra el original.
+            final_text = _respuesta_no_es_ese_farmaco(
+                _termino_sin_forma(_otro) or _otro
+            )
             runtime.last_products = []
 
     sent = False
@@ -2834,6 +2845,21 @@ COMPRENSION_T = {
     "confundi", "confundido", "confundida", "duda", "dudas",
 }
 
+# FELICITACIONES / DESPEDIDA DE BUENAS NOCHES: "Feliz noche, ¿el precio de la buscapina?"
+# no es un medicamento llamado "FELIZ NOCHE BUSCAPINA" (provider 32, 2026-10-29).
+FELICITACION_T = {
+    "feliz", "felicidad", "felices", "abrazo", "abrazos", "beso", "besitos", "besos",
+    "bendiciones", "bendicion", "próspero", "prospero", "prospera", "éxito", "exito",
+    "exitos", "excelente", "excelentes", "lindas", "hermosos", "bonita", "bonito",
+}
+
+# SALUDOS DE TIEMPO EN SINGULAR: "buenas noches" ya estaba, el 'noche' suelto y
+# 'feliz noche' no. Son la misma muletilla (provider 32, 2026-10-29).
+SALUDO_TIEMPO_T = {
+    "noche", "tarde", "dia", "día", "manana", "mañana", "madrugada",
+    "nochecita", "medio dia", "medio dia",
+}
+
 _FILLER = {
     "hola", "buenas", "buen", "buenos", "buena", "dia", "dias", "tardes",
     "noches", "gracias", "por", "favor", "quisiera", "podria", "puede",
@@ -2849,6 +2875,8 @@ _FILLER = {
     *VOCATIVOS_T, *INTENCION_COMPRA_T, *REFERENCIA_LISTA_T,
     *POR_SEPARADO_T,
     *COMPRENSION_T,
+    *FELICITACION_T,
+    *SALUDO_TIEMPO_T,
     "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
     # RÓTULOS DEL CAMPO: el OCR devuelve '**Nombre del medicamento:** Fexofenadina
     # Clorhidrato CALOX' y el término quedaba 'nombre del fexofenadina clorhidrato calox'.
@@ -5633,6 +5661,45 @@ _PALABRAS_PRESENTACION_ENVASE = {
 }
 
 
+_RE_CODIGO_NOMBRE = re.compile(r"^[a-z]+\d{1,3}$")
+
+
+def _ES_FORMA_FARMACEUTICA(w: str) -> bool:
+    """¿La palabra es nombre de forma farmacéutica ('tableta', 'susp', 'jbe')?"""
+    return bool(re.match(
+        r"^(tab|tabs|tableta|tabletas|caps?|c[aá]psulas?|comp|comprimidos?|grageas?|"
+        r"sob|sobre|sobres|susp|suspension|jbe|jarabes?|crema|gel|pomada|unguent|"
+        r"[oó]vulo|ovulos|ovu|supositorios?|spray|solucion|sol|colirio|ampolla|ampollas|"
+        r"inyectable|granulado|elixir|locion|shampoo|parche|parches)$",
+        w,
+    ))
+
+
+def _es_solo_dosis_y_forma(termino: str) -> bool:
+    """¿El término NO nomtra fármaco: es solo números, unidades y formas?
+
+    '1080 mg tableta' y '10 meq tableta' no son medicamentos: el catálogo no puede
+    responder nada útil y el matcher difuso empareja 'meq' con lo primero que pille
+    (ACHICORIA AD. MEQ, provider 32, 2026-10-29 21:21, para la foto del UROCIT).
+    """
+    palabras = re.findall(r"[a-záéíóúüñ0-9]+", (termino or "").lower())
+    if not palabras:
+        return True
+    unidades = {
+        "mg", "ml", "mcg", "gr", "g", "cc", "ui", "kg", "meq",
+        "tab", "tabs", "cap", "caps", "comp", "sob", "sobre", "amp", "vial", "und",
+        "mg/g", "meqs",
+    }
+    residuo = [
+        w for w in palabras
+        if not w.isdigit()
+        and w not in _PALABRAS_PRESENTACION_ENVASE
+        and w not in unidades
+        and not _ES_FORMA_FARMACEUTICA(w)
+    ]
+    return not residuo
+
+
 def _es_linea_de_presentacion(linea: str) -> bool:
     """¿La línea dice el CONTENIDO del envase ('10 Tabletas Recubiertas', 'X 60 ML')?
 
@@ -5647,10 +5714,16 @@ def _es_linea_de_presentacion(linea: str) -> bool:
     """
     l = _normalizar_tildes((linea or "").strip().lower())
     l = re.sub(r"^[•·\-\*\u2022]+\s*", "", l)
-    if not l:
-        return False
-    if not re.search(r"\d", l):
-        return False
+    # 1) número + nombre del envase ('100 tabletas de liberación prolongada',
+    #    '10 tabletas recubiertas'): la frase puede seguir y sigue siendo presentación.
+    if re.match(
+        r"^\d+\s*[-.,]?\s*"
+        r"(tabs?|tabletas?|c[aá]ps?|c[aá]psulas?|comp|comprimidos?|grageas?|sobre?s?|"
+        r"ampollas?|viales?|vial|frasco?s?|pomo?s?|tubo?s?|und?s?|unid|sticks?|blister)",
+        l,
+    ):
+        return True
+    # 2) todos los términos son vocabulario de envase ('X 60 ml', 'cont. net: 60 ml').
     palabras = re.findall(r"[a-z]+", l)
     if not palabras:
         return False
@@ -5873,11 +5946,11 @@ async def _medicamentos_de_ocr(
     if term and componentes:
         _todas = [ln.strip() for ln in (ocr or "").splitlines() if ln.strip()]
         if any(_es_linea_de_presentacion(ln) for ln in _todas):
-            base = term
-            dosis_env = _dosis_unica_del_envase(lineas)
-            if dosis_env and dosis_env not in base:
-                base = f"{base} {dosis_env}"
-            return [base], "caja (el envase declara su presentación)"
+            # SIN la dosis del envase: el catálogo puede escribir la MISMA presentación
+            # en otra escala ('1080 mg de citrato = UROCIT LP 10MG'), y meter la dosis
+            # del paquete produce "⚠️ No tengo de 1080 mg. Lo tengo en: 10 mg" sobre el
+            # MISMO producto que el cliente está sosteniendo en la mano.
+            return [term], "caja (el envase declara su presentación)"
 
     # Receta: se devuelven las líneas como medicamentos independientes, con la misma
     # lógica que ya usaba el backstop.
@@ -5889,6 +5962,11 @@ async def _medicamentos_de_ocr(
         meds = _parsear_medicamentos_receta(
             "\n".join(_lineas_lista_medicamentos(ocr))
         )
+    # UNA DOSIS Y UNA FORMA NO SON UN MEDICAMENTO. Provider 32, 2026-10-29 (foto del
+    # UROCIT): el OCR se partió en cuatro y se buscó '1080 mg tableta' (0 productos →
+    # "No disponibles en el catálogo: 1080 MG TABLETA") y '10 meq tableta', que el matcher
+    # difuso emparejó con ACHICORIA AD. MEQ 120ML.
+    meds = [m for m in meds if not _es_solo_dosis_y_forma(m)]
     return meds, "receta (varios medicamentos independientes)"
 
 

@@ -210,6 +210,21 @@ COMPRENSION = {
     "confundi", "confundido", "confundida", "duda", "dudas",
 }
 
+# FELICITACIONES / DESPEDIDA DE BUENAS NOCHES: "Feliz noche, ¿el precio de la buscapina?"
+# no es un medicamento llamado "FELIZ NOCHE BUSCAPINA" (provider 32, 2026-10-29).
+FELICITACION = {
+    "feliz", "felicidad", "felices", "abrazo", "abrazos", "beso", "besitos", "besos",
+    "bendiciones", "bendicion", "próspero", "prospero", "prospera", "éxito", "exito",
+    "exitos", "excelente", "excelentes", "lindas", "hermosos", "bonita", "bonito",
+}
+
+# SALUDOS DE TIEMPO EN SINGULAR: "buenas noches" ya estaba, el 'noche' suelto y
+# 'feliz noche' no. Son la misma muletilla (provider 32, 2026-10-29).
+SALUDO_TIEMPO = {
+    "noche", "tarde", "dia", "día", "manana", "mañana", "madrugada",
+    "nochecita", "medio dia", "medio dia",
+}
+
 _PALABRAS_FUNCIONALES = {
     # FRASE DE CONSULTA: el cliente anuncia la lista antes de enumerarla. No es un
     # medicamento y no puede encabezar el título ni la búsqueda (el cliente vería
@@ -222,6 +237,8 @@ _PALABRAS_FUNCIONALES = {
     *VOCATIVOS, *INTENCION_COMPRA, *REFERENCIA_LISTA,
     *POR_SEPARADO,
     *COMPRENSION,
+    *FELICITACION,
+    *SALUDO_TIEMPO,
     # 'resumen' no es un medicamento (ver el gemelo en turn.py::_FILLER).
     "resumen", "resumenes", "resúmenes",
     # 'costo'/'porf' tampoco: 'porf' casa con el "POR" de AMPICILINA "POR 1 AMPOLLA" y
