@@ -132,6 +132,9 @@ _FUNCIONALES = {
     *BENDICIONES_R,
     *DEMOSTRATIVOS_R,
     *ENVIO_R,
+    "agregame", "agrégame", "agrega", "agregas", "agregar", "agregale", "añademe",
+    "anademe", "añade", "anade", "añadir", "ponme", "meteme", "sumame", "súmame",
+    "incluyeme", "adiciona", "apuntame", "apúntame",
     "pedido", "pedidos",
     "medicamento", "medicamentos",
 
