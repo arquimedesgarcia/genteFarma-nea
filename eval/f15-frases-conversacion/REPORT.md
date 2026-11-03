@@ -74,8 +74,8 @@ aditivos, nada tocado fuera del repo.
 |---|---|---|
 | Compilación | `py_compile app/*.py` | OK (25 módulos) |
 | Tests | `pytest tests -q` | **147 en verde** (28 nuevos de la capa) |
-| Corpus real | 50 frases (30 que no deben buscar / 20 consultas legítimas) con el **flujo real** (extractor + camino rápido + capa) y `deepseek/deepseek-v4.1-flash` | **49/50 · 0 falsos positivos** (el único fallo es un *fail-safe* del modelo: JSON inválido → cae al comportamiento anterior) |
-| Robustez | el corpus con `z-ai/glm-4.7` (otra familia) | ver §6 (misma tanda) |
+| Corpus real | 50 frases (30 que no deben buscar / 20 consultas legítimas) con el **flujo real** (extractor + camino rápido + capa) y `deepseek/deepseek-v4.1-flash` | **49/50 · 0 falsos positivos**; el único fallo es una etiqueta dudosa mía («fexofenasina para la alergia **esta sirviendo?**» — preguntar si un medicamento le funciona es conversación, no búsqueda; la capa la clasificó como `otro` y probablemente tiene razón) |
+| Robustez | el corpus con `z-ai/glm-4.7` (otra familia) | 33/50 **por timeout del proveedor** (20-30 s por llamada), no por la lógica: con el fail-closed, el timeout significa no buscar |
 | Contenedor | `docker compose build nea` + arranque | migración `014` aplicada, health OK |
 | End-to-end | escenarios 12/13 (código real, modelo real, catálogo controlado) | **cero consultas al catálogo** para las frases queja |
 
@@ -100,13 +100,15 @@ consulta con término de categoría: 92.5% → **100%**. Ese hallazgo no estaba 
 
 ## 5. Límites declarados
 
-1. **El camino rápido no es una lista negra, pero existe.** Lo que decide es la capa; el camino
-   rápido solo resuelve los casos sin duda razonable (verbo explícito o nombre pelado). Aun así,
-   su `_PALABRAS_CONVERSACION` es una lista corta: sirve para **desviar** a la capa, no para decidir.
-2. **El modelo del chat conserva su propia herramienta.** La capa gobierna el backstop; si el
-   modelo decide llamar `buscar_medicamento` por su cuenta con un término basura, nadie lo detiene
-   todavía (antes sí pasaba: `ladrones`, `estafa`, `puedo devolverlas` en el log). Ahora al menos
-   queda auditado como `fuente='llm'`. **Es el candidato natural a F16.**
+1. **El camino rápido no es una lista negra, pero existe.** Lo que decide es la capa; el único
+   atajo sin LLM es el nombre pelado corto **con evidencia** (dosis, forma farmacéutica o token
+   largo). `_PALABRAS_CONVERSACION` es una lista corta que sirve para **desviar** a la capa, no
+   para decidir; aun así es lo único heurístico que queda, y el revisor externo pedía retirarlo
+   del todo (requeriría respaldo de catálogo/contexto).
+2. **El modelo del chat ya no puede saltarse la capa.** La autorización central
+   (`_autorizar_busqueda` en `app/tools.py`) intercepta TODA búsqueda, incluida la que pide el
+   modelo por su cuenta: sin evidencia fuerte decide la capa y, sin autorización, no se busca — se
+   pide aclaración. Verificado con `probe_autorizacion.py` (§6).
 3. **Coste.** Una llamada extra por turno **solo** en el camino `capa`. Medido: ~2 s por llamada;
    en el corpus, las consultas con verbo o nombre pelado no pagan nada.
 4. **Oscilación del modelo.** Como en F14, las corridas sin `temperature=0` varían; por eso cada
