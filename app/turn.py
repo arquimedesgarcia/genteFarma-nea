@@ -20,6 +20,7 @@ from app import media
 from app.config import canonical_identity
 from app.crm import CrmConflict, CrmError
 from app.hostility import ALERT as HOSTILITY_ALERT, hostile_streak
+from app.intencion import entender as entender_intencion
 from app import guards
 from app.llm import LlmExhausted
 from app.relevancia import (
@@ -2497,10 +2498,69 @@ async def _tool_loop(
                 trans_term_2 = _extraer_termino_transcripcion(user_text)
                 if trans_term_2:
                     term = trans_term_2
-                elif _parece_consulta_medicamento(user_text) and not _lead_esta_cerrando(
-                    _texto_cliente_sin_marcadores(user_text)
-                ):
-                    term = _extraer_termino_medicamento(user_text)
+                elif not _lead_esta_cerrando(_texto_cliente_sin_marcadores(user_text)):
+                    # F15 — LA CAPA DE COMPRENSIÓN DECIDE ANTES DE BUSCAR.
+                    # Antes esta decisión la tomaba `_parece_consulta_medicamento`
+                    # (forma del texto): cualquier oración sin '?' de ≤4 palabras con
+                    # una palabra larga pasaba, y el agente buscaba «ser indu» o «vivo
+                    # ciudad bolivar» (13 consultas al catálogo y contaminación de
+                    # `med_queries`). Ahora: camino rápido determinista y, en la duda,
+                    # la capa (una llamada); si la capa no responde, se conserva la
+                    # conducta anterior.
+                    candidato = _extraer_termino_medicamento(user_text)
+                    hace_falta = (not runtime.consulted_catalog) or (
+                        runtime.med_not_found and not runtime.catalog_retried
+                    )
+                    if not hace_falta:
+                        # El LLM ya consultó el catálogo este turno: no hay nada que
+                        # decidir y no se gasta una llamada de la capa.
+                        term = None
+                    elif not bool(getattr(ctx.settings, "intent_layer", True)):
+                        term = (
+                            candidato
+                            if candidato and _parece_consulta_medicamento(user_text)
+                            else None
+                        )
+                    else:
+                        ent = await entender_intencion(
+                            _texto_cliente_sin_marcadores(user_text) or user_text,
+                            llm=ctx.llm,
+                            settings=ctx.settings,
+                            termino_candidato=candidato,
+                            producto_previo=(runtime.last_product or {}).get("nombre")
+                            or (runtime.last_product or {}).get("producto"),
+                        )
+                        # Auditoría: viaja con la búsqueda hasta `med_queries`.
+                        runtime.intent_fuente = ent.fuente
+                        runtime.intent_acto = ent.acto
+                        runtime.intent_motivo = ent.motivo
+                        runtime.intent_confianza = ent.confianza
+                        if ent.hay_consulta:
+                            term = ent.termino or candidato
+                            logger.info(
+                                "capa de comprensión: acto=%s (%s) — SE BUSCA %r (confianza %.2f)",
+                                ent.acto, ent.fuente, term, ent.confianza,
+                            )
+                        elif ent.hay_consulta is False:
+                            term = None
+                            logger.info(
+                                "capa de comprensión: acto=%s (%s) — NO se busca "
+                                "(el candidato era %r): %s",
+                                ent.acto, ent.fuente, candidato, ent.motivo,
+                            )
+                        else:
+                            # FAIL-SAFE (capa apagada, timeout, proveedor caído o JSON
+                            # inválido): conducta anterior, para que un proveedor que
+                            # falla no cambie el flujo del agente.
+                            term = (
+                                candidato
+                                if candidato and _parece_consulta_medicamento(user_text)
+                                else None
+                            )
+                            logger.info(
+                                "capa de comprensión: fail-safe (%s) — heurístico anterior: %r",
+                                ent.motivo, term,
+                            )
                 # EL TÍTULO TIENE QUE SER EL FÁRMACO, NO LA FRASE. `_extraer_termino_medicamento`
                 # quita verbos de consulta y relleno, pero NO el ruido del HABLA (muletillas,
                 # coletillas) — eso solo lo hace `_limpiar_transcripcion`. Con una nota de voz

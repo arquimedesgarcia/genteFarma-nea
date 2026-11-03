@@ -62,6 +62,17 @@ class Settings(BaseSettings):
     vision_model: str = ""
     vision_api_key: str = ""
     vision_base_url: str = ""
+    # F15 — CAPA DE COMPRENSIÓN DEL ACTO DE CONVERSACIÓN. Decide si el mensaje trae
+    # una consulta de medicamento ANTES de buscar en el catálogo. Quejas oct-2026:
+    # «No puede ser Indu.» → el agente contestó «No tengo SER INDU»; «Vivo en Ciudad
+    # Bolivar.» → 13 consultas al catálogo (incl. 'bol', 'boli'), contaminando
+    # `med_queries`. `intent_layer=False` apaga la capa y deja el heurístico anterior.
+    # Proveedor propio opcional (mismo patrón que VISION_*): vacío = modelo del chat.
+    intent_layer: bool = True
+    intent_model: str = ""
+    intent_api_key: str = ""
+    intent_base_url: str = ""
+    intent_timeout: float = 12.0  # segundos; al vencer, fail-safe (comportamiento anterior)
     history_window: int = 10
 
     # Guardarraíles y tiempos

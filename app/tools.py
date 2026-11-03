@@ -2236,6 +2236,13 @@ class ToolRuntime:
         # productos: el turno lo antepone a la respuesta para que el cliente sepa que le
         # estamos ofreciendo otra presentación.
         self.aviso_forma = ""
+        # F15 — veredicto de la CAPA DE COMPRENSIÓN de este turno (auditoría). El turno
+        # lo rellena ANTES de buscar; `_log_med_query` lo guarda en `med_queries` para
+        # poder medir la capa y saber qué decidió en un caso real.
+        self.intent_fuente = ""
+        self.intent_acto = ""
+        self.intent_motivo = ""
+        self.intent_confianza: float | None = None
         # Si se llamó ver_carrito este turno, aquí queda el texto determinista del
         # resumen (cada producto con cantidad y subtotal en USD y Bs, y el total).
         # turn.py lo usa para reemplazar lo que haya generado el LLM, garantizando
@@ -2544,6 +2551,14 @@ class ToolRuntime:
                 product_name=products[0].get("producto") if products else None,
                 result_count=len(products),
                 added_to_cart=added_to_cart,
+                # F15 — qué decidió la capa de comprensión (auditoría). Si el turno no la
+                # usó (camino rápido, capa apagada o fail-safe), van vacíos/NULL.
+                intent={
+                    "fuente": self.intent_fuente or None,
+                    "acto": self.intent_acto or None,
+                    "motivo": self.intent_motivo or None,
+                    "confianza": self.intent_confianza,
+                },
             )
             # Fase 2: clasificación automática de pacientes crónicos. Si el
             # término matchea un medicamento crónico, registra la consulta y

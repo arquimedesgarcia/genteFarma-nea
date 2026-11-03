@@ -481,16 +481,21 @@ class PgStore:
         product_name: str | None,
         result_count: int,
         added_to_cart: bool = False,
+        intent: dict[str, Any] | None = None,
     ) -> None:
+        intent = intent or {}
         await self.pool.execute(
             """
             INSERT INTO med_queries
               (conversation_id, provider_id, term, product_id, product_name,
-               result_count, added_to_cart)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+               result_count, added_to_cart,
+               intent_fuente, intent_acto, intent_motivo, intent_confianza)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             """,
             conversation_id, provider_id, term, product_id, product_name,
             result_count, added_to_cart,
+            intent.get("fuente"), intent.get("acto"), intent.get("motivo"),
+            intent.get("confianza"),
         )
 
     # ----------------------------------------------------------- alias (F14.4) ---

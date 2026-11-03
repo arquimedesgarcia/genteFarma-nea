@@ -274,6 +274,7 @@ class Store(Protocol):
         product_name: str | None,
         result_count: int,
         added_to_cart: bool = False,
+        intent: dict[str, Any] | None = None,
     ) -> None: ...
     async def top_med_queries(
         self,
@@ -517,6 +518,7 @@ class MemoryStore:
         product_name: str | None,
         result_count: int,
         added_to_cart: bool = False,
+        intent: dict[str, Any] | None = None,
     ) -> None:
         """Registra la consulta en memoria (tests)."""
         self.med_queries.append(
@@ -528,6 +530,7 @@ class MemoryStore:
                 "product_name": product_name,
                 "result_count": result_count,
                 "added_to_cart": added_to_cart,
+                "intent": intent or {},
             }
         )
 
