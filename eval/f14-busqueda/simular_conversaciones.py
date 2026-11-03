@@ -298,6 +298,28 @@ ESCENARIOS: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "12-frases-que-no-son-medicamento",
+        "titulo": "Frases de conversación que NO son consultas (quejas reales oct-2026)",
+        "nota": "El agente busca el catálogo con 'ser indu', 'vivo ciudad bolivar', 'marca', 'ahroa'.",
+        "mensajes": [
+            "No puede ser Indu.",
+            "Vivo en Ciudad Bolivar.",
+            "Solo una marca?",
+            "Por ahroa no",
+        ],
+    },
+    {
+        "id": "13-frases-con-contexto",
+        "titulo": "Las mismas frases EN MITAD de la conversación (contexto real de las quejas)",
+        "nota": "Tras listar un producto, la frase de conversación debe seguir sin buscar.",
+        "mensajes": [
+            "tienen macrodantina?",
+            "No puede ser Indu.",
+            "Solo una marca?",
+            "Por ahroa no",
+        ],
+    },
+    {
         "id": "10-marca-no-se-esconde",
         "titulo": "Marca en el catálogo: el alias no debe esconderla",
         "nota": "macrodantina existe como producto; el alias solo reescribe typos, no marcas.",
