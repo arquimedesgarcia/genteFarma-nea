@@ -418,6 +418,39 @@ _TOKENS_DE_DOSIS = {
 }
 
 
+# F15 — evidencia FUERTE de que un término es un producto (no paga llamada a la capa).
+_FORMAS_EVIDENCIA = {
+    "jarabe", "crema", "gotas", "tabletas", "tableta", "capsulas", "capsula", "cap",
+    "tab", "suspension", "solucion", "inyectable", "ampolla", "ampollas", "supositorio",
+    "ovulos", "ovulo", "pomada", "gel", "spray", "polvo", "sobre", "sobres", "locion",
+    "shampoo", "champu", "jabon", "unguento", "colirio", "grageas", "comprimidos",
+}
+_UNIDADES_EVIDENCIA = {"mg", "ml", "mcg", "gr", "g", "ui", "iu", "cc", "%"}
+
+
+def _tiene_evidencia_de_producto(nombre: str) -> bool:
+    """¿El término trae dosis o una forma farmacéutica?
+
+    Es el atajo de la autorización central (F15): con esta evidencia el término es un
+    producto en la práctica totalidad de los casos y no se gasta una llamada a la capa.
+    Cubre la dosis pegada («losartan 50mg») y el número de dosis suelto («vitamina c 500»).
+    """
+    tokens = re.findall(r"[a-z0-9%.]+", (nombre or "").lower())
+    if any(t in _FORMAS_EVIDENCIA for t in tokens):
+        return True
+    for i, t in enumerate(tokens):
+        # Dosis pegada: '50mg', '500ui', '10ml'…
+        if re.fullmatch(r"\d+(mg|ml|mcg|gr|g|ui|iu|cc)", t):
+            return True
+        # Dosis con unidad separada: '50 mg'
+        if t.isdigit() and i + 1 < len(tokens) and tokens[i + 1] in _UNIDADES_EVIDENCIA:
+            return True
+        # Número de presentación/dosis ('500', '850'): dos o más cifras.
+        if t.isdigit() and len(t) >= 2:
+            return True
+    return False
+
+
 def _termino_es_medicamento_plausible(term: str) -> bool:
     """True si el término parece un medicamento, no una frase del cliente.
 
@@ -2243,6 +2276,12 @@ class ToolRuntime:
         self.intent_acto = ""
         self.intent_motivo = ""
         self.intent_confianza: float | None = None
+        # Veredicto completo (para registrar también las decisiones que NO buscan).
+        self.intent_hay_consulta: bool | None = None
+        self.intent_termino: str | None = None
+        # Resultado de la autorización central de búsqueda en este turno (None = no se
+        # ha consultado todavía). Evita una llamada por cada búsqueda del turno.
+        self.intent_autorizado: bool | None = None
         # Si se llamó ver_carrito este turno, aquí queda el texto determinista del
         # resumen (cada producto con cantidad y subtotal en USD y Bs, y el total).
         # turn.py lo usa para reemplazar lo que haya generado el LLM, garantizando
@@ -2530,6 +2569,30 @@ class ToolRuntime:
     def _provider_id(self) -> str:
         return self._provider_id_val
 
+    async def registrar_decision_intencion(self, candidato: str | None = None) -> None:
+        """F15 — registra la DECISIÓN de la capa, busque o no.
+
+        Revisión externa (#6): «los rechazos sin búsqueda también deben quedar
+        registrados». Sin esto no se puede medir cuántas búsquedas basura se
+        evitaron ni por qué decidió lo que decidió.
+        """
+        if not self.intent_fuente:
+            return
+        try:
+            await self._ctx.store.log_intent_decision(
+                conversation_id=self._conv.id,
+                provider_id=self._provider_id,
+                fuente=self.intent_fuente,
+                acto=self.intent_acto or None,
+                hay_consulta=self.intent_hay_consulta,
+                termino=self.intent_termino or None,
+                candidato=candidato,
+                motivo=self.intent_motivo or None,
+                confianza=self.intent_confianza,
+            )
+        except Exception as exc:  # la auditoría jamás rompe el turno
+            logger.debug("no se pudo registrar la decisión de la capa (%s)", exc)
+
     async def _log_med_query(
         self,
         term: str,
@@ -2576,6 +2639,78 @@ class ToolRuntime:
         except Exception:
             logger.exception("_log_med_query: fallo al registrar consulta")
 
+    async def _autorizar_busqueda(self, nombre: str) -> dict[str, Any] | None:
+        """F15 — AUTORIZACIÓN CENTRAL de toda búsqueda. `None` = autorizada.
+
+        Revisión externa del cambio (gpt-6-astra-pro, 2026-11): «esta implementación no
+        controla herramientas: únicamente devuelve un veredicto… si la integración solo
+        consulta `entender()` desde el backstop, el agujero es real». Y lo era: si el
+        MODELO del chat llamaba esta herramienta por su cuenta, buscaba sin control (en
+        el log quedaron `ladrones`, `estafa`, `puedo devolverlas`, `sirvieron`).
+
+        Regla: si el backstop ya decidió este turno, se respeta su veredicto. Si no, y el
+        término no trae evidencia fuerte (dosis o forma farmacéutica), decide la capa —
+        una sola vez por turno. Sin autorización, NO se busca: se le pide al modelo que
+        aclare en vez de responder sobre algo que el cliente no pidió.
+        """
+        if self.intent_fuente and self.intent_fuente != "llm":
+            return None  # el backstop ya autorizó (o negó) esta búsqueda
+        if self.intent_autorizado is not None:
+            return None if self.intent_autorizado else self._rechazo_comprension(nombre)
+        # Evidencia fuerte: dosis con unidad o forma farmacéutica. Estos términos son
+        # productos en la práctica totalidad de los casos y no pagan una llamada.
+        if _tiene_evidencia_de_producto(nombre):
+            self.intent_autorizado = True
+            return None
+        try:
+            from app.intencion import entender as entender_intencion
+        except Exception as exc:  # jamás romper el turno por la capa
+            logger.debug("autorización de búsqueda: capa no disponible (%s)", exc)
+            return None
+        try:
+            ent = await entender_intencion(
+                self.texto_cliente or nombre,
+                llm=self._ctx.llm,
+                settings=self._ctx.settings,
+                termino_candidato=nombre,
+                producto_previo=(self.last_product or {}).get("nombre")
+                or (self.last_product or {}).get("producto"),
+            )
+        except Exception as exc:  # capa caída: no se bloquea la búsqueda del modelo
+            logger.debug("autorización de búsqueda: fallo de la capa (%s)", exc)
+            return None
+        self.intent_fuente = "llm" if self.intent_fuente != "capa" else self.intent_fuente
+        self.intent_acto = ent.acto
+        self.intent_motivo = ent.motivo
+        self.intent_confianza = ent.confianza
+        self.intent_hay_consulta = ent.hay_consulta
+        self.intent_termino = ent.termino
+        await self.registrar_decision_intencion(nombre)
+        if ent.hay_consulta:
+            self.intent_autorizado = True
+            return None
+        self.intent_autorizado = False
+        logger.info(
+            "búsqueda NO autorizada por la capa: '%s' (acto=%s, consulta=%s): %s",
+            nombre, ent.acto, ent.hay_consulta, ent.motivo,
+        )
+        return self._rechazo_comprension(nombre)
+
+    def _rechazo_comprension(self, nombre: str) -> dict[str, Any]:
+        """Resultado que le dice al modelo que aclare, en vez de hablar del término."""
+        return {
+            "ok": False,
+            "error": "no_autorizado_por_comprension",
+            "detalle": (
+                f"'{nombre}' no es una consulta de medicamento según la comprensión del "
+                f"mensaje (acto={self.intent_acto or '?'}: {self.intent_motivo or 'sin motivo'}). "
+                "NO busques ni respondas sobre ese término como si fuera un medicamento: "
+                "contesta a lo que el cliente dijo realmente y, si no sabes qué medicamento "
+                "quiere, pídele el nombre exacto."
+            ),
+            "busqueda": nombre,
+        }
+
     async def _buscar_medicamento(self, args: dict[str, Any]) -> dict[str, Any]:
         nombre = str(args.get("nombre") or "").strip()
         # Se resetean en CADA búsqueda: si no, el flag de la búsqueda anterior
@@ -2595,6 +2730,12 @@ class ToolRuntime:
         self.busqueda_por_principio = False
         if not nombre:
             return {"ok": False, "error": "nombre_vacio", "detalle": "indica qué medicamento buscas"}
+        # F15 — AUTORIZACIÓN CENTRAL: ninguna búsqueda ocurre sin que la comprensión la
+        # autorice (o el backstop ya lo haya hecho). Cierra el agujero del modelo que
+        # llama la herramienta por su cuenta con un término de conversación.
+        _negado = await self._autorizar_busqueda(nombre)
+        if _negado is not None:
+            return _negado
         # Guarda anti-saludo: si el LLM llamó buscar_medicamento con un término
         # que es SOLO saludos/cortesía ("saludos", "buen día"), NO es una
         # consulta de medicamento. Devolver una lista de productos aquí sería

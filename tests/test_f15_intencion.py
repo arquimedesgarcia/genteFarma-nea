@@ -83,9 +83,8 @@ class TestCaminoRapido:
 
     @pytest.mark.parametrize("texto,candidato", [
         ("vivacina", "vivacina"),
-        ("shampo dreene", "shampo dreene"),
         ("omeprasol", "omeprasol"),
-        ("atamel 500", "atamel 500"),
+        ("macrodantina 100", "macrodantina 100"),
     ])
     def test_nombre_pelado_corto_busca(self, texto, candidato):
         ent = camino_rapido(texto, candidato)
@@ -111,6 +110,14 @@ class TestCaminoRapido:
     ])
     def test_charla_no_se_resuelve_con_heuristica(self, texto, candidato):
         """Ni por forma ni por verbo: estas frases las juzga la capa."""
+        assert camino_rapido(texto, candidato) is None
+
+    @pytest.mark.parametrize("texto,candidato", [
+        # Sin evidencia (ni dosis ni forma farmacéutica) y corto: lo juzga la capa.
+        ("shampo dreene", "shampo dreene"),
+        ("atamel forte", "atamel forte"),
+    ])
+    def test_nombre_sin_evidencia_va_a_la_capa(self, texto, candidato):
         assert camino_rapido(texto, candidato) is None
 
     def test_el_verbo_de_consulta_ya_no_decide_solo(self):
@@ -141,26 +148,36 @@ class TestContratoJson:
         assert _extraer_json("{no es json") is None
         assert _extraer_json("") is None
 
-    def test_acto_desconocido_cae_en_otro(self):
-        assert _veredicto_desde_json({"acto": "fiesta", "hay_consulta": False}).acto == "otro"
+    def test_contratos_invalidos_se_rechazan(self):
+        """Revisión externa: '{"motivo":"x"}' no puede ser una negativa concluyente."""
+        invalidos = [
+            {"acto": "fiesta", "hay_consulta": False},                      # acto inválido
+            {"acto": "otro", "hay_consulta": "true"},                       # bool como cadena
+            {"acto": "otro"},                                               # sin hay_consulta
+            {"acto": "consulta_medicamento", "hay_consulta": True},         # consulta sin término
+            {"acto": "consulta_medicamento", "hay_consulta": False},        # incoherente
+            {"acto": "otro", "hay_consulta": False, "confianza": "alta"},   # confianza no numérica
+            {"acto": "otro", "hay_consulta": False, "confianza": 7},        # fuera de rango
+            {"motivo": "x"},                                                # sin acto ni bool
+        ]
+        for datos in invalidos:
+            assert _veredicto_desde_json(datos) is None, datos
 
-    def test_bool_como_cadena(self):
-        assert _veredicto_desde_json({"acto": "otro", "hay_consulta": "true"}).hay_consulta is True
-        assert _veredicto_desde_json({"acto": "otro", "hay_consulta": "no"}).hay_consulta is False
-
-    def test_confianza_se_acota_y_termino_se_limpia(self):
+    def test_contrato_valido_limpia_termino_y_conserva_confianza(self):
         v = _veredicto_desde_json(
             {"acto": "consulta_medicamento", "hay_consulta": True,
-             "termino": "  atamel   forte. ", "confianza": 7}
+             "termino": "  atamel   forte. ", "confianza": 0.9, "motivo": "  pide atamel "}
         )
-        assert v.confianza == 1.0
+        assert v is not None
         assert v.termino == "atamel forte"
+        assert v.confianza == 0.9 and v.motivo == "pide atamel"
 
     def test_termino_se_ignora_si_no_hay_consulta(self):
         v = _veredicto_desde_json(
-            {"acto": "dato_personal", "hay_consulta": False, "termino": "bolivar"}
+            {"acto": "dato_personal", "hay_consulta": False, "termino": "bolivar",
+             "confianza": 0.8}
         )
-        assert v.termino is None
+        assert v is not None and v.termino is None
 
     def test_actos_declarados(self):
         assert "consulta_medicamento" in ACTOS and "atributo_producto" in ACTOS
@@ -257,6 +274,29 @@ class TestCapa:
         assert ent.hay_consulta is None and ent.fuente == "desactivada"
         assert llm.llamadas == 0
 
+    def test_confianza_baja_no_es_concluyente(self):
+        """Revisión externa: la confianza no puede ser decorativa."""
+        llm = FakeLlm(json.dumps({"acto": "consulta_medicamento", "hay_consulta": True,
+                                  "termino": "atamel", "confianza": 0.2,
+                                  "motivo": "no estoy seguro"}))
+        ent = asyncio.run(entender("atamel?", llm=llm, settings=Settings(),
+                                   termino_candidato="atamel"))
+        assert ent.hay_consulta is None and ent.fuente == "fail-safe"
+        assert "confianza baja" in ent.motivo
+
+    def test_contrato_incoherente_es_no_concluyente(self):
+        llm = FakeLlm('{"acto": "consulta_medicamento", "hay_consulta": true, "confianza": 0.9}')
+        ent = asyncio.run(entender("atamel?", llm=llm, settings=Settings(),
+                                   termino_candidato="atamel"))
+        assert ent.hay_consulta is None, "consulta sin término no puede decidir"
+
+    def test_timeout_cero_o_negativo_usa_default(self):
+        llm = FakeLlm(_veredicto("saludo", False), demora=0.05)
+        ent = asyncio.run(entender("hola", llm=llm, settings=Settings(intent_timeout=0),
+                                   termino_candidato=None))
+        # No revienta con timeout=0: usa el default (12s) y el LLM responde.
+        assert ent.hay_consulta is False and ent.fuente == "capa"
+
     def test_entendimiento_concluyente(self):
         assert Entendimiento(hay_consulta=False).concluyente
         assert Entendimiento(hay_consulta=True).concluyente
@@ -277,6 +317,28 @@ class TestAuditoria:
         fila = store.med_queries[-1]
         assert fila["intent"]["fuente"] == "capa"
         assert fila["intent"]["confianza"] == 0.91
+
+    def test_decision_sin_busqueda_tambien_se_registra(self):
+        """Revisión externa #6: los rechazos (no buscar) también dejan rastro."""
+        store = MemoryStore()
+        asyncio.run(store.log_intent_decision(
+            conversation_id=1, provider_id="demo", fuente="capa", acto="dato_personal",
+            hay_consulta=False, termino=None, candidato="vivo ciudad bolivar",
+            motivo="da un dato personal", confianza=0.92,
+        ))
+        fila = store.intent_decisions[-1]
+        assert fila["hay_consulta"] is False and fila["fuente"] == "capa"
+        assert fila["candidato"] == "vivo ciudad bolivar"
+
+    def test_evidencia_de_producto(self):
+        """El atajo de la autorización central: dosis con unidad o forma farmacéutica."""
+        from app.tools import _tiene_evidencia_de_producto
+
+        for si in ("atamel 500 mg", "jarabe para la tos", "crema", "losartan 50mg",
+                   "vitamina c 500", "gotas"):
+            assert _tiene_evidencia_de_producto(si), si
+        for no in ("ladrones", "estafa", "delivery", "puedo devolverlas", "marca"):
+            assert not _tiene_evidencia_de_producto(no), no
 
     def test_med_queries_sin_capa_no_revienta(self):
         store = MemoryStore()

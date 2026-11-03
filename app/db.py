@@ -498,6 +498,29 @@ class PgStore:
             intent.get("confianza"),
         )
 
+    async def log_intent_decision(
+        self,
+        conversation_id: int,
+        provider_id: str,
+        fuente: str,
+        acto: str | None,
+        hay_consulta: bool | None,
+        termino: str | None,
+        candidato: str | None,
+        motivo: str | None,
+        confianza: float | None,
+    ) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO intent_decisions
+              (conversation_id, provider_id, fuente, acto, hay_consulta, termino,
+               candidato, motivo, confianza)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """,
+            conversation_id, provider_id, fuente, acto, hay_consulta, termino,
+            candidato, motivo, confianza,
+        )
+
     # ----------------------------------------------------------- alias (F14.4) ---
 
     async def list_med_aliases(self) -> list[dict[str, Any]]:

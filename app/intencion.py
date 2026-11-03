@@ -52,7 +52,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -84,11 +86,23 @@ _PALABRAS_CONVERSACION = {
     "gracias", "hola", "buenas", "buenos", "tardes", "noches", "saludos",
     "listo", "ok", "okay", "dale", "perfecto", "claro", "igual", "entonces",
     "cuenta", "banco", "pago", "pagare", "pagaré", "efectivo", "zelle", "pago movil",
+    "delivery", "envio", "envíos", "envios", "domicilio", "sucursal", "factura",
+    "horario", "abierto", "cerrado", "caja", "cajas", "unidad", "unidades",
+    "transferencia", "devolucion", "devolución", "reclamo", "gerente", "encargado",
     "receta", "medico", "médico", "doctora", "doctor", "consultorio",
     "bendicion", "bendición", "dios", "familia", "hijo", "hija", "mama", "mamá",
 }
 _PALABRAS_CONVERSACION = {re.sub(r"[áéíóú]", lambda m: "aeiou"["áéíóú".index(m.group())], p)
                           for p in _PALABRAS_CONVERSACION}
+
+# Formas farmacéuticas: si el término las nombra, hay evidencia de que es un producto
+# ('jarabe', 'crema'...) y el nombre pelado no es ambiguo.
+_FORMAS_FARMACEUTICAS = {
+    "jarabe", "crema", "gotas", "tabletas", "tableta", "capsulas", "capsula", "cap",
+    "tab", "suspension", "solucion", "oral", "bucal", "inyectable", "ampolla",
+    "supositorio", "ovulos", "ovulo", "pomada", "gel", "spray", "polvo", "sobre",
+    "sobres", "jbe", "gts", "crema", "locion", "shampoo", "champu", "jabon",
+}
 
 _SISTEMA = """Eres la etapa de COMPRENSIÓN de un asistente de farmacia por WhatsApp.
 Tu único trabajo: decir si el mensaje del cliente pide un medicamento (y cuál), o si es
@@ -174,8 +188,18 @@ def camino_rapido(texto: str, termino_candidato: str | None) -> Entendimiento | 
     # motivó el heurístico de forma original (un nombre sin verbo ni pregunta). Se exige
     # que NINGUNA palabra sea de conversación y que no haya '?'.
     palabras = _tokens(texto)
+    termino_tokens = _tokens(termino_candidato or "")
+    # Evidencia positiva (revisión externa #4): el nombre pelado solo se acepta si
+    # tiene algo que lo respalde — una dosis, una forma farmacéutica o un token largo
+    # (marca/fármaco). Sin evidencia, es ambiguo y lo juzga la capa.
+    con_evidencia = bool(
+        re.search(r"\d", termino_candidato or "")
+        or any(t in _FORMAS_FARMACEUTICAS for t in termino_tokens)
+        or any(len(t) >= 7 for t in termino_tokens)
+    )
     if (
         termino_candidato
+        and con_evidencia
         and 1 <= len(palabras) <= 2
         and all(len(p) >= 3 for p in palabras)
         and not any(p in _PALABRAS_CONVERSACION for p in palabras)
@@ -227,33 +251,68 @@ def _extraer_json(texto: str) -> dict[str, Any] | None:
     return None
 
 
-def _veredicto_desde_json(datos: dict[str, Any]) -> Entendimiento:
-    acto = str(datos.get("acto") or "otro").strip().lower()
-    if acto not in ACTOS:
-        acto = "otro"
+def _veredicto_desde_json(datos: dict[str, Any]) -> Entendimiento | None:
+    """Veredicto desde el JSON del modelo, con **esquema estricto**.
+
+    Revisión externa (gpt-6-astra-pro, 2026-11): la primera versión aceptaba
+    `{"motivo": "x"}` como negativa concluyente, `"hay_consulta": "quizás"` vía
+    `bool()` y `hay_consulta=True` sin término. Un contrato incoherente no puede
+    decidir: se devuelve `None` (= inconcluyente) y el turno pregunta.
+
+    Devuelve `None` si el contrato no es válido o es incoherente.
+    """
+    if not isinstance(datos, dict):
+        return None
+    acto = datos.get("acto")
+    if not isinstance(acto, str) or acto.strip().lower() not in ACTOS:
+        return None
+    acto = acto.strip().lower()
     crudo = datos.get("hay_consulta")
-    if isinstance(crudo, str):
-        crudo = crudo.strip().lower() in {"true", "si", "sí", "yes", "1"}
-    hay = bool(crudo)
+    if not isinstance(crudo, bool):  # nada de bool() sobre cadenas/números/listas
+        return None
+    hay = crudo
     termino = datos.get("termino")
-    termino = str(termino).strip() if isinstance(termino, str) else None
-    if termino:
-        termino = re.sub(r"\s+", " ", termino).strip(" .,;:!?") or None
-    try:
-        confianza = float(datos.get("confianza", 0.0))
-    except (TypeError, ValueError):
-        confianza = 0.0
-    confianza = min(max(confianza, 0.0), 1.0)
-    motivo = str(datos.get("motivo") or "").strip()[:120]
+    if termino is not None and not isinstance(termino, str):
+        return None
+    termino = re.sub(r"\s+", " ", termino).strip(" .,;:!?") if termino else None
+    termino = termino or None
+    # Coherencia: una consulta necesita término; un acto de consulta no puede venir
+    # con hay_consulta=False.
+    if hay and not termino:
+        return None
+    if acto == "consulta_medicamento" and not hay:
+        return None
+    if not hay and acto == "consulta_medicamento":
+        return None
+    confianza = datos.get("confianza")
+    if not isinstance(confianza, (int, float)) or isinstance(confianza, bool):
+        return None
+    confianza = float(confianza)
+    if not math.isfinite(confianza) or not 0.0 <= confianza <= 1.0:
+        return None
+    motivo = datos.get("motivo")
+    motivo = motivo.strip()[:120] if isinstance(motivo, str) else ""
     return Entendimiento(
         acto=acto,
         hay_consulta=hay,
-        termino=termino if (hay and termino) else None,
+        termino=termino if hay else None,
         confianza=confianza,
         motivo=motivo,
         fuente="capa",
     )
 
+
+# Por debajo de esta confianza el veredicto NO decide: el turno pregunta.
+# (Revisión externa: «la confianza era decorativa; una negativa con confianza cero
+# seguía siendo concluyente».)
+CONFIANZA_MINIMA = 0.35
+
+# Circuito de corte: si el proveedor de la capa falla N veces seguidas, se deja de
+# llamar durante un enfriamiento (evita castigar cada turno con un timeout largo).
+_FALLOS_SEGUIDOS = 0
+_CORTE_HASTA = 0.0
+_FALLOS_PARA_CORTE = 3
+_ENFRIAMIENTO_S = 120.0
 
 _CLIENTES: dict[tuple[str, str, str], Any] = {}
 
@@ -267,22 +326,29 @@ def cliente_intencion(settings: Any, llm_chat: Any) -> Any:
     modelo = str(getattr(settings, "intent_model", "") or "").strip()
     if not modelo:
         return llm_chat
-    clave = (
-        modelo,
-        str(getattr(settings, "intent_api_key", "") or ""),
-        str(getattr(settings, "intent_base_url", "") or ""),
+    # Clave con la configuración EFECTIVA (la que de verdad usa el cliente): si no,
+    # dos configuraciones con distinto `openai_*` reutilizaban el cliente equivocado.
+    api_key = str(getattr(settings, "intent_api_key", "") or "") or str(
+        getattr(settings, "openai_api_key", "") or ""
     )
+    base = str(getattr(settings, "intent_base_url", "") or "") or str(
+        getattr(settings, "openai_base_url", "") or ""
+    )
+    clave = (modelo, api_key, base)
     if clave not in _CLIENTES:
-        api_key = clave[1] or getattr(settings, "openai_api_key", "")
-        base = clave[2] or getattr(settings, "openai_base_url", "")
         _CLIENTES[clave] = OpenAiLlm(api_key, modelo, base_url=base or None)
     return _CLIENTES[clave]
 
 
-def _contexto(texto: str, termino_candidato: str | None, producto_previo: str | None) -> str:
+def _contexto(texto: str, termino_candidato: str | None, producto_previo: str | None,
+              estado: str | None = None) -> str:
     partes = [f"Mensaje del cliente: {texto.strip()}"]
     if producto_previo:
         partes.append(f"Producto que el asistente acaba de mostrar: {producto_previo}")
+    if estado:
+        # Estado conversacional compacto (últimos turnos, última lista, pregunta
+        # pendiente): sin esto la elipsis y el cambio de producto se juzgan a ciegas.
+        partes.append(f"Estado de la conversación:\n{estado.strip()}")
     if termino_candidato:
         partes.append(
             f"Término candidato extraído por el sistema (puede ser basura): {termino_candidato}"
@@ -298,41 +364,86 @@ async def entender(
     settings: Any,
     termino_candidato: str | None = None,
     producto_previo: str | None = None,
+    estado: str | None = None,
 ) -> Entendimiento:
-    """Veredicto sobre el mensaje: camino rápido → capa LLM → fail-safe."""
+    """Veredicto sobre el mensaje: camino rápido → capa LLM → inconcluyente.
+
+    `hay_consulta=None` significa **no concluyente**: el llamador NO debe buscar
+    (antes reaplicaba el heurístico de forma, que era justamente el que buscaba
+    basura — revisión externa: «fail-open, no fail-safe»).
+    """
+    global _FALLOS_SEGUIDOS, _CORTE_HASTA
     if not bool(getattr(settings, "intent_layer", True)):
         return Entendimiento(acto="otro", hay_consulta=None, motivo="capa desactivada",
                              fuente="desactivada")
+    if not texto or not texto.strip():
+        return Entendimiento(acto="otro", hay_consulta=False, motivo="mensaje vacío",
+                             fuente="desvio")
     rapido = camino_rapido(texto, termino_candidato)
     if rapido is not None:
         return rapido
-    cliente = cliente_intencion(settings, llm)
+    # Circuito de corte: si el proveedor viene fallando, no se paga el timeout en
+    # cada turno (el turno pregunta en vez de buscar).
+    ahora = time.monotonic()
+    if ahora < _CORTE_HASTA:
+        return Entendimiento(hay_consulta=None, motivo="circuito de corte activo",
+                             fuente="fail-safe")
+    try:
+        timeout = float(getattr(settings, "intent_timeout", 12) or 12)
+    except (TypeError, ValueError):
+        timeout = 12.0
+    if timeout <= 0:  # 0 o negativo no es un timeout válido: se usa el default
+        timeout = 12.0
+    try:
+        cliente = cliente_intencion(settings, llm)
+    except Exception as exc:  # construcción del cliente (config inválida)
+        logger.warning("capa de comprensión: cliente inválido (%s)", exc)
+        return Entendimiento(hay_consulta=None, motivo=f"cliente inválido: {exc}"[:120],
+                             fuente="fail-safe")
     if cliente is None:
         return Entendimiento(hay_consulta=None, motivo="sin cliente LLM", fuente="fail-safe")
-    timeout = float(getattr(settings, "intent_timeout", 12) or 12)
     try:
         reply = await asyncio.wait_for(
             cliente.complete(
                 [
                     {"role": "system", "content": _SISTEMA},
-                    {"role": "user", "content": _contexto(texto, termino_candidato, producto_previo)},
+                    {"role": "user", "content": _contexto(texto, termino_candidato,
+                                                          producto_previo, estado)},
                 ]
             ),
             timeout=timeout,
         )
     except asyncio.TimeoutError:
-        logger.warning("capa de comprensión: timeout de %.0fs — fail-safe", timeout)
+        _FALLOS_SEGUIDOS += 1
+        _CORTE_HASTA = ahora + _ENFRIAMIENTO_S if _FALLOS_SEGUIDOS >= _FALLOS_PARA_CORTE else _CORTE_HASTA
+        logger.warning("capa de comprensión: timeout de %.0fs — no concluyente", timeout)
         return Entendimiento(hay_consulta=None, motivo="timeout", fuente="fail-safe")
     except Exception as exc:  # proveedor caído, cuota, red
-        logger.warning("capa de comprensión: fallo (%s) — fail-safe", exc)
+        _FALLOS_SEGUIDOS += 1
+        _CORTE_HASTA = ahora + _ENFRIAMIENTO_S if _FALLOS_SEGUIDOS >= _FALLOS_PARA_CORTE else _CORTE_HASTA
+        logger.warning("capa de comprensión: fallo (%s) — no concluyente", exc)
         return Entendimiento(hay_consulta=None, motivo=f"fallo: {exc}"[:120], fuente="fail-safe")
+    _FALLOS_SEGUIDOS = 0
 
     datos = _extraer_json(getattr(reply, "content", "") or "")
     if not datos:
-        logger.warning("capa de comprensión: respuesta sin JSON válido — fail-safe: %r",
+        logger.warning("capa de comprensión: respuesta sin JSON válido — no concluyente: %r",
                        (getattr(reply, "content", "") or "")[:200])
         return Entendimiento(hay_consulta=None, motivo="JSON inválido", fuente="fail-safe")
     veredicto = _veredicto_desde_json(datos)
+    if veredicto is None:
+        logger.warning("capa de comprensión: contrato inválido o incoherente — no concluyente: %r",
+                       str(datos)[:200])
+        return Entendimiento(hay_consulta=None, motivo="contrato inválido", fuente="fail-safe")
+    if veredicto.confianza < CONFIANZA_MINIMA:
+        # La confianza decide: una negativa (o afirmación) con poca confianza no
+        # autoriza nada; el turno pregunta.
+        logger.info("capa de comprensión: confianza %.2f < %.2f — no concluyente (%s)",
+                    veredicto.confianza, CONFIANZA_MINIMA, veredicto.motivo)
+        veredicto.hay_consulta = None
+        veredicto.motivo = f"confianza baja ({veredicto.confianza:.2f}): {veredicto.motivo}"[:120]
+        veredicto.fuente = "fail-safe"
+        return veredicto
     logger.info(
         "capa de comprensión: acto=%s consulta=%s termino=%r confianza=%.2f (%s)",
         veredicto.acto, veredicto.hay_consulta, veredicto.termino,

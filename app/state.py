@@ -276,6 +276,19 @@ class Store(Protocol):
         added_to_cart: bool = False,
         intent: dict[str, Any] | None = None,
     ) -> None: ...
+    # decisiones de la capa de comprensión (F15): busque o no, queda registrada.
+    async def log_intent_decision(
+        self,
+        conversation_id: int,
+        provider_id: str,
+        fuente: str,
+        acto: str | None,
+        hay_consulta: bool | None,
+        termino: str | None,
+        candidato: str | None,
+        motivo: str | None,
+        confianza: float | None,
+    ) -> None: ...
     async def top_med_queries(
         self,
         provider_id: str,
@@ -331,6 +344,8 @@ class MemoryStore:
         self.pending_sends: dict[int, PendingSend] = {}
         self.cart: dict[int, list[CartItem]] = {}
         self.med_queries: list[dict[str, Any]] = []
+        # F15 — decisiones de la capa de comprensión (incluidas las que NO buscan).
+        self.intent_decisions: list[dict[str, Any]] = []
         self.patient_profiles: dict[
             tuple[str, str, str], dict[str, Any]
         ] = {}  # (provider_id, wa_identity, condicion) → perfil
@@ -531,6 +546,28 @@ class MemoryStore:
                 "result_count": result_count,
                 "added_to_cart": added_to_cart,
                 "intent": intent or {},
+            }
+        )
+
+    async def log_intent_decision(
+        self,
+        conversation_id: int,
+        provider_id: str,
+        fuente: str,
+        acto: str | None,
+        hay_consulta: bool | None,
+        termino: str | None,
+        candidato: str | None,
+        motivo: str | None,
+        confianza: float | None,
+    ) -> None:
+        """Registra la decisión de la capa (tests)."""
+        self.intent_decisions.append(
+            {
+                "conversation_id": conversation_id, "provider_id": provider_id,
+                "fuente": fuente, "acto": acto, "hay_consulta": hay_consulta,
+                "termino": termino, "candidato": candidato, "motivo": motivo,
+                "confianza": confianza,
             }
         )
 

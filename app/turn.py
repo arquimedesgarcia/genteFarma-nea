@@ -2522,6 +2522,23 @@ async def _tool_loop(
                             else None
                         )
                     else:
+                        # Estado conversacional compacto para la capa (revisión #5):
+                        # últimos turnos + qué se mostró antes. Sin esto, la elipsis y
+                        # el cambio de producto se juzgan a ciegas.
+                        estado_partes = []
+                        for m in messages[-3:-1]:
+                            rol = m.get("role") or "?"
+                            contenido = str(m.get("content") or "")[:220]
+                            if contenido:
+                                estado_partes.append(f"{rol}: {contenido}")
+                        if runtime.last_term:
+                            estado_partes.append(f"última búsqueda: {runtime.last_term}")
+                        if runtime.last_options:
+                            nombres = ", ".join(
+                                str(p.get("nombre") or p.get("producto") or "?")
+                                for p in runtime.last_options[:4]
+                            )
+                            estado_partes.append(f"última lista mostrada: {nombres}")
                         ent = await entender_intencion(
                             _texto_cliente_sin_marcadores(user_text) or user_text,
                             llm=ctx.llm,
@@ -2529,12 +2546,17 @@ async def _tool_loop(
                             termino_candidato=candidato,
                             producto_previo=(runtime.last_product or {}).get("nombre")
                             or (runtime.last_product or {}).get("producto"),
+                            estado="\n".join(estado_partes) or None,
                         )
-                        # Auditoría: viaja con la búsqueda hasta `med_queries`.
+                        # Auditoría: viaja con la búsqueda hasta `med_queries` y, además,
+                        # se registra la DECISIÓN (también las que NO buscan: revisión #6).
                         runtime.intent_fuente = ent.fuente
                         runtime.intent_acto = ent.acto
                         runtime.intent_motivo = ent.motivo
                         runtime.intent_confianza = ent.confianza
+                        runtime.intent_hay_consulta = ent.hay_consulta
+                        runtime.intent_termino = ent.termino
+                        await runtime.registrar_decision_intencion(candidato)
                         if ent.hay_consulta:
                             term = ent.termino or candidato
                             logger.info(
@@ -2549,17 +2571,15 @@ async def _tool_loop(
                                 ent.acto, ent.fuente, candidato, ent.motivo,
                             )
                         else:
-                            # FAIL-SAFE (capa apagada, timeout, proveedor caído o JSON
-                            # inválido): conducta anterior, para que un proveedor que
-                            # falla no cambie el flujo del agente.
-                            term = (
-                                candidato
-                                if candidato and _parece_consulta_medicamento(user_text)
-                                else None
-                            )
+                            # NO CONCLUYENTE = NO BUSCAR (fail-closed). Antes se reaplicaba
+                            # el heurístico de forma, que era justo el que buscaba basura
+                            # ('ser indu', 'vivo ciudad bolivar'): revisión externa,
+                            # «fail-open, no fail-safe». Ante la duda, el agente aclara.
+                            term = None
                             logger.info(
-                                "capa de comprensión: fail-safe (%s) — heurístico anterior: %r",
-                                ent.motivo, term,
+                                "capa de comprensión: NO concluyente (%s) — no se busca "
+                                "(el candidato era %r); el turno aclara",
+                                ent.motivo, candidato,
                             )
                 # EL TÍTULO TIENE QUE SER EL FÁRMACO, NO LA FRASE. `_extraer_termino_medicamento`
                 # quita verbos de consulta y relleno, pero NO el ruido del HABLA (muletillas,
