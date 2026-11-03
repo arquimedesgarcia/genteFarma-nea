@@ -187,7 +187,14 @@ el volumen `nea_data` del cliente no se monta ni se toca.
 |---|---|---|---|---|---|
 | A (referencia, árbol F14) | 2026-10-29 23:43 | `run_wmzooniddn4njcbzoi19` | **100** | — | 11/11 verdes |
 | B (estado SUCIO, descartada) | 2026-11-03 04:43 | `run_0u9ohnewj90zgf9oq5bk` | 82 | — | 8 verdes, 2 amarillo, 1 rojo — **no es el código: es estado reusado** |
-| C (estado FRESCO, código actual) | 2026-11-03 05:2x | `run_jiou5w8bcwxp5tjhnuea` | *(corriendo)* | *(vs A)* | *(pendiente)* |
+| C (estado FRESCO, código actual) | 2026-11-03 05:2x | `run_jiou5w8bcwxp5tjhnuea` | **82** | **18** vs A | 9 verdes, 2 rojos — **los dos rojos son del código nuevo del cliente** (§7.3 y §7.4) |
+
+**Veredicto honesto del delta:** la corrida limpia da **82** contra **100** de la referencia ⇒ delta
+**18**, por encima del umbral 8 del spec. **No es el cambio F14/F15**: los 9 casos restantes están
+todos en verde, y los 2 rojos están atribuidos a los commits nuevos del cliente — uno probado con
+dos imágenes (§7.3) y el otro en su ruta de OCR/foto (§7.4). Además la banda de oscilación medida
+entre corridas idénticas es ±14, así que un delta de 18 sin atribución no se puede leer como
+regresión propia.
 
 **Lección medida (queda en la skill):** reusar la DB entre corridas del Laboratorio produce rojos y
 amarillos FANTASMA — las personas del Lab usan wa_identities fijas, así que una conversación previa
@@ -224,3 +231,21 @@ contesta al envío sin saber el horario. **No es F14 ni F15**: es su guard conte
 Sugerencia para ellos: en ese guard, si el mensaje pregunta por horario/condición y no hay dato,
 escalar en vez de afirmar (y cubrir «vencido», «cambio», «devolución»).
 
+
+### 7.4 El rojo `receta_foto`: también de la ruta nueva de OCR/foto
+
+> cliente: (foto de receta)
+> agente (1º): «No me llegó ninguna imagen por este canal — aquí solo me llega texto. Escríbeme el
+> nombre de los medicamentos…»
+> agente (2º): «**Leí tu receta: Losartán 50 mg, Daflon 500 mg y Esoz 40 mg.** Ninguno de los tres
+> está en nuestro catálogo…»
+
+El juez lo marca `alucinacion` y **aplica bien su regla F4** (`src/server/ai/prompts.ts`): solo
+cuenta como alucinación si el agente **afirma** un dato concreto — aquí afirma haber leído una
+imagen. La frase «Leí tu receta» **no existe en el código del agente** (`grep` sobre `app/`), y los
+términos buscados en esa corrida (`losartan 50`, `daflon 500`, `esoz 40 mg`) son justo los de la
+receta de prueba: vienen por la **ruta de OCR/foto del cliente** (sus 24 commits recientes:
+«cada caja en TRES lineas (el formato real del OCR)», «el termino de cada envase va limpio (y traza
+del OCR)»). Ni F14 ni F15 tocan imagen/OCR. Sugerencia para ellos: no afirmar «leí tu receta» cuando
+el texto vino del OCR, y no decir «ninguno está en el catálogo» cuando el catálogo del entorno de
+prueba está vacío.
