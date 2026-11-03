@@ -108,6 +108,15 @@ DEMOSTRATIVOS_R = {
     "antelación", "sus", "mis",
 }
 
+# PETICIÓN DE ENVÍO: "quiero que me lo envíen" no es el nombre de un medicamento. Sin esto,
+# el término quedaba en 'envien' y el agente buscaba en el catálogo (provider 19, 2026-10-31).
+ENVIO_R = {
+    "envio", "envios", "enviar", "enviarlo", "enviarla", "envien", "envienme", "enviame",
+    "envian", "envias", "envia", "envie", "mandar", "mandarlo", "mandarla", "manden",
+    "mandenme", "mandame", "mandan", "mandas", "manda", "despacho", "despachar",
+    "despachenme", "motorizado", "delivery", "domicilio",
+}
+
 _FUNCIONALES = {
     # RÓTULOS DEL CAMPO que el OCR devuelve pegados al contenido
     # ('nombre del medicamento fexofenadina clorhidrato calox'). Sin esto se cuelan como
@@ -122,6 +131,8 @@ _FUNCIONALES = {
     *SALUDO_TIEMPO_R,
     *BENDICIONES_R,
     *DEMOSTRATIVOS_R,
+    *ENVIO_R,
+    "pedido", "pedidos",
     "medicamento", "medicamentos",
 
     # ACCESORIOS Y CONSUMIBLES DE UN EQUIPO, NO MEDICAMENTOS. Caso real (provider 32,
