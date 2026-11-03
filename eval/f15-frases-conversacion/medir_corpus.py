@@ -29,6 +29,7 @@ RAIZ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, RAIZ)
 
 from app.intencion import entender  # noqa: E402
+from app.turn import _extraer_termino_medicamento  # noqa: E402
 
 PROXY = os.environ.get("INTENT_PROXY", "http://127.0.0.1:11500/v1")
 
@@ -55,6 +56,17 @@ CORPUS: list[tuple[str, bool, str | None]] = [
     ("aceptan zelle?", False, None),
     ("a que hora cierran hoy?", False, None),
     ("si, esa es la presentacion que quiero", False, None),
+    # --- charla CON verbo de consulta (el fallo que retiró el camino rápido por verbo) ---
+    ("tienen delivery?", False, None),
+    ("aceptan zelle?", False, None),
+    ("a que hora cierran hoy?", False, None),
+    ("Solo una marca o hay varias?", False, None),
+    ("Por ahora no necesito nada", False, None),
+    ("cuanto es el minimo para delivery?", False, None),
+    ("hacen envios a San Cristobal?", False, None),
+    ("tienen sucursal en el centro?", False, None),
+    ("me pueden mandar la factura por correo?", False, None),
+    ("necesito hablar con una persona", False, None),
     # --- consultas legítimas: SÍ deben buscar (los falsos negativos son caros) ---
     ("tienen atamel forte?", True, "atamel"),
     ("precio de la macrodantina de 100", True, "macrodantina"),
@@ -155,8 +167,10 @@ async def medir(modelo: str) -> int:
     filas = []
     t0 = time.time()
     for frase, debe, termino in CORPUS:
+        candidato = _extraer_termino_medicamento(frase)
         ent = await entender(frase, llm=llm, settings=settings,
-                             termino_candidato=None, producto_previo="MACRODANTINA 100 MG X 20 CAP")
+                             termino_candidato=candidato,
+                             producto_previo="MACRODANTINA 100 MG X 20 CAP")
         # El veredicto puede venir del camino rápido o de la capa; ambos cuentan.
         obtenido = ent.hay_consulta
         ok = obtenido == debe if obtenido is not None else False

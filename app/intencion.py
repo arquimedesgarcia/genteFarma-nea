@@ -23,15 +23,17 @@ pregunta en vez de buscar.
 
 **Cómo lo hace, en tres caminos** (para no pagar una llamada en cada turno):
 
-1. `consulta` — camino rápido: hay verbo explícito de consulta ("tienen", "precio
-   de", "busco"...). Un pedido explícito se busca: si el término es basura, la
-   respuesta honesta es «no lo tengo», que es lo correcto para un pedido.
-2. `nombre` — camino rápido: mensaje corto (1–2 palabras) con forma de nombre
+1. `nombre` — camino rápido: mensaje corto (1–2 palabras) con forma de nombre
    pelado y sin ninguna palabra conversacional conocida («shampo dreene»,
    «vivacina»). Es el caso que motivó el heurístico de forma original.
-3. `capa` — LLM: todo lo demás (mensajes con contexto, frases, dudas). Una sola
-   llamada con contrato JSON cerrado. Es el único camino que cuesta dinero y solo
-   se paga donde el heurístico adivinaba.
+2. `capa` — LLM: **todo lo demás**, incluidos los mensajes con verbo de consulta.
+   Una sola llamada con contrato JSON cerrado. Es el único camino que cuesta
+   dinero y solo se paga donde antes el heurístico adivinaba.
+
+   *(Hubo un camino rápido por VERBO — «tienen», «hay», «necesito», «precio»… — y se
+   retiró al medirlo: el verbo aparece también en frases de charla («tienen
+   delivery?», «por ahora no necesito nada») y no es evidencia de fármaco. Ver
+   `camino_rapido`.)*
 
 **Fail-safe.** Si la capa no responde (timeout, proveedor caído, JSON inválido),
 `hay_consulta=None` y el llamador conserva el comportamiento anterior. La mejora
@@ -69,19 +71,6 @@ ACTOS = (
     "reclamo",
     "consulta_medicamento",
     "otro",
-)
-
-# Verbos/frases de consulta EXPLÍCITA. No es una lista negra: es el camino rápido
-# de alta precisión. Un mensaje con verbo de consulta es un pedido, y ante un
-# pedido la conducta correcta es buscar (si el nombre está mal, "no lo tengo" es
-# una respuesta honesta, no un error de comprensión).
-_VERBO_CONSULTA = re.compile(
-    r"\b("
-    r"tienen|tienes|tenga|hay|habra|habra|venden|vende|manejan|maneja|traen|trae|"
-    r"busco|buscando|buscar|necesito|necesita|requiero|quiero saber|sabes si|"
-    r"precio|precios|cuanto|cuánto|vale|cuesta|sirve|sirven|disponible|disponibles|"
-    r"existe|consigo|consigues|donde|dónde|tendran|tendrán|me das|me vendes"
-    r")\b"
 )
 
 # Palabras que, si aparecen, mandan el mensaje a la CAPA en vez de al camino
@@ -149,7 +138,7 @@ class Entendimiento:
     termino: str | None = None
     confianza: float = 0.0
     motivo: str = ""
-    fuente: str = "fail-safe"  # consulta | nombre | capa | fail-safe | desactivada
+    fuente: str = "fail-safe"  # nombre | capa | fail-safe | desactivada | desvio | llm
 
     @property
     def concluyente(self) -> bool:
@@ -168,17 +157,22 @@ def _tokens(texto: str) -> list[str]:
 
 
 def camino_rapido(texto: str, termino_candidato: str | None) -> Entendimiento | None:
-    """Decide sin LLM cuando no hay duda razonable. `None` = hay que consultar la capa."""
+    """Decide sin LLM SOLO cuando no hay duda razonable. `None` = que decida la capa.
+
+    Qué NO está aquí y por qué: hubo una versión con un camino rápido por VERBO
+    («tienen», «hay», «necesito», «precio»…). Se retiró al medirlo con el extractor
+    real: el verbo no es evidencia de fármaco y disparaba búsquedas en frases
+    conversacionales — «Solo una marca o hay varias?» → `marca varias`,
+    «Por ahora no necesito nada» → `ahora`, «tienen delivery?» → `delivery`,
+    «aceptan zelle?» → zelle. Es exactamente la clase de error que esta capa existe
+    para evitar, así que el verbo (que sí aparece en frases de charla) ya no decide
+    nada: lo juzga la capa con el contexto completo.
+    """
     if not texto or not texto.strip():
         return Entendimiento(acto="otro", hay_consulta=False, motivo="mensaje vacío", fuente="desvio")
-    t = _norm(texto)
-    # 1) Pedido explícito.
-    if _VERBO_CONSULTA.search(t) and termino_candidato:
-        return Entendimiento(
-            acto="consulta_medicamento", hay_consulta=True, termino=termino_candidato,
-            confianza=0.9, motivo="verbo de consulta explícito", fuente="consulta",
-        )
-    # 2) Nombre pelado corto ('shampo dreene', 'vivacina', 'atamel 500').
+    # Nombre pelado corto ('shampo dreene', 'vivacina', 'atamel 500'): es el caso que
+    # motivó el heurístico de forma original (un nombre sin verbo ni pregunta). Se exige
+    # que NINGUNA palabra sea de conversación y que no haya '?'.
     palabras = _tokens(texto)
     if (
         termino_candidato
@@ -191,7 +185,7 @@ def camino_rapido(texto: str, termino_candidato: str | None) -> Entendimiento | 
             acto="consulta_medicamento", hay_consulta=True, termino=termino_candidato,
             confianza=0.7, motivo="nombre pelado corto", fuente="nombre",
         )
-    # 3) Duda: que decida la capa (frases, datos personales, mensajes con contexto).
+    # Duda: que decida la capa (mensajes con verbo, frases, datos personales, atributos).
     return None
 
 

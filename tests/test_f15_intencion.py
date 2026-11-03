@@ -78,23 +78,14 @@ def _veredicto(acto: str, hay: bool, termino: str | None = None,
 # --------------------------------------------------------------- caminos rápidos ---
 
 class TestCaminoRapido:
-    @pytest.mark.parametrize("texto,candidato", [
-        ("que precio tiene la nitrofurantoina de 50mg?", "nitrofurantoina 50mg"),
-        ("tienen atamel forte?", "atamel forte"),
-        ("necesito metformina 850", "metformina 850"),
-        ("cuanto vale el losartan?", "losartan"),
-    ])
-    def test_verbo_de_consulta_busca_sin_gastar_llamada(self, texto, candidato):
-        ent = camino_rapido(texto, candidato)
-        assert ent is not None
-        assert ent.hay_consulta is True
-        assert ent.fuente == "consulta"
-        assert ent.termino == candidato
+    def test_sin_termino_candidato_no_hay_camino_rapido(self):
+        assert camino_rapido("tienes algo para la gripe?", None) is None
 
     @pytest.mark.parametrize("texto,candidato", [
         ("vivacina", "vivacina"),
         ("shampo dreene", "shampo dreene"),
         ("omeprasol", "omeprasol"),
+        ("atamel 500", "atamel 500"),
     ])
     def test_nombre_pelado_corto_busca(self, texto, candidato):
         ent = camino_rapido(texto, candidato)
@@ -103,19 +94,32 @@ class TestCaminoRapido:
         assert ent.fuente == "nombre"
 
     @pytest.mark.parametrize("texto,candidato", [
+        # Las 4 quejas reales.
         ("No puede ser Indu.", "ser indu"),
         ("Vivo en Ciudad Bolivar.", "vivo ciudad bolivar"),
         ("Solo una marca?", "marca"),
         ("Por ahroa no", "ahroa"),
+        # Falsos positivos que destapó la sonda con el extractor real: llevan VERBO
+        # de consulta pero son charla. Retirar el camino rápido por verbo los evita.
+        ("Solo una marca o hay varias?", "marca varias"),
+        ("Por ahora no necesito nada", "ahora"),
+        ("tienen delivery?", "delivery"),
+        ("aceptan zelle?", "aceptan zelle"),
+        ("a que hora cierran hoy?", "hora cierran hoy"),
         ("gracias, linda", None),
         ("hola mi amor buenos dias", None),
     ])
-    def test_las_quejas_no_se_resuelven_con_heuristica_de_forma(self, texto, candidato):
-        """Las 4 quejas reales (y la cortesía) NO pueden decidirse por forma: van a la capa."""
+    def test_charla_no_se_resuelve_con_heuristica(self, texto, candidato):
+        """Ni por forma ni por verbo: estas frases las juzga la capa."""
         assert camino_rapido(texto, candidato) is None
 
-    def test_sin_termino_candidato_no_hay_camino_rapido(self):
-        assert camino_rapido("tienes algo para la gripe?", None) is None
+    def test_el_verbo_de_consulta_ya_no_decide_solo(self):
+        """Regresión del fallo medido: 'tienen delivery?' disparaba búsqueda."""
+        from app.turn import _extraer_termino_medicamento
+
+        for frase in ("tienen delivery?", "aceptan zelle?", "por ahora no necesito nada"):
+            candidato = _extraer_termino_medicamento(frase)
+            assert camino_rapido(frase, candidato) is None, frase
 
 
 # --------------------------------------------------------------------- contrato ---
@@ -167,8 +171,8 @@ class TestContratoJson:
 class TestCapa:
     def test_capa_no_se_llama_cuando_el_camino_rapido_ya_decidio(self):
         llm = FakeLlm(_veredicto("otro", False))
-        ent = asyncio.run(entender("tienen atamel?", llm=llm, settings=Settings(),
-                                   termino_candidato="atamel"))
+        ent = asyncio.run(entender("vivacina", llm=llm, settings=Settings(),
+                                   termino_candidato="vivacina"))
         assert ent.hay_consulta is True
         assert llm.llamadas == 0, "el camino rápido no debe gastar una llamada"
 
@@ -206,15 +210,15 @@ class TestCapa:
         assert ent.fuente == "capa"
         assert llm.llamadas == 1
 
-    def test_verbo_de_consulta_usa_el_candidato_sin_llamar_a_la_capa(self):
-        """El camino rápido confía en el extractor: la corrección fina la hace F14."""
-        llm = FakeLlm(_veredicto("consulta_medicamento", True, "otra cosa"))
-        ent = asyncio.run(entender("y el diclofencao de 50 cuanto sale?",
+    def test_mensaje_con_verbo_lo_juzga_la_capa(self):
+        """El verbo ya no decide: 'precio de X' va a la capa, que confirma el término."""
+        llm = FakeLlm(_veredicto("consulta_medicamento", True, "macrodantina 100", 0.9))
+        ent = asyncio.run(entender("precio de la macrodantina de 100",
                                   llm=llm, settings=Settings(),
-                                  termino_candidato="diclofencao 50"))
-        assert ent.hay_consulta is True and ent.fuente == "consulta"
-        assert ent.termino == "diclofencao 50"
-        assert llm.llamadas == 0
+                                  termino_candidato="macrodantina"))
+        assert ent.hay_consulta is True and ent.fuente == "capa"
+        assert ent.termino == "macrodantina 100"
+        assert llm.llamadas == 1
 
     def test_la_capa_recibe_contexto_util(self):
         llm = FakeLlm(_veredicto("atributo_producto", False))
