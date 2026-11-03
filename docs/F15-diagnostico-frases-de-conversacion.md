@@ -81,6 +81,49 @@ reproducir con su modelo: este entorno corre LongCat y ellos pasaron el chat a D
 Flash (Ollama Cloud) en los últimos commits. Para cerrar el mapa hace falta correr los dos
 escenarios con su modelo.
 
+### 2.1 F15.0 — reproducido CON el modelo del cliente (`deepseek/deepseek-v4.1-flash`)
+
+Corridos los escenarios 12 y 13 con el modelo de producción
+(`eval/f15-frases-conversacion/antes-deepseek-v4.1-flash.{json,md}`):
+
+**Queja 1 REPRODUCIDA al pie de la letra** (escenario 13, la frase llega después de un listado):
+
+> **Cliente:** No puede ser Indu.
+> **Agente:** ⚠️ **No tengo SER INDU**. No te ofrezco otro medicamento parecido para no
+> confundirte: son cosas distintas. ¿Me confirmas el nombre tal como viene en la caja, o te paso
+> con un auxiliar?
+
+El agente le contesta al paciente que "no tiene SER INDU" — la frase sobre el **laboratorio**
+convertida en medicamento, exactamente el síntoma reportado.
+
+**Queja 2 REPRODUCIDA en el log** (escenario 12): aunque la respuesta visible fue correcta
+(«Perfecto, Ciudad Bolívar anotado 👍 ¿Qué andas buscando hoy?»), el agente **igual consultó el
+catálogo 13 veces**:
+
+```
+vivo ciudad bolivar → vivo → (7 transposiciones) → boliva → boliv → boli → bol
+```
+
+Es la peor variante del daño: **el cliente no lo ve, pero `med_queries` se contamina** — y de
+ese log salen los alias y el catálogo de typos de F14.4 (una búsqueda basura hoy es una
+"corrección" aprendida mañana).
+
+**Las quejas 3 y 4 (`Solo una marca?`, `Por ahroa no`)** salieron conversacionalmente bien en
+ambos modelos en estas corridas, pero el terreno está medido (§1: el extractor produce `marca` /
+`ahroa` y la bandera dice True), así que siguen dentro del alcance: dependen del modelo y del
+contexto.
+
+**Dato suelto a vigilar:** en la corrida con DeepSeek aparece una consulta a `sildenafilo` que
+ninguna frase del guion justifica — parece una **llamada suelta del modelo** (alucinada) al
+buscador. No se ve en respuesta al cliente, pero conviene mirarlo cuando se instrumente el log
+de la capa (F15.1 §3).
+
+**Diferencia entre modelos (por qué el "antes" se congela con el del cliente):** LongCat y
+DeepSeek eligen **distinto camino** ante las mismas frases — LongCat buscaba `vivo ciudad
+bolivar` *y* contestaba conversacional; DeepSeek contesta conversacional en el escenario 12 pero
+en el 13 suelta el «No tengo SER INDU». El fallo no es de un modelo: es del **decisor** común
+(el heurístico de forma + la bandera de señal).
+
 ## 3. La tensión de fondo (por qué "más reglas" no alcanza)
 
 El árbol tiene hoy una familia de filtros deterministas por frase/familia: `_parece_direccion`,
