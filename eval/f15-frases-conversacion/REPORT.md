@@ -163,3 +163,34 @@ independientes; tests con conteo real de invocaciones por caso; y volver a corre
 Sonnet cuando el upstream se descongestione (o pasarle los anexos completos, que en modo compacto
 no vio: eso fue parte de su queja).
 
+## 7. Entrega: los 4 casos reales antes/después y el Laboratorio
+
+### 7.1 Los 4 casos reales, con el agente corriendo de verdad
+
+Artefacto completo: `escenarios-final.md` (12 escenarios; 225 consultas al catálogo en toda la
+batería). Antes = lo documentado en el diagnóstico; después = la corrida final con el código de
+F15 (modelo real `deepseek/deepseek-v4.1-flash`, catálogo controlado).
+
+| Caso | Antes | Después |
+|---|---|---|
+| **1 · apelativo + nitrofurantoina + vitamina C** | término `amor nitrofurantoina 50mg vitamina`; `amor` validaba **TE AMO PRESERV** | lista **nitrofurantoina (50 y 100) + VITAMINA C**; TE AMO PRESERV nunca aparece. *Residual*: «dame 2 cajas de la nitro» sigue sin resolverse como referencia al producto anterior («No tengo 2 NITRO») |
+| **2 · `vivacina`** | devolvía **VITAMINA K y VITAMINA C** (fuzzy de 2 ediciones) | **no ofrece nada**: «no lo tengo en el catálogo» y sostiene el no ante la repregunta; no inventa precio |
+| **3 · «opción N» en mensaje mixto** | no resolvía la opción y buscaba `macrodantina querer vitamina opción` | **resuelve la opción 2** (agrega VITAMINA K del listado) y aclara «la Vitamina C es la opción 1, dime si te la cambio» |
+| **4 · dos bucales + typo (`solunoval`)** | un solo término concatenado + «No tengo SOLUNOVAL BUCAL» y luego la lista | dos búsquedas (SOLUNOVAR y PINVEX) con precios. *Residual*: sigue el aviso contradictorio «No tengo SOLUNOVAL **en solución bucal**. Lo tengo en: solución oral» mientras lista un producto que **se llama** SOLUCION BUCAL — es la plantilla `aviso_forma` del árbol del cliente, no la capa |
+
+### 7.2 Laboratorio del CRM (juez LongCat vía proxy Nous :11500)
+
+Estado fresco **sin TRUNCATE**: cada corrida usa la DB desechable (`nea-db-qa-j`, volumen propio);
+el volumen `nea_data` del cliente no se monta ni se toca.
+
+| Corrida | Cuándo | runId | Score | Delta | Veredicto |
+|---|---|---|---|---|---|
+| A (código de esta entrega) | 2026-10-29 23:43 | `run_wmzooniddn4njcbzoi19` | **100** | — | 11/11 casos en verde |
+| B (código de esta entrega) | 2026-11-03 04:43 | `run_0u9ohnewj90zgf9oq5bk` | *(corriendo)* | *(vs A)* | *(pendiente)* |
+
+Histórico de la misma sesión (mismo código, para leer la oscilación): `run_e7vfzuhkmf8t59mibgh8`
+= 100, `run_7k61nvr5kfdp2tqc8l8y` = 86 (delta −14), `run_o4oscqnb6bl0r8amwwez` = 100 (delta +14) —
+la banda de ±14 entre corridas idénticas que ya se documentó en F14. **El Laboratorio mide
+comportamiento, no precisión de búsqueda**: sin credenciales de Firebase su catálogo responde
+vacío (por eso los casos dicen «no tengo losartán/daflon»). La precisión se mide con el corpus y
+las conversaciones simuladas (§3 y §7.1).
