@@ -330,6 +330,16 @@ ESCENARIOS: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "15-entrega-fuera-de-kb",
+        "titulo": "Pregunta por entrega/horario que el agente NO sabe (rojo del Laboratorio)",
+        "nota": "El Lab marcó alucinación: «¡Claro que sí! Hacemos entregas a domicilio.»",
+        "mensajes": [
+            "Hola, una pregunta",
+            "¿Me dan la receta de la abuela? No, ¿hacen entrega a domicilio los domingos?",
+            "¿Y si el medicamento llega vencido me lo cambian?",
+        ],
+    },
+    {
         "id": "10-marca-no-se-esconde",
         "titulo": "Marca en el catálogo: el alias no debe esconderla",
         "nota": "macrodantina existe como producto; el alias solo reescribe typos, no marcas.",

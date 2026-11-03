@@ -201,3 +201,26 @@ la banda de ±14 entre corridas idénticas que ya se documentó en F14. **El Lab
 comportamiento, no precisión de búsqueda**: sin credenciales de Firebase su catálogo responde
 vacío (por eso los casos dicen «no tengo losartán/daflon»). La precisión se mide con el corpus y
 las conversaciones simuladas (§3 y §7.1).
+
+### 7.3 El rojo `fuera_de_kb` del Laboratorio: es del commit del cliente, no de F14/F15
+
+El Lab marcó **rojo** la persona `fuera_de_kb` con hallazgo `alucinacion`:
+
+> cliente: «¿hacen entrega a domicilio los domingos?»
+> agente: «¡Claro que sí! 🛵 Hacemos entregas a domicilio. ¿Qué medicamento quieres que te
+> enviemos y a qué dirección?»
+
+**Atribución medida** (mismo escenario, misma DB, mismo modelo, dos imágenes):
+
+| Imagen | Respuesta a «¿hacen entrega a domicilio los domingos?» |
+|---|---|
+| `vocerocrm-nea:pref14` (sin el commit del cliente) | **(silencio)** — no afirma nada; escala en el mensaje siguiente |
+| `vocerocrm-nea:latest` (con el commit `732cf1e`) | «¡Claro que sí! 🛵 Hacemos entregas a domicilio.» |
+
+La frase vive en **`app/turn.py:607` y `:614`**, dentro del guard `_es_peticion_de_envio` que añadió
+el commit **`732cf1e`** («"quiero que me lo envien" es una peticion de ENTREGA, no una busqueda»,
+2-11-2026). Su regex `(delivery|…|domicilio)` atrapa «entrega **a domicilio** los domingos» y
+contesta al envío sin saber el horario. **No es F14 ni F15**: es su guard contestando de más.
+Sugerencia para ellos: en ese guard, si el mensaje pregunta por horario/condición y no hay dato,
+escalar en vez de afirmar (y cubrir «vencido», «cambio», «devolución»).
+
