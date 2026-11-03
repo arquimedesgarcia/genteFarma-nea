@@ -574,6 +574,50 @@ async def run_turn(
             runtime.last_options = json.loads(conv.last_options)
         except Exception:
             runtime.last_options = []
+    # «QUIERO QUE ME LO ENVÍEN» — petición de ENTREGA, no una búsqueda de catálogo.
+    #
+    # Caso real (provider 19, 2026-10-31): tras ver una lista, el cliente escribió
+    # "Quiero que me lo envíen por favor ?" y el agente volvió a buscar DICLOFENAC y soltó 20
+    # presentaciones (inyectables, gel, gotas oftálmicas, supositorios) en vez de responder al
+    # envío. Se contesta al ENVÍO: con carrito armado, se guarda 'delivery' y se pide la
+    # dirección; sin carrito, se confirma que hay delivery y se pregunta qué producto y a dónde.
+    if farmacia and _es_peticion_de_envio(user_text):
+        _term_env = _extraer_termino_medicamento(
+            _texto_cliente_sin_marcadores(user_text) or user_text or ""
+        )
+        if not _term_env or not _termino_es_medicamento_plausible(_term_env):
+            _items_env = await ctx.store.cart_items(
+                conv.id, session_hours=ctx.settings.cart_session_hours
+            )
+            if _items_env:
+                logger.info(
+                    "backstop envío: el cliente pide entrega con %d producto(s) en el carrito "
+                    "— guardo delivery y pido la dirección", len(_items_env),
+                )
+                await runtime.guardar_eleccion_entrega("delivery")
+                await _send(ctx, conv.id, str(crm_conv_id), MENSAJE_PEDIR_DIRECCION)
+            else:
+                _ult = (getattr(runtime, "last_product", None) or {})
+                _nombre_ult = str(_ult.get("producto") or "").strip()
+                logger.info(
+                    "backstop envío: petición de entrega sin producto — respondo al envío"
+                )
+                if _nombre_ult:
+                    _texto_env = (
+                        "¡Claro que sí! 🛵 Hacemos entregas a domicilio.\n\n"
+                        f"¿Me confirmas que quieres *{_nombre_ult}* y me pasas la "
+                        "dirección (calle, número, sector y una referencia)?\n"
+                        "Si prefieres, también puedes retirarlo en la farmacia."
+                    )
+                else:
+                    _texto_env = (
+                        "¡Claro que sí! 🛵 Hacemos entregas a domicilio.\n\n"
+                        "¿Qué medicamento quieres que te enviemos y a qué dirección? "
+                        "(calle, número, sector y una referencia)"
+                    )
+                await _send(ctx, conv.id, str(crm_conv_id), _texto_env)
+            return
+
     # «¿SOLO LO TIENES POR SEPARADO?» — pregunta sobre la respuesta ANTERIOR, no un
     # medicamento. Se contesta con el producto que se acaba de cotizar, sin pasar por el LLM:
     # el modelo negaba el producto dos líneas después de haberle dado el precio.
@@ -2961,6 +3005,15 @@ DEMOSTRATIVOS_T = {
     "antelación", "sus", "mis",
 }
 
+# PETICIÓN DE ENVÍO: "quiero que me lo envíen" no es el nombre de un medicamento. Sin esto,
+# el término quedaba en 'envien' y el agente buscaba en el catálogo (provider 19, 2026-10-31).
+ENVIO_T = {
+    "envio", "envios", "enviar", "enviarlo", "enviarla", "envien", "envienme", "enviame",
+    "envian", "envias", "envia", "envie", "mandar", "mandarlo", "mandarla", "manden",
+    "mandenme", "mandame", "mandan", "mandas", "manda", "despacho", "despachar",
+    "despachenme", "motorizado", "delivery", "domicilio",
+}
+
 _FILLER = {
     "hola", "buenas", "buen", "buenos", "buena", "dia", "dias", "tardes",
     "noches", "gracias", "por", "favor", "quisiera", "podria", "puede",
@@ -2980,6 +3033,8 @@ _FILLER = {
     *SALUDO_TIEMPO_T,
     *BENDICIONES_T,
     *DEMOSTRATIVOS_T,
+    *ENVIO_T,
+    "pedido", "pedidos",
     "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
     # RÓTULOS DEL CAMPO: el OCR devuelve '**Nombre del medicamento:** Fexofenadina
     # Clorhidrato CALOX' y el término quedaba 'nombre del fexofenadina clorhidrato calox'.
@@ -3629,11 +3684,24 @@ _DELIVERY_NUM = re.compile(r"\s*1\b")
 _PICKUP_NUM = re.compile(r"\s*2\b")
 
 _DELIVERY_PALABRAS = re.compile(
-    r"\b(delivery|delibery|deliberi|env[íi]o|enviar|enviarlo|mandar|mandarlo|"
+    r"\b(delivery|delibery|deliberi|env[íi]o|envios|env[ií]os|enviar|enviarlo|enviarla|"
+    r"env[ií]en|envien|env[ií]enme|envienme|env[ií]ame|enviame|env[ií]an|envian|"
+    r"env[ií]as|envias|env[ií]a|envia|env[ií]e|envie|mandar|mandarlo|mandarla|manden|"
+    r"m[aá]ndenme|mandenme|m[aá]ndame|mandame|mandan|mandas|manda|"
     r"a\s+domicilio|domicilio|a\s+mi\s+casa|traerlo|traelo|llevar|llevarlo|"
-    r"despacho|motorizado)\b",
+    r"despacho|despachar|desp[aá]chenme|motorizado)\b",
     re.IGNORECASE,
 )
+
+
+def _es_peticion_de_envio(texto: str) -> bool:
+    """¿El cliente pide que le ENVÍEN el pedido? ('quiero que me lo envíen por favor')
+
+    Caso real (provider 19, 2026-10-31): con esa frase el agente volvió a buscar
+    DICLOFENAC y soltó 20 presentaciones (inyectables, gel, gotas oftálmicas) en vez de
+    responder al envío.
+    """
+    return bool(_DELIVERY_PALABRAS.search(texto or ""))
 
 # Menú del MÉTODO DE ENTREGA y petición de la dirección. Mensajes DETERMINISTAS:
 # se envían tal cual (no pasan por el LLM) para que las opciones 1/2 sean siempre

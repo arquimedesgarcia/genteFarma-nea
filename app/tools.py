@@ -245,6 +245,15 @@ DEMOSTRATIVOS = {
     "antelación", "sus", "mis",
 }
 
+# PETICIÓN DE ENVÍO: "quiero que me lo envíen" no es el nombre de un medicamento. Sin esto,
+# el término quedaba en 'envien' y el agente buscaba en el catálogo (provider 19, 2026-10-31).
+ENVIO = {
+    "envio", "envios", "enviar", "enviarlo", "enviarla", "envien", "envienme", "enviame",
+    "envian", "envias", "envia", "envie", "mandar", "mandarlo", "mandarla", "manden",
+    "mandenme", "mandame", "mandan", "mandas", "manda", "despacho", "despachar",
+    "despachenme", "motorizado", "delivery", "domicilio",
+}
+
 _PALABRAS_FUNCIONALES = {
     # FRASE DE CONSULTA: el cliente anuncia la lista antes de enumerarla. No es un
     # medicamento y no puede encabezar el título ni la búsqueda (el cliente vería
@@ -261,6 +270,8 @@ _PALABRAS_FUNCIONALES = {
     *SALUDO_TIEMPO,
     *BENDICIONES,
     *DEMOSTRATIVOS,
+    *ENVIO,
+    "pedido", "pedidos",
     # 'resumen' no es un medicamento (ver el gemelo en turn.py::_FILLER).
     "resumen", "resumenes", "resúmenes",
     # 'costo'/'porf' tampoco: 'porf' casa con el "POR" de AMPICILINA "POR 1 AMPOLLA" y
