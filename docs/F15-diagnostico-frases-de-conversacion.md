@@ -101,12 +101,46 @@ que hay un fármaco** — y, cuando no la haya, **preguntar** en vez de buscar.
 
 ## 4. Opciones de diseño
 
-| | Enfoque | Qué resuelve | Costo / riesgo |
-|---|---|---|---|
-| **A** | **Reglas por CLASE** (no por frase): preposición de lugar + topónimo (`vivo en`, `estoy en`, `soy de` + Ciudad/Estado), `ser/estar + nombre propio` (`no puede ser X`, `es de X`), pregunta de atributo sin fármaco (`una marca?`, `el laboratorio?`, `es original?`), dilatoria temporal (`por ahora no`, `después`, `mañana`) | las 4 quejas y sus primos | bajo; sigue siendo una lista, pero cada regla cubre una familia entera |
-| **B** | **Evidencia positiva obligatoria para buscar**: el término debe traer al menos una prueba (token de fármaco conocido/afijo, dosis+unidad, forma farmacéutica, o coincidencia con el catálogo). Sin prueba ⇒ **no se busca: se pregunta** («¿me confirmas el nombre del medicamento?») | el caso general, incluidos los que aún no reportaron | medio; riesgo de falso negativo en typos sin evidencia (`vivacina`) — se mitiga con la regla "nombre pelado + verbo de consulta = buscar" y con preguntar en vez de negar |
-| **C** | **Clasificador de intención antes de buscar** (mapa a {saludo, cortesía, dato personal, pregunta de atributo, dilatoria, consulta_de_medicamento}) con un LLM barato | el caso general, con menos reglas | alto: +1 llamada por turno (latencia y costo), y en F14 se midió que una prohibición extra en el chasis **desvía el estilo** en turnos sin catálogo |
-| **D** | **A + B (recomendado)**: clases deterministas para las familias conocidas, y la regla de oro «**sin evidencia de fármaco no se busca: se pregunta**». C solo si A+B dejan un resto medible | todo lo anterior con coste controlado | bajo-medio; no toca la cadena de vetos ni `guards.py` |
+> **DECISIÓN DEL USUARIO (30-oct-2026), registrada aquí antes de diseñar:**
+> *«no quiero atarlo a una regla específica por palabras, como especializar más el agente
+> para que sea más inteligente de diferenciar primero las conversaciones y luego entender cuál
+> es el medicamento»*. Por lo tanto **A y B quedan descartadas como enfoque principal** (son
+> especializaciones por palabra/clase): la investigación se centra en una **capa que entiende el
+> acto de conversación ANTES de decidir si hay consulta de medicamento**, y solo después ubica el
+> término. Modelo para este trabajo: tier **pro** (elegido por el usuario).
+
+| | Enfoque | Qué resuelve | Costo / riesgo | Veredicto |
+|---|---|---|---|---|
+| **A** | Reglas por CLASE (preposición de lugar + topónimo, `ser/estar + nombre propio`, pregunta de atributo, dilatoria temporal) | las 4 quejas y sus primos | bajo | **descartado como enfoque** (es la lista negra un escalón más arriba; el usuario lo rechazó explícitamente) |
+| **B** | Evidencia positiva obligatoria para buscar (token de fármaco conocido/afijo, dosis+unidad, forma farmacéutica, match de catálogo); sin prueba ⇒ preguntar | el caso general | medio; falso negativo en typos sin evidencia | **no como filtro de palabras**, sí como *señal de apoyo* de la capa de comprensión |
+| **C** | **Capa de comprensión del acto de conversación**: clasifica el mensaje (¿saludo? ¿dato personal? ¿pregunta por un atributo? ¿dilatoria? ¿reclamo? ¿consulta de medicamento, y cuál es el término?) y **solo entonces** se busca; en duda, pregunta | el caso general, incluidos los que aún no reportaron | +1 llamada al modelo SOLO cuando el camino rápido no es concluyente; hay que cuidar estilo y latencia | **elegido: es la dirección a diseñar** |
+| **D** | Híbrido A+B como *fast-path* + C como decisor en la duda | todo lo anterior con coste controlado | bajo-medio | es la forma de implementar C sin pagar una llamada en cada turno |
+
+**Lo que hay que diseñar de C (esto es el trabajo de F15, no la implementación aún):**
+
+1. **Dónde vive la capa.** Hoy la decisión de buscar la toma un heurístico de FORMA
+   (`_parece_nombre_producto`) dentro del *backstop* determinista, cuyo objetivo legítimo es que
+   el agente **no se olvide** de buscar cuando el modelo no llama la herramienta (su origen
+   documentado: «Shampo Dreene» no se buscaba y el LLM negaba de memoria). La capa nueva debe
+   **sustituir ese heurístico como decisor**, no añadirse al lado.
+2. **Camino rápido vs duda.** Si el mensaje trae verbo de consulta (`tienen`, `busco`,
+   `precio de`), o un término que **ya matchea el catálogo**, se busca sin consultar nada: la
+   capa solo entra cuando hoy el heurístico *adivina* (sin verbo, sin match, mensaje corto).
+   Así el coste extra se paga únicamente donde hoy está el error.
+3. **Contrato de salida verificable.** La capa debe devolver algo auditable —
+   `{acto, hay_consulta, termino, confianza, motivo}` — que se **loguee** junto a la búsqueda
+   (`med_queries` o campo de auditoría) para poder medirla y para poder culpar a quien falló
+   (capa o catálogo) en un caso real.
+4. **Fail-safe declarado.** Si la capa no responde (timeout, proveedor caído): ¿se busca como
+   hoy o se pregunta? Decisión de producto — recomendación: **fallback al comportamiento actual
+   + log**, para no cambiar el flujo cuando el proveedor falla; la mejora se mide con la capa viva.
+5. **No tocar la cadena de vetos**: la capa decide *antes* de la búsqueda; `guards.py` y los
+   vetos siguen siendo la última palabra sobre la respuesta.
+6. **Proveedor propio y configurable** (mismo patrón que su `VISION_*` reciente):
+   `INTENT_MODEL` / `INTENT_API_KEY` / `INTENT_BASE_URL`, con vacío = usar el modelo del chat.
+7. **Riesgo medido a respetar**: en F14 se comprobó que **una prohibición extra en el chasis
+   desvía el estilo** en turnos sin catálogo. Por eso el contrato de la capa va en SU prompt
+   (aislado), no en el prompt del chat.
 
 **La decisión de producto que hay que tomar:** ¿preferimos *buscar de más* (molesta con
 respuestas sobre palabras que no son medicamentos, contamina `med_queries`) o *buscar de menos*
@@ -137,15 +171,16 @@ la pregunta real, que pregunte» que planteas.
 - Push SOLO a `desarrollo` de `rsomoza01`/`gentefarma`; nunca a `main` ni al upstream.
 - Simulaciones con modelo barato. NO usar Ollama local (GPU inestable).
 
-## 7. Orden propuesto de implementación
+## 7. Orden propuesto de implementación (re-scopado tras la decisión del usuario)
 
-- **F15.0** — reproducir las 4 quejas con el modelo del cliente (escenarios 12/13) y congelar el "antes".
-- **F15.1** — reglas por clase (A) en la familia existente, con su test por clase.
-- **F15.2** — evidencia positiva (**B**): la búsqueda exige prueba de fármaco; sin prueba, el turno pregunta (reusa el camino de "nombre poco claro" que ya existe).
-- **F15.3** — medición de los dos corpus + reporte antes/después y decisión sobre C.
-- **F15.4** — (opcional, según F15.3) clasificador de intención, solo si queda un resto medible.
+- **F15.0** — reproducir las 4 quejas **con el modelo del cliente** (escenarios 12/13) y congelar el "antes". *(en curso)*
+- **F15.1** — **diseño de la capa de comprensión** (C): contrato de salida, dónde vive, camino rápido vs duda, fail-safe, log de auditoría, prompt aislado. Nada de reglas por palabra.
+- **F15.2** — **prototipo fuera del turno**: la capa + los dos corpus (~40 no-consultas / ~40 consultas legítimas) medidos **offline**, sin tocar el flujo. Criterio: cero falsos negativos en consultas legítimas.
+- **F15.3** — **integración**: la capa sustituye al heurístico de forma (`_parece_nombre_producto`) como *decisor* del backstop, conservando el camino rápido y el fail-safe; tests por acto de conversación (saludo, dato personal, atributo, dilatoria, reclamo, consulta).
+- **F15.4** — **medición end-to-end**: escenarios 12/13 en los dos modelos, las 4 quejas antes/después, regresión completa y reporte. Laboratorio solo para estilo (sin catálogo, oscila ±14).
+- **F15.5** — configuración `INTENT_MODEL/API_KEY/BASE_URL` + documento de operación (si F15.2/F15.3 lo justifican).
 
-**Modelo propuesto** (skill `nous-model-cost-selection`): `deepseek/deepseek-v4.1-flash` para
-F15.0–F15.3 (medición + reglas quirúrgicas, barato con caché); si F15.4 (clasificador de
-intención) se aprueba, ahí sí conviene subir a `z-ai/glm-5.3-flash` o pro y decidirlo aparte.
-Pendiente: confirmación del usuario antes de ejecutar.
+**Modelo:** tier **pro** elegido por el usuario (Nous-only: `openai/gpt-6-astra-pro`, o
+`anthropic/sonnet-4.5` en el Portal a 3.00/15.00 $/M, ~7x el `z-ai/glm-4.7` que la skill
+considera suficiente para esta categoría). El cambio de modelo de la sesión lo aplica el usuario
+(`/model`); el spec se diseñó para que el trabajo arranque en cuanto esté puesto.
