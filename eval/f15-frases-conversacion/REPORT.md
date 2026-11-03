@@ -185,8 +185,15 @@ el volumen `nea_data` del cliente no se monta ni se toca.
 
 | Corrida | Cuándo | runId | Score | Delta | Veredicto |
 |---|---|---|---|---|---|
-| A (código de esta entrega) | 2026-10-29 23:43 | `run_wmzooniddn4njcbzoi19` | **100** | — | 11/11 casos en verde |
-| B (código de esta entrega) | 2026-11-03 04:43 | `run_0u9ohnewj90zgf9oq5bk` | *(corriendo)* | *(vs A)* | *(pendiente)* |
+| A (referencia, árbol F14) | 2026-10-29 23:43 | `run_wmzooniddn4njcbzoi19` | **100** | — | 11/11 verdes |
+| B (estado SUCIO, descartada) | 2026-11-03 04:43 | `run_0u9ohnewj90zgf9oq5bk` | 82 | — | 8 verdes, 2 amarillo, 1 rojo — **no es el código: es estado reusado** |
+| C (estado FRESCO, código actual) | 2026-11-03 05:2x | `run_jiou5w8bcwxp5tjhnuea` | *(corriendo)* | *(vs A)* | *(pendiente)* |
+
+**Lección medida (queda en la skill):** reusar la DB entre corridas del Laboratorio produce rojos y
+amarillos FANTASMA — las personas del Lab usan wa_identities fijas, así que una conversación previa
+deja el chat en handoff y la corrida nueva arranca con el cliente ya «atendido» («Hola» → «Listo, ya
+avisé al equipo»). El estado fresco se logra recreando la DB **desechable** (nunca el volumen
+`nea_data` del cliente).
 
 Histórico de la misma sesión (mismo código, para leer la oscilación): `run_e7vfzuhkmf8t59mibgh8`
 = 100, `run_7k61nvr5kfdp2tqc8l8y` = 86 (delta −14), `run_o4oscqnb6bl0r8amwwez` = 100 (delta +14) —

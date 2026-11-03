@@ -320,6 +320,16 @@ ESCENARIOS: list[dict[str, Any]] = [
         ],
     },
     {
+        "id": "14-queja-y-humano",
+        "titulo": "Queja sin detalle y petición de humano (casos amarillos del Laboratorio)",
+        "nota": "En el Lab el agente cerró el chat: «Oigan, esto es el colmo» -> «Listo. Hasta luego.»",
+        "mensajes": [
+            "Oigan, esto es el colmo",
+            "me atendieron mal y quiero hablar con una persona",
+            "hola",
+        ],
+    },
+    {
         "id": "10-marca-no-se-esconde",
         "titulo": "Marca en el catálogo: el alias no debe esconderla",
         "nota": "macrodantina existe como producto; el alias solo reescribe typos, no marcas.",
