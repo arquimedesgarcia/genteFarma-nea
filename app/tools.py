@@ -270,6 +270,9 @@ _PALABRAS_FUNCIONALES = {
     *BENDICIONES,
     *DEMOSTRATIVOS,
     *ENVIO,
+    "agregame", "agrégame", "agrega", "agregas", "agregar", "agregale", "añademe",
+    "anademe", "añade", "anade", "añadir", "ponme", "meteme", "sumame", "súmame",
+    "incluyeme", "adiciona", "apuntame", "apúntame",
     "pedido", "pedidos",
     # 'resumen' no es un medicamento (ver el gemelo en turn.py::_FILLER).
     "resumen", "resumenes", "resúmenes",

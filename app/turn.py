@@ -1086,6 +1086,24 @@ async def run_turn(
         # El encabezado no puede prometer la concentración que el mensaje niega.
         clean = _titulo_sin_dosis_negada(clean)
         clean = _con_confirmacion_carrito(clean, runtime)
+        # EL RESUMEN NO SE PRESENTA SIN EL MÉTODO DE ENTREGA.
+        #
+        # Caso real (provider 19, 2026-10-31): el cliente "Agrégame 3 del 1" y recibió el
+        # resumen con "MÉTODO DE ENTREGA: Delivery — <un enlace de Instagram>" sin que nadie le
+        # hubiera preguntado cómo quería recibirlo.
+        if (
+            farmacia
+            and clean
+            and _es_resumen_de_pedido(clean)
+            and not runtime._conv.delivery_method
+            and not _pide_el_total(user_text)
+        ):
+            logger.info(
+                "el resumen no sale sin método de entrega — pregunto delivery/retiro y dejo "
+                "el resumen para después de la respuesta"
+            )
+            await _preguntar_metodo_entrega(ctx, runtime)
+            return
         if clean:
             sent = await _send(ctx, conv.id, str(crm_conv_id), clean)
             if sent:
@@ -2954,6 +2972,9 @@ _FILLER = {
     *BENDICIONES_T,
     *DEMOSTRATIVOS_T,
     *ENVIO_T,
+    "agregame", "agrégame", "agrega", "agregas", "agregar", "agregale", "añademe",
+    "anademe", "añade", "anade", "añadir", "ponme", "meteme", "sumame", "súmame",
+    "incluyeme", "adiciona", "apuntame", "apúntame",
     "pedido", "pedidos",
     "siguiente", "siguientes", "medicamento", "medicamentos", "presupuesto",
     # RÓTULOS DEL CAMPO: el OCR devuelve '**Nombre del medicamento:** Fexofenadina
@@ -3188,6 +3209,18 @@ def _extraer_eleccion_multiple(texto: str) -> list[tuple[int, int]] | None:
         cant_each = max(1, int(m_cant_each.group(1))) if m_cant_each else 1
         # Cantidad máxima razonable: el pre-check la recorta a last_options.
         return [(cant_each, i) for i in range(1, 51)]
+    # "<N> del <M>" / "<N> de la <M>" — la forma más corta de elegir: "agrégame 3 del 1",
+    # "quiero 3 de la 1", "ponme 2 de la 4".
+    #
+    # Caso real (provider 19, 2026-10-31): "Agrégame 3 del 1" → "⚠️ No tengo AGREGAME 3 DEL 1"
+    # porque no llevaba la palabra "opción" ni la unidad "cajas", y el parser exigía una de las
+    # dos. El cliente estaba eligiendo la opción 1.
+    m_del = re.search(r"\b(\d{1,2})\s*(?:de\s+la|del|de\s+el)\s*(\d{1,2})\b(?!\s*(?:mg|ml|gr|g|mcg|ui|%))", t)
+    if m_del:
+        _cant, _opc = int(m_del.group(1)), int(m_del.group(2))
+        if 1 <= _cant <= 99 and 1 <= _opc <= 99:
+            return [(_cant, _opc)]
+
     # Detectar intención: menciona "opción" o hay una lista de números con
     # unidad de caja o separada por comas/y, o "quiero" + lista, o "N caja(s) de M".
     es_eleccion = ("opci" in t) or (
@@ -3790,6 +3823,17 @@ def _pide_el_total(texto: str) -> bool:
         r"ser[íi]an|me\s+da|da|queda|quedan|cuesta|cuestan)\b", t))
 
 
+def _es_resumen_de_pedido(texto: str) -> bool:
+    """¿El texto es el RESUMEN del pedido (productos + total)?
+
+    Se usa para no mostrarlo antes de que el cliente elija cómo quiere recibirlo.
+    """
+    if not texto:
+        return False
+    t = texto
+    return ("Productos:" in t or "Cantidad:" in t) and ("Total:" in t or "Subtotal:" in t)
+
+
 def _parece_direccion(texto: str) -> bool:
     """¿El texto parece una dirección de entrega?
 
@@ -3801,6 +3845,12 @@ def _parece_direccion(texto: str) -> bool:
         return False
     t = texto.strip()
     if len(t) < 5 or len(t) > 300:
+        return False
+    # Un ENLACE no es una dirección: "Delivery — https://www.instagram.com/p/DeknSD3nDES"
+    # (provider 19, 2026-10-31). Tampoco lo es un texto sin letras.
+    if re.search(r"(https?://|www\.|\.com\b|\.ve\b|instagram|facebook|tiktok|maps\.)", t, re.I):
+        return False
+    if len(re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ]", "", t)) < 4:
         return False
     # Señales típicas de dirección en Venezuela.
     señales = re.compile(
