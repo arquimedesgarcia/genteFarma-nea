@@ -114,15 +114,50 @@ consulta con término de categoría: 92.5% → **100%**. Ese hallazgo no estaba 
 5. **El Laboratorio local no puede medir esto**: sin credenciales de Firebase el catálogo responde
    vacío y el Laboratorio mide estilo (±14 entre corridas idénticas), no precisión de búsqueda.
 
-## 6. Diagnóstico independiente (pendiente de cerrar)
+## 6. Revisión externa del cambio y mejoras aplicadas
 
-Pedido explícito del cliente: que un revisor externo (**Sonnet**) juzgue si el cambio quedó bien
-hecho. El script `diagnostico_sonnet.py` envía al revisor el código de la capa, el diff focalizado,
-la integración en el turno, los nombres de los tests, la evidencia del corpus y los escenarios, con
-8 preguntas concretas (corrección, modos de fallo, ¿cubre solo el backstop?, coste, testabilidad,
-diseño, auditoría, riesgo de falsos negativos).
+Pediste que un revisor externo juzgara si el cambio quedó bien hecho. Se envió el código de la
+capa, el diff focalizado, la integración en el turno, los tests, la evidencia del corpus y los
+escenarios, con 8 preguntas concretas. **Sonnet 5.5/5/4.6 devolvieron `429 model temporarily at
+capacity upstream`** (el proxy lo confirmó; no era el payload: 24k caracteres pasan). La cadena de
+revisores cayó a **`openai/gpt-6-astra-pro`**, que es el que firmó el informe — está dicho en el
+encabezado de `diagnostico-sonnet-codigo.md`.
 
-Estado: las llamadas a `anthropic/claude-sonnet-5.5`/`sonnet-5`/`sonnet-4.6` vía el proxy Nous
-devuelven **502/429 «model temporarily at capacity upstream»** (no es el tamaño del payload: 24k
-caracteres pasa, 30k con reintentos no). Se reintenta; si la capacidad no se recupera, el revisor
-será `openai/gpt-6-astra-pro` (mismo rol, otro proveedor) y quedará dicho aquí.
+**Veredicto: «condicional: dirección correcta, implementación insuficiente para declarar resuelto
+F15. Nota: 5/10»**, con 6 cambios prioritarios. Qué se hizo con cada uno:
+
+| # | Su crítica | Estado |
+|---|---|---|
+| 1 | «No controla herramientas: si solo consulta `entender()` desde el backstop, **el agujero es real**»; ante incertidumbre, aclarar en vez de recuperar el heurístico | **Aplicado.** `_autorizar_busqueda` es la puerta única: TODA búsqueda (incluida la que pide el modelo) pasa por ella; sin evidencia fuerte decide la capa, y sin autorización **no se busca**: se pide aclaración. Ver la prueba directa abajo. |
+| 2 | `_veredicto_desde_json` aceptaba `{"motivo":"x"}`, `"hay_consulta":"quizás"`, consulta sin término | **Aplicado.** Esquema estricto: bool real, acto válido, confianza numérica finita en [0,1], término obligatorio en consulta y coherencia entre campos; lo inválido es **no concluyente**. |
+| 3 | Construcción del cliente y timeout fuera del `try`; caché con credenciales declaradas en vez de efectivas; sin circuito de corte | **Aplicado.** Timeout validado (no numérico/0/negativo → default), cliente dentro del `try`, clave de caché con la configuración EFECTIVA y **circuito de corte** tras 3 fallos seguidos (120 s). |
+| 4 | `camino_rapido` acepta por forma/lista; «`delivery` o `transferencia` cumplen sus condiciones» | **Aplicado en lo medible.** El atajo por VERBO se retiró (medido) y el de nombre pelado ahora exige **evidencia** (dosis, forma farmacéutica o token largo); `delivery` está en la lista de conversación y va a la capa. |
+| 5 | `_contexto` insuficiente: sin historial, opciones ni pregunta pendiente | **Aplicado (parcial).** La capa recibe estado compacto: últimos turnos, último término y última lista mostrada. **Pendiente**: un solo `termino` no representa «losartán y metformina» (multi-consulta). |
+| 6 | Las columnas en `med_queries` no registran los rechazos; hacen falta eventos por decisión | **Aplicado.** Migración **015 `intent_decisions`**: una fila por decisión (busque o no) con fuente, acto, veredicto, término, candidato, motivo y confianza. |
+
+**Prueba directa del agujero nº1** (`eval/f15-frases-conversacion/probe_autorizacion.py`, en el
+contenedor, con el modelo real): se llama `buscar_medicamento` **como lo hacía el modelo del chat**,
+con los términos que quedaron en el log de producción:
+
+```
+OK  'me robaron el celular ayer'   -> buscar_medicamento('ladrones')          | buscó=False (acto=otro)
+OK  'usted es una estafa...'       -> buscar_medicamento('estafa')            | buscó=False (acto=reclamo)
+OK  'por ahora no necesito nada'   -> buscar_medicamento('ahora')             | buscó=False (acto=dilatoria)
+OK  'vivo en ciudad bolivar'       -> buscar_medicamento('vivo ciudad bolivar')| buscó=False (acto=dato_personal)
+OK  'tienen macrodantina?'         -> buscar_medicamento('macrodantina')      | buscó=True  (consulta_medicamento)
+OK  'tienen atamel forte?'         -> buscar_medicamento('atamel forte')      | buscó=True  (consulta_medicamento)
+```
+
+**Consecuencia de aplicar el fail-closed (y hay que decirlo):** si el proveedor de la capa va lento
+o falla, el agente **pregunta en vez de buscar**. Medido con `z-ai/glm-4.7`: sus llamadas tardan
+20-30 s y superaban el timeout de la medición, así que el corpus cayó a 33/50 **por latencia del
+proveedor, no por la lógica** (todos los fallos eran `fail-safe: timeout`). Es el precio de no
+buscar a ciegas; el circuito de corte evita pagar el timeout en cada turno, y `INTENT_LAYER=false`
+devuelve el comportamiento anterior si molesta.
+
+**Pendientes declarados** (no los doy por hechos): multi-consulta en un solo mensaje; cierre/límite
+de la caché de clientes (la app es de vida larga, no se cierra); corpus con repeticiones
+independientes; tests con conteo real de invocaciones por caso; y volver a correr el revisor con
+Sonnet cuando el upstream se descongestione (o pasarle los anexos completos, que en modo compacto
+no vio: eso fue parte de su queja).
+
