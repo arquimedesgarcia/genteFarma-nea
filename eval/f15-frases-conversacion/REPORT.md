@@ -5,7 +5,7 @@ están diciendo. Responde a las quejas del cliente (oct-2026) y a la directriz *
 una regla específica por palabras: que diferencie primero las conversaciones y luego entienda cuál
 es el medicamento»*.
 
-**Estado:** implementado, medido y commiteado en `desarrollo` (`88bfd86`, `2b5cdfa`).
+**Estado:** implementado, medido y commiteado en `desarrollo` (`88bfd86`, `2b5cdfa` y el retiro del camino rápido por verbo).
 Pendiente: veredicto del diagnóstico independiente (sección 6).
 
 ---
@@ -39,10 +39,18 @@ acierta:
 
 | Camino | Cuándo | Coste |
 |---|---|---|
-| `consulta` | verbo explícito («tienen», «precio de», «busco»…) | 0 (determinista) |
-| `nombre` | nombre pelado corto («shampo dreene», «vivacina») | 0 (determinista) |
-| `capa` | todo lo demás: frases, datos personales, atributos, dudas | 1 llamada |
+| `nombre` | nombre pelado corto («shampo dreene», «vivacina», «atamel 500») | 0 (determinista) |
+| `capa` | **todo lo demás**, verbo de consulta incluido (frases, datos personales, atributos, dudas) | 1 llamada |
 | `fail-safe` | timeout, proveedor caído, JSON inválido, capa apagada | 0 (conducta anterior) |
+
+**Un camino rápido por VERBO existió y se retiró** (medido, no por gusto): «tienen», «hay»,
+«necesito», «precio»… aparecen también en frases de charla, así que decidían búsquedas falsas —
+«Solo una marca o hay varias?» → `marca varias`, «Por ahora no necesito nada» → `ahora`,
+«tienen delivery?» → `delivery`, «aceptan zelle?» → zelle. El verbo no es evidencia de fármaco:
+es la misma clase de error que la capa existe para evitar, así que ahora lo juzga la capa con el
+contexto completo. Lo destapó una sonda que usó el **extractor real**; la primera medición
+pasaba `termino_candidato=None`, con lo que el camino rápido nunca disparaba y el fallo quedaba
+invisible (lección: medir el camino que de verdad corre).
 
 **Integración en `app/turn.py`** — la capa es el **decisor** del backstop (antes lo era el
 heurístico de forma, que sobrevive solo en el camino de fail-safe). No se gasta llamada si el LLM
@@ -65,9 +73,9 @@ aditivos, nada tocado fuera del repo.
 | Nivel | Qué | Resultado |
 |---|---|---|
 | Compilación | `py_compile app/*.py` | OK (25 módulos) |
-| Tests | `pytest tests -q` | **144 en verde** (25 nuevos de la capa) |
-| Corpus real | 40 frases (20 que no deben buscar / 20 consultas legítimas) con `deepseek/deepseek-v4.1-flash` | **40/40 · 0 falsos positivos · 0 falsos negativos** |
-| Robustez | el mismo corpus con `z-ai/glm-4.7` (otra familia) | **40/40** |
+| Tests | `pytest tests -q` | **147 en verde** (28 nuevos de la capa) |
+| Corpus real | 50 frases (30 que no deben buscar / 20 consultas legítimas) con el **flujo real** (extractor + camino rápido + capa) y `deepseek/deepseek-v4.1-flash` | **49/50 · 0 falsos positivos** (el único fallo es un *fail-safe* del modelo: JSON inválido → cae al comportamiento anterior) |
+| Robustez | el corpus con `z-ai/glm-4.7` (otra familia) | ver §6 (misma tanda) |
 | Contenedor | `docker compose build nea` + arranque | migración `014` aplicada, health OK |
 | End-to-end | escenarios 12/13 (código real, modelo real, catálogo controlado) | **cero consultas al catálogo** para las frases queja |
 
