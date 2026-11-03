@@ -123,6 +123,16 @@ Reglas:
   * «gracias, linda», «hola mi amor», «que Dios te bendiga» → saludo/cortesía.
 - `termino` lleva SOLO el medicamento, limpio: sin verbos («tienen», «precio de», «quiero»),
   sin relleno y sin cortesías. «precio de la macrodantina de 100» → «macrodantina 100».
+- CONSULTAS POR CATEGORÍA O SÍNTOMA son consulta (hay_consulta=true) aunque no haya un nombre:
+  el cliente describe lo que necesita, no la marca. El `termino` es la categoría o el síntoma
+  LIMPIO (sirve para buscar en el catálogo):
+  * «busco algo para el dolor de cabeza» → hay_consulta=true, termino="dolor de cabeza".
+  * «hay crema para las manchas?» → hay_consulta=true, termino="crema manchas".
+  * «que antibioticos tienen?» → hay_consulta=true, termino="antibioticos".
+  * «algo para la gripe» → hay_consulta=true, termino="gripe".
+  * «un jarabe para la tos» → hay_consulta=true, termino="jarabe tos".
+- NO son consulta aunque nombren un producto: «eso me parece caro», «me vendieron vencido»,
+  «ya lo tengo», «no me sirvio».
 - Si el cliente escribe un nombre que no reconoces, pero claramente es un nombre de
   medicamento (marca o fármaco, incluso mal escrito: «vivacina», «omeprasol»), hay_consulta=true.
 - Si dudas entre conversación y medicamento, pon hay_consulta=false y confianza baja:

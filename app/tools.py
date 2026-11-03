@@ -2554,7 +2554,10 @@ class ToolRuntime:
                 # F15 — qué decidió la capa de comprensión (auditoría). Si el turno no la
                 # usó (camino rápido, capa apagada o fail-safe), van vacíos/NULL.
                 intent={
-                    "fuente": self.intent_fuente or None,
+                    # Si la búsqueda la pidió el MODELO por su cuenta (tool call) y no el
+                    # backstop de la capa, `intent_fuente` está vacío: se marca "llm" para
+                    # que toda fila sea atribuible y se pueda medir quién buscó basura.
+                    "fuente": self.intent_fuente or "llm",
                     "acto": self.intent_acto or None,
                     "motivo": self.intent_motivo or None,
                     "confianza": self.intent_confianza,
