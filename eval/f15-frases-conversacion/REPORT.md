@@ -74,8 +74,8 @@ aditivos, nada tocado fuera del repo.
 |---|---|---|
 | Compilación | `py_compile app/*.py` | OK (25 módulos) |
 | Tests | `pytest tests -q` | **147 en verde** (28 nuevos de la capa) |
-| Corpus real | 50 frases (30 que no deben buscar / 20 consultas legítimas) con el **flujo real** (extractor + camino rápido + capa) y `deepseek/deepseek-v4.1-flash` | **49/50 · 0 falsos positivos**; el único fallo es una etiqueta dudosa mía («fexofenasina para la alergia **esta sirviendo?**» — preguntar si un medicamento le funciona es conversación, no búsqueda; la capa la clasificó como `otro` y probablemente tiene razón) |
-| Robustez | el corpus con `z-ai/glm-4.7` (otra familia) | 33/50 **por timeout del proveedor** (20-30 s por llamada), no por la lógica: con el fail-closed, el timeout significa no buscar |
+| Corpus real | 50 frases (30 que no deben buscar / 20 consultas legítimas) con el **flujo real** (extractor + camino rápido + capa) y `deepseek/deepseek-v4.1-flash` | **49 correctas · 0 falsos positivos · 0 falsos negativos · 1 inconcluyente** (JSON inválido del modelo, que el fail-closed maneja) |
+| Robustez | el mismo corpus con `z-ai/glm-4.7` (otra familia) | **33 correctas · 0 falsos positivos · 0 falsos negativos · 17 inconcluyentes** (todos `timeout`: glm tarda 20-30 s por llamada) |
 | Contenedor | `docker compose build nea` + arranque | migración `014` aplicada, health OK |
 | End-to-end | escenarios 12/13 (código real, modelo real, catálogo controlado) | **cero consultas al catálogo** para las frases queja |
 

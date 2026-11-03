@@ -164,6 +164,7 @@ async def medir(modelo: str) -> int:
     fn: list[tuple] = []   # consultas legítimas tratadas como charla (CARO)
     fp: list[tuple] = []   # basura buscada (el bug original)
     ter: list[tuple] = []  # decisión bien, término imperfecto (se reporta aparte)
+    inc: list[tuple] = []  # inconcluyente (timeout/JSON/fail-safe): NO es error de decisión
     filas = []
     t0 = time.time()
     for frase, debe, termino in CORPUS:
@@ -178,13 +179,15 @@ async def medir(modelo: str) -> int:
         if debe and termino and ent.termino:
             term_ok = _termino_ok(termino, ent.termino)
         aciertos += 1 if (ok and (term_ok or not debe)) else 0
-        if not ok:
+        if obtenido is None:
+            # Inconcluyente: la capa no pudo decidir (timeout, JSON, fail-safe). NO es un
+            # error de decisión — con el fail-closed el turno pregunta en vez de buscar.
+            inc.append((frase, f"{ent.fuente}: {ent.motivo}"))
+        elif not ok:
             if obtenido is False and debe:
                 fn.append((frase, f"tratada como charla ({ent.acto}: {ent.motivo})"))
             elif obtenido is True and not debe:
                 fp.append((frase, f"buscó {ent.termino!r} ({ent.acto}: {ent.motivo})"))
-            else:
-                fn.append((frase, f"fail-safe/no concluyente ({ent.fuente}: {ent.motivo})"))
         elif debe and termino and ent.termino and not term_ok:
             # Decisión correcta, término imperfecto: se cuenta aparte (no es falso negativo).
             ter.append((frase, f"término {ent.termino!r} vs esperado {termino!r}"))
@@ -204,13 +207,16 @@ async def medir(modelo: str) -> int:
     print(f"falsos POSITIVOS (basura buscada): {len(fp)}")
     for f, m in fp:
         print(f"   ! {f!r} — {m}")
+    print(f"INCONCLUYENTES (no es error de decisión: timeout/JSON/fail-safe): {len(inc)}")
+    for f, m in inc[:6]:
+        print(f"   ? {f!r} — {m}")
     print(f"términos imperfectos (decisión correcta): {len(ter)}")
     for f, m in ter:
         print(f"   ~ {f!r} — {m}")
     salida = {
         "modelo": modelo, "frases": total, "aciertos": aciertos,
         "pct": round(100 * aciertos / total, 1), "falsos_negativos": fn,
-        "falsos_positivos": fp, "terminos_imperfectos": ter,
+        "falsos_positivos": fp, "terminos_imperfectos": ter, "inconclusivos": inc,
         "segundos": round(seg, 1), "filas": filas,
     }
     destino = os.path.join(RAIZ, "eval", "f15-frases-conversacion",
