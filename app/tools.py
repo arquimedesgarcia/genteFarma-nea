@@ -2678,9 +2678,11 @@ class ToolRuntime:
             return None
         try:
             from app.intencion import entender as entender_intencion
-        except Exception as exc:  # jamás romper el turno por la capa
-            logger.debug("autorización de búsqueda: capa no disponible (%s)", exc)
-            return None
+        except Exception as exc:
+            # F15 es una barrera de autorización, no una mejora opcional:
+            # si no se puede cargar, la búsqueda queda denegada (fail-closed).
+            logger.warning("autorización de búsqueda: capa no disponible; búsqueda denegada (%s)", exc)
+            return await self._rechazar_por_fallo_comprension(nombre, "capa no disponible")
         try:
             ent = await entender_intencion(
                 self.texto_cliente or nombre,
@@ -2690,9 +2692,10 @@ class ToolRuntime:
                 producto_previo=(self.last_product or {}).get("nombre")
                 or (self.last_product or {}).get("producto"),
             )
-        except Exception as exc:  # capa caída: no se bloquea la búsqueda del modelo
-            logger.debug("autorización de búsqueda: fallo de la capa (%s)", exc)
-            return None
+        except Exception as exc:
+            # Un error inesperado no debe convertir una consulta ambigua en búsqueda.
+            logger.warning("autorización de búsqueda: fallo de la capa; búsqueda denegada (%s)", exc)
+            return await self._rechazar_por_fallo_comprension(nombre, "fallo de comprensión")
         self.intent_fuente = "llm" if self.intent_fuente != "capa" else self.intent_fuente
         self.intent_acto = ent.acto
         self.intent_motivo = ent.motivo
@@ -2708,6 +2711,20 @@ class ToolRuntime:
             "búsqueda NO autorizada por la capa: '%s' (acto=%s, consulta=%s): %s",
             nombre, ent.acto, ent.hay_consulta, ent.motivo,
         )
+        return self._rechazo_comprension(nombre)
+
+    async def _rechazar_por_fallo_comprension(
+        self, nombre: str, motivo: str
+    ) -> dict[str, Any]:
+        """Deniega la búsqueda cuando F15 no puede emitir un veredicto."""
+        self.intent_fuente = "fail-safe"
+        self.intent_acto = "otro"
+        self.intent_motivo = motivo
+        self.intent_confianza = None
+        self.intent_hay_consulta = None
+        self.intent_termino = None
+        self.intent_autorizado = False
+        await self.registrar_decision_intencion(nombre)
         return self._rechazo_comprension(nombre)
 
     def _rechazo_comprension(self, nombre: str) -> dict[str, Any]:
