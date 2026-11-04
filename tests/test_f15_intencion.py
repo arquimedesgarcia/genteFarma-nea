@@ -392,12 +392,13 @@ class TestAutorizacionCentral:
         runtime.intent_autorizado = None
         runtime.texto_cliente = "puedo devolverlas?"
         runtime.last_product = None
-        runtime.registrar_decision_intencion = self._registrar
         runtime.decision_registrada = False
-        return runtime
 
-    async def _registrar(self, candidato=None):
-        self.decision_registrada = True
+        async def registrar(candidato=None):
+            runtime.decision_registrada = True
+
+        runtime.registrar_decision_intencion = registrar
+        return runtime
 
     def test_import_error_deniega_busqueda(self, monkeypatch):
         import builtins
