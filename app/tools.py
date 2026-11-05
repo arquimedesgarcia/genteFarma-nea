@@ -2684,47 +2684,17 @@ class ToolRuntime:
             self.intent_autorizado = True
             return None
 
-        # Si el turno ya fue autorizado, una llamada adicional no puede usar
-        # palabras funcionales, categorías genéricas ni ruido como si fueran
-        # otro medicamento. Se conserva la evaluación normal para el primer
-        # término y para términos adicionales plausibles (recetas/listas).
+        # Saber que el turno ya contiene una consulta legítima NO autoriza un
+        # segundo término. Cada término nuevo vuelve a pasar por la capa, incluso
+        # si parece tener dosis/forma: el modelo pudo inventarlo o extraer ruido.
         turno_ya_autorizado = (
             self.intent_hay_consulta is True or self.intent_autorizado is True
             or bool(autorizados)
         )
-        if (
-            turno_ya_autorizado
-            and not _termino_es_medicamento_plausible(nombre)
-            and not _tiene_evidencia_de_producto(nombre)
-        ):
-            logger.info(
-                "búsqueda adicional rechazada: término no plausible '%s' "
-                "(ya existe una búsqueda autorizada en este turno)",
-                nombre,
-            )
-            self.intent_fuente = "guard-term"
-            self.intent_acto = "otro"
-            self.intent_motivo = "término adicional no plausible"
-            self.intent_confianza = None
-            self.intent_hay_consulta = False
-            self.intent_termino = None
-            self.intent_autorizado = False
-            await self.registrar_decision_intencion(nombre)
-            return {
-                "ok": False,
-                "error": "termino_no_plausible",
-                "detalle": (
-                    f"'{nombre}' no identifica un medicamento de forma suficiente. "
-                    "NO consultes el catálogo ni presentes productos para ese término. "
-                    "Continúa respondiendo al mensaje real del cliente o pide el nombre "
-                    "exacto del medicamento."
-                ),
-                "busqueda": nombre,
-            }
 
-        # Evidencia fuerte: dosis o forma farmacéutica. Se autoriza este término,
-        # nunca las siguientes búsquedas del modelo.
-        if _tiene_evidencia_de_producto(nombre):
+        # Evidencia fuerte permite el atajo únicamente en la primera búsqueda.
+        # Después, todo término distinto debe ser confirmado contra el mensaje.
+        if not turno_ya_autorizado and _tiene_evidencia_de_producto(nombre):
             autorizados.add(clave)
             self.intent_autorizado = True
             return None
