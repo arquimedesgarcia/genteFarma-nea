@@ -432,3 +432,79 @@ class TestAutorizacionCentral:
         assert runtime.intent_autorizado is False
         assert runtime.intent_fuente == "fail-safe"
         assert runtime.decision_registrada is True
+
+
+# ------------------------------------------------ autorización por término (F15) ---
+class TestAutorizacionPorTermino:
+    def _runtime_autorizado(self):
+        from types import SimpleNamespace
+        from app.tools import ToolRuntime
+
+        runtime = ToolRuntime.__new__(ToolRuntime)
+        runtime.intent_fuente = "llm"
+        runtime.intent_acto = "consulta_medicamento"
+        runtime.intent_motivo = "consulta legítima"
+        runtime.intent_confianza = 0.95
+        runtime.intent_hay_consulta = True
+        runtime.intent_termino = "losartan"
+        runtime.intent_autorizado = True
+        runtime.intent_terminos_autorizados = {"losartan"}
+        runtime.texto_cliente = "tienes losartan 50 mg?"
+        runtime.last_product = None
+        runtime._ctx = SimpleNamespace(llm=object(), settings=object())
+
+        async def registrar(candidato=None):
+            runtime.decision_registrada = True
+
+        runtime.registrar_decision_intencion = registrar
+        return runtime
+
+    def test_reutiliza_autorizacion_solo_para_el_mismo_termino(self):
+        import app.intencion
+
+        runtime = self._runtime_autorizado()
+        llamadas = 0
+
+        async def no_deberia_clasificar(*args, **kwargs):
+            nonlocal llamadas
+            llamadas += 1
+            raise AssertionError("el mismo término ya estaba autorizado")
+
+        original = app.intencion.entender
+        app.intencion.entender = no_deberia_clasificar
+        try:
+            resultado = asyncio.run(runtime._autorizar_busqueda("LOSARTAN"))
+        finally:
+            app.intencion.entender = original
+
+        assert resultado is None
+        assert llamadas == 0
+
+    @pytest.mark.parametrize("termino", ["vitamina", "acabo", "ustedes"])
+    def test_termino_distinto_no_hereda_autorizacion_del_turno(self, termino, monkeypatch):
+        import app.intencion
+
+        runtime = self._runtime_autorizado()
+        llamadas = []
+
+        async def negar_termino(*args, **kwargs):
+            llamadas.append(kwargs.get("termino_candidato"))
+            return Entendimiento(
+                acto="otro",
+                hay_consulta=False,
+                termino=None,
+                confianza=0.96,
+                motivo="el término no identifica un medicamento solicitado",
+                fuente="capa",
+            )
+
+        monkeypatch.setattr(app.intencion, "entender", negar_termino)
+        resultado = asyncio.run(runtime._autorizar_busqueda(termino))
+
+        assert resultado is not None
+        assert resultado["error"] in {
+            "termino_no_plausible",
+            "no_autorizado_por_comprension",
+        }
+        assert runtime.intent_autorizado is False
+        assert llamadas in ([], [termino])
