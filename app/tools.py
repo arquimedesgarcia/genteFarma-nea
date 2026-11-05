@@ -2702,6 +2702,14 @@ class ToolRuntime:
                 "(ya existe una búsqueda autorizada en este turno)",
                 nombre,
             )
+            self.intent_fuente = "guard-term"
+            self.intent_acto = "otro"
+            self.intent_motivo = "término adicional no plausible"
+            self.intent_confianza = None
+            self.intent_hay_consulta = False
+            self.intent_termino = None
+            self.intent_autorizado = False
+            await self.registrar_decision_intencion(nombre)
             return {
                 "ok": False,
                 "error": "termino_no_plausible",
