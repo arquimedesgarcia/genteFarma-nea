@@ -2293,9 +2293,12 @@ class ToolRuntime:
         # Veredicto completo (para registrar también las decisiones que NO buscan).
         self.intent_hay_consulta: bool | None = None
         self.intent_termino: str | None = None
-        # Resultado de la autorización central de búsqueda en este turno (None = no se
-        # ha consultado todavía). Evita una llamada por cada búsqueda del turno.
+        # Compatibilidad/auditoría: resultado de la última autorización.
+        # NO concede permiso global para todas las búsquedas del turno.
         self.intent_autorizado: bool | None = None
+        # Cada término se autoriza individualmente. Evita que aprobar «losartan»
+        # habilite después búsquedas del modelo como «acabo» o «ustedes».
+        self.intent_terminos_autorizados: set[str] = set()
         # Si se llamó ver_carrito este turno, aquí queda el texto determinista del
         # resumen (cada producto con cantidad y subtotal en USD y Bs, y el total).
         # turn.py lo usa para reemplazar lo que haya generado el LLM, garantizando
@@ -2654,33 +2657,58 @@ class ToolRuntime:
             logger.exception("_log_med_query: fallo al registrar consulta")
 
     async def _autorizar_busqueda(self, nombre: str) -> dict[str, Any] | None:
-        """F15 — AUTORIZACIÓN CENTRAL de toda búsqueda. `None` = autorizada.
+        """F15 — autoriza CADA término, no el turno completo.
 
-        Revisión externa del cambio (gpt-6-astra-pro, 2026-11): «esta implementación no
-        controla herramientas: únicamente devuelve un veredicto… si la integración solo
-        consulta `entender()` desde el backstop, el agujero es real». Y lo era: si el
-        MODELO del chat llamaba esta herramienta por su cuenta, buscaba sin control (en
-        el log quedaron `ladrones`, `estafa`, `puedo devolverlas`, `sirvieron`).
-
-        Regla: si el backstop ya decidió este turno, se respeta su veredicto. Si no, y el
-        término no trae evidencia fuerte (dosis o forma farmacéutica), decide la capa —
-        una sola vez por turno. Sin autorización, NO se busca: se le pide al modelo que
-        aclare en vez de responder sobre algo que el cliente no pidió.
+        La capa puede aprobar «losartan», pero eso no autoriza una segunda llamada
+        del modelo con «vitamina», «acabo» o «ustedes». Los términos distintos se
+        evalúan individualmente; la autorización previa solo se reutiliza para el
+        mismo término. Los términos genéricos/funcionales se rechazan antes de
+        consultar la capa cuando ya existe una consulta aprobada en este turno.
         """
-        if self.intent_fuente and self.intent_fuente != "llm":
-            return None  # el backstop ya autorizó (o negó) esta búsqueda
-        if self.intent_autorizado is not None:
-            return None if self.intent_autorizado else self._rechazo_comprension(nombre)
-        # Evidencia fuerte: dosis con unidad o forma farmacéutica. Estos términos son
-        # productos en la práctica totalidad de los casos y no pagan una llamada.
-        if _tiene_evidencia_de_producto(nombre):
+        clave = _norm(nombre)
+        autorizados = getattr(self, "intent_terminos_autorizados", None)
+        if not isinstance(autorizados, set):
+            autorizados = set()
+            self.intent_terminos_autorizados = autorizados
+
+        # Una autorización siempre queda vinculada al término exacto.
+        if clave and clave in autorizados:
+            return None
+        if (
+            clave
+            and self.intent_hay_consulta is True
+            and self.intent_termino
+            and clave == _norm(self.intent_termino)
+        ):
+            autorizados.add(clave)
             self.intent_autorizado = True
             return None
+
+        # Saber que el turno ya contiene una consulta legítima NO autoriza un
+        # segundo término. Cada término nuevo vuelve a pasar por la capa, incluso
+        # si parece tener dosis/forma: el modelo pudo inventarlo o extraer ruido.
+        turno_ya_autorizado = (
+            self.intent_hay_consulta is True or self.intent_autorizado is True
+            or bool(autorizados)
+        )
+
+        # Evidencia fuerte permite el atajo únicamente en la primera búsqueda.
+        # Después, todo término distinto debe ser confirmado contra el mensaje.
+        if not turno_ya_autorizado and _tiene_evidencia_de_producto(nombre):
+            autorizados.add(clave)
+            self.intent_autorizado = True
+            return None
+
         try:
             from app.intencion import entender as entender_intencion
-        except Exception as exc:  # jamás romper el turno por la capa
-            logger.debug("autorización de búsqueda: capa no disponible (%s)", exc)
-            return None
+        except Exception as exc:
+            logger.warning(
+                "autorización de búsqueda: capa no disponible; búsqueda denegada (%s)",
+                exc,
+            )
+            return await self._rechazar_por_fallo_comprension(
+                nombre, "capa no disponible"
+            )
         try:
             ent = await entender_intencion(
                 self.texto_cliente or nombre,
@@ -2690,9 +2718,15 @@ class ToolRuntime:
                 producto_previo=(self.last_product or {}).get("nombre")
                 or (self.last_product or {}).get("producto"),
             )
-        except Exception as exc:  # capa caída: no se bloquea la búsqueda del modelo
-            logger.debug("autorización de búsqueda: fallo de la capa (%s)", exc)
-            return None
+        except Exception as exc:
+            logger.warning(
+                "autorización de búsqueda: fallo de la capa; búsqueda denegada (%s)",
+                exc,
+            )
+            return await self._rechazar_por_fallo_comprension(
+                nombre, "fallo de comprensión"
+            )
+
         self.intent_fuente = "llm" if self.intent_fuente != "capa" else self.intent_fuente
         self.intent_acto = ent.acto
         self.intent_motivo = ent.motivo
@@ -2701,6 +2735,7 @@ class ToolRuntime:
         self.intent_termino = ent.termino
         await self.registrar_decision_intencion(nombre)
         if ent.hay_consulta:
+            autorizados.add(clave)
             self.intent_autorizado = True
             return None
         self.intent_autorizado = False
