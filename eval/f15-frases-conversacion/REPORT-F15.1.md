@@ -86,13 +86,26 @@ Archivos: `app/tools.py` (puerta, helpers, estado del turno, atajo), `app/intenc
 
 | Corrida | Árbol | Score | Verdes / rojos | Atribución |
 |---|---|---|---|---|
-| `run_wvp5ulsexf95fd7t1k2f` | F15.1 inicial (sin R9/R10) | 73 | 8 / 3 | `fuera_de_kb` y `receta_foto` = **del cliente** (los dos del informe F15); `pide_humano` = **del modelo/juez**: el agente SÍ hizo el handoff (`POST /api/bot/handoff` 200, reason «pidió humano») y el juez leyó «ya avisé al equipo» como afirmación falsa. **No hay búsqueda involucrada**: la rama de handoff no la toca este cambio |
-| `run_2j677cvumjmm7an8pqn2` | F15.1 final (R1-R10) | — | — | corrida de cierre con el árbol final, DB fresca; resultado en la sección de estado al pie |
+| `run_wvp5ulsexf95fd7t1k2f` | F15.1 inicial (sin R9/R10) | 73 | 8 / 3 | `fuera_de_kb` y `receta_foto` = **del cliente** (los dos del informe F15); `pide_humano` = **del modelo/juez**: el agente SÍ hizo el handoff (`POST /api/bot/handoff` 200, reason «pidió humano» a las 19:14:58) y el juez leyó «ya avisé al equipo» como afirmación falsa. **No hay búsqueda involucrada**: la rama de handoff no la toca este cambio |
+| `run_2j677cvumjmm7an8pqn2` | F15.1 final (R1-R10) | 73 | 8 / 3 | `fuera_de_kb` y `receta_foto` = **del cliente** (reproducen igual); `comprador_decidido` = **del modelo**: responde «Listo, quedó registrado» a «finaliza mi pedido» con el carrito VACÍO y **sin llamar a `finalizar_pedido`** (no hay una sola línea de esa herramienta en el log de la corrida). Candidato a veto nuevo tipo G13 (afirmar una acción sin tool call). `pide_humano` pasó a **verde** en esta corrida |
+
+Evidencia de la capa en la corrida final (auditoría `intent_decisions` / `med_queries`, 47 y 26 filas):
+
+- **Rechazados** (lo que antes entraba al catálogo): `2 economica`, `carrito hasta ahora`, `pensar`,
+  `oigan`, `colmo`, `pregunta`, `receta`, `medica`, `maria fernandez cmp 45231`, `firma`,
+  `fecha 30 08 2026`, `tomar 1 ayunas 20 dias`, `compre pastillas sirvieron puedo devolverlas`,
+  `estafa`, `ladrones`…
+- **Buscados** (nombres de medicamento, 0 basura): `losartan 50 mg`, `Daflon`/`daflon 500`,
+  `diosmina hesperidina` (genérico de Daflon), `Esoz`/`esomeprazol`, `fexofenadina` (typo de
+  «fexofenasina»), `panadol`, `paracetamol` (marca → principio activo), `acetaminofen`.
+- **Sin falsos negativos** en los flujos legítimos: marca → principio activo, genérico pedido,
+  variante mal escrita, dos medicamentos y el producto ya mostrado siguen aprobándose.
 
 La banda de oscilación del Laboratorio es **±14** entre corridas idénticas (banda documentada en
 fases anteriores), así que 73 vs el 82 de referencia no se atribuye al cambio salvo por los rojos,
-que van uno por uno: los dos rojos del cliente se reproducen como en el informe F15 y el tercero es
-de redacción del modelo, no de la capa de comprensión.
+que van uno por uno: los dos rojos del cliente se reproducen como en el informe F15 y el tercero
+cambia de caso entre corridas (`pide_humano` en una, `comprador_decidido` en la otra), señal de
+oscilación del modelo/juez y no de la capa de comprensión.
 
 ### 3.2 Lo que el camino real NO prueba (dicho claro)
 
