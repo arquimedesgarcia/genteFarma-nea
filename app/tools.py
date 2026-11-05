@@ -448,6 +448,12 @@ def _tiene_evidencia_de_producto(nombre: str) -> bool:
     Es el atajo de la autorización central (F15): con esta evidencia el término es un
     producto en la práctica totalidad de los casos y no se gasta una llamada a la capa.
     Cubre la dosis pegada («losartan 50mg») y el número de dosis suelto («vitamina c 500»).
+
+    F15.1 — el número suelto SOLO cuenta como dosis si el término es corto (≤3 tokens) y
+    la cifra es de presentación (2-4 dígitos). Antes cualquier número de 2+ cifras valía:
+    «maria fernandez cmp 45231» (nombre + colegiatura — el texto que el OCR de una receta
+    pone delante del modelo) se autorizaba sin pasar por la capa y llegaba al catálogo.
+    Una cédula, un colegiado o un código tienen 5+ cifras y no son dosis.
     """
     tokens = re.findall(r"[a-z0-9%.]+", (nombre or "").lower())
     if any(t in _FORMAS_EVIDENCIA for t in tokens):
@@ -459,10 +465,40 @@ def _tiene_evidencia_de_producto(nombre: str) -> bool:
         # Dosis con unidad separada: '50 mg'
         if t.isdigit() and i + 1 < len(tokens) and tokens[i + 1] in _UNIDADES_EVIDENCIA:
             return True
-        # Número de presentación/dosis ('500', '850'): dos o más cifras.
-        if t.isdigit() and len(t) >= 2:
+        # Número de presentación/dosis ('500', '850') en un término corto.
+        if t.isdigit() and 2 <= len(t) <= 4 and len(tokens) <= 3:
             return True
     return False
+
+
+def _clave_termino(nombre: str) -> str:
+    """Clave de comparación de términos de búsqueda (F15.1).
+
+    Normaliza mayúsculas, tildes y espacios: `'LOSARTAN  50'` == `'losartan 50'`. Los
+    dos casos que importan son el MISMO término (reutiliza la autorización del turno,
+    sin volver a pagar una llamada) y un término DISTINTO (decisión nueva).
+    """
+    limpio = _normalizar_tildes((nombre or "").strip().lower())
+    return re.sub(r"\s+", " ", limpio).strip()
+
+
+def _tokens_termino(nombre: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", _clave_termino(nombre)))
+
+
+def _mismo_producto(a: str, b: str) -> bool:
+    """¿Los dos términos hablan del MISMO producto? (F15.1)
+
+    Iguales, o uno contenido en el otro por tokens («losartan 50 mg» ⊃ «losartan 50»,
+    «macrodantina 100» ⊂ «macrodantina 100 mg»). Evita pagar una llamada de la capa
+    cuando el modelo solo cambió el formato del término que la comprensión ya aprobó,
+    y deja FUERA lo que no está en el mensaje del cliente («vitamina» tras aprobar
+    «vivacina»): eso lo vuelve a decidir la capa.
+    """
+    ta, tb = _tokens_termino(a), _tokens_termino(b)
+    if not ta or not tb:
+        return False
+    return ta == tb or ta <= tb or tb <= ta
 
 
 def _termino_es_medicamento_plausible(term: str) -> bool:
@@ -2294,8 +2330,17 @@ class ToolRuntime:
         self.intent_hay_consulta: bool | None = None
         self.intent_termino: str | None = None
         # Resultado de la autorización central de búsqueda en este turno (None = no se
-        # ha consultado todavía). Evita una llamada por cada búsqueda del turno.
+        # ha consultado todavía). Espejo de la ÚLTIMA autorización, para auditoría.
         self.intent_autorizado: bool | None = None
+        # F15.1 — la autorización es POR TÉRMINO, no por turno. Aquí quedan las CLAVES
+        # de los términos que la comprensión ya aprobó en este turno: aprobar «vivacina»
+        # no habilita las búsquedas que el modelo decide después («vitamina», «acabo»,
+        # «ustedes»), que fueron las que devolvieron VITAMINA C/K/E al cliente.
+        self.intent_terminos_autorizados: set[str] = set()
+        # Rechazos CONCLUSIVOS del turno: clave → (acto, motivo). Evita pagar otra
+        # llamada (y duplicar la fila de auditoría) si el modelo insiste con el mismo
+        # término ya rechazado.
+        self.intent_rechazos: dict[str, tuple[str, str]] = {}
         # Si se llamó ver_carrito este turno, aquí queda el texto determinista del
         # resumen (cada producto con cantidad y subtotal en USD y Bs, y el total).
         # turn.py lo usa para reemplazar lo que haya generado el LLM, garantizando
@@ -2653,6 +2698,27 @@ class ToolRuntime:
         except Exception:
             logger.exception("_log_med_query: fallo al registrar consulta")
 
+    def _autorizados_del_turno(self) -> set[str]:
+        """Términos que la comprensión ya aprobó en ESTE turno (F15.1).
+
+        Se crea si falta: hay runtimes parciales (tests y sondas construyen `ToolRuntime`
+        sin `__init__`), y la puerta no puede caerse por eso — la ausencia de estado se
+        trata como «aún no se ha autorizado nada», que es el lado seguro.
+        """
+        actual = getattr(self, "intent_terminos_autorizados", None)
+        if not isinstance(actual, set):
+            actual = set()
+            self.intent_terminos_autorizados = actual
+        return actual
+
+    def _rechazos_del_turno(self) -> dict[str, tuple[str, str]]:
+        """Rechazos CONCLUSIVOS del turno: clave → (acto, motivo)."""
+        actual = getattr(self, "intent_rechazos", None)
+        if not isinstance(actual, dict):
+            actual = {}
+            self.intent_rechazos = actual
+        return actual
+
     async def _autorizar_busqueda(self, nombre: str) -> dict[str, Any] | None:
         """F15 — AUTORIZACIÓN CENTRAL de toda búsqueda. `None` = autorizada.
 
@@ -2662,18 +2728,60 @@ class ToolRuntime:
         MODELO del chat llamaba esta herramienta por su cuenta, buscaba sin control (en
         el log quedaron `ladrones`, `estafa`, `puedo devolverlas`, `sirvieron`).
 
-        Regla: si el backstop ya decidió este turno, se respeta su veredicto. Si no, y el
-        término no trae evidencia fuerte (dosis o forma farmacéutica), decide la capa —
-        una sola vez por turno. Sin autorización, NO se busca: se le pide al modelo que
-        aclare en vez de responder sobre algo que el cliente no pidió.
+        Regla (F15.1, PENDIENTE #1): la autorización es **por TÉRMINO**, no por turno:
+        con el turno ya autorizado, las búsquedas que el MODELO lanzaba después
+        (`vitamina`, `acabo`, `ustedes`) pasaban la puerta y sus resultados llegaban al
+        cliente (listados de VITAMINA C/K/E partiendo de «tienes vivacina?»). El MISMO
+        término ya aprobado se reutiliza (0 llamadas adicionales); el término que decidió
+        el backstop hereda SU veredicto (autorice o niegue); un término DISTINTO pasa por
+        la capa con el mensaje del cliente delante — el atajo por dosis/forma farmacéutica
+        solo vale para la PRIMERA búsqueda del turno. Sin autorización, NO se busca: se le
+        pide al modelo que aclare en vez de responder sobre algo que el cliente no pidió.
         """
-        if self.intent_fuente and self.intent_fuente != "llm":
-            return None  # el backstop ya autorizó (o negó) esta búsqueda
-        if self.intent_autorizado is not None:
-            return None if self.intent_autorizado else self._rechazo_comprension(nombre)
-        # Evidencia fuerte: dosis con unidad o forma farmacéutica. Estos términos son
-        # productos en la práctica totalidad de los casos y no pagan una llamada.
-        if _tiene_evidencia_de_producto(nombre):
+        clave = _clave_termino(nombre)
+        autorizados = self._autorizados_del_turno()
+        rechazos = self._rechazos_del_turno()
+        # 1) Mismo término ya aprobado en este turno: se reutiliza (sin llamada).
+        if clave and clave in autorizados:
+            return None
+        # 1b) El MISMO producto con otro formato («losartan 50 mg» después de aprobar
+        # «losartan 50»): el modelo solo añadió la dosis o el sufijo del catálogo, no
+        # cambió de medicamento → tampoco paga llamada.
+        if clave and any(_mismo_producto(nombre, previo) for previo in autorizados):
+            autorizados.add(clave)
+            return None
+        # 2) El backstop del turno ya decidió ESTE término: se respeta su veredicto.
+        if (
+            self.intent_fuente
+            and self.intent_fuente != "llm"
+            and clave
+            and _mismo_producto(nombre, self.intent_termino or "")
+        ):
+            if self.intent_hay_consulta:
+                autorizados.add(clave)
+                self.intent_autorizado = True
+                return None
+            if self.intent_hay_consulta is False:
+                # El backstop ya dictó que este término no es consulta: no se busca y no
+                # se duplica la fila de auditoría (su veredicto ya está registrado).
+                return self._rechazo_comprension(nombre)
+            # hay_consulta None (fail-safe del backstop): decide la capa, más abajo.
+        # Un rechazo CONCLUSIVO de este mismo término no se paga dos veces.
+        if clave and clave in rechazos:
+            acto, motivo = rechazos[clave]
+            self.intent_acto, self.intent_motivo = acto, motivo
+            self.intent_autorizado = False
+            return self._rechazo_comprension(nombre)
+        # 3) Término nuevo. Evidencia fuerte (dosis con unidad o forma farmacéutica): es
+        # un producto en la práctica totalidad de los casos y no paga llamada — pero solo
+        # abre la PRIMERA búsqueda del turno. Después, todo término distinto lo confirma
+        # la capa contra el mensaje del cliente (el modelo pudo inventarlo o sacar ruido).
+        if (
+            not autorizados
+            and self.intent_autorizado is not True
+            and _tiene_evidencia_de_producto(nombre)
+        ):
+            autorizados.add(clave)
             self.intent_autorizado = True
             return None
         try:
@@ -2691,6 +2799,11 @@ class ToolRuntime:
                 termino_candidato=nombre,
                 producto_previo=(self.last_product or {}).get("nombre")
                 or (self.last_product or {}).get("producto"),
+                # F15.1 — la puerta pregunta por ESTE término, no por el mensaje: sin esto
+                # la capa aprobaba «el mensaje trae una consulta» (la del cliente) y ese
+                # veredicto autorizaba el término que el modelo eligió (`oiga`, `firma`,
+                # `maria fernandez cmp 45231`, `medica` llegaron al catálogo).
+                candidato_obligatorio=True,
             )
         except Exception as exc:
             # Un error inesperado no debe convertir una consulta ambigua en búsqueda.
@@ -2704,9 +2817,14 @@ class ToolRuntime:
         self.intent_termino = ent.termino
         await self.registrar_decision_intencion(nombre)
         if ent.hay_consulta:
+            autorizados.add(clave)
             self.intent_autorizado = True
             return None
         self.intent_autorizado = False
+        if ent.hay_consulta is False and clave:
+            # Veredicto conclusivo: insistir con el MISMO término no vuelve a pagar
+            # llamada ni duplica la fila de auditoría.
+            self.intent_rechazos[clave] = (ent.acto, ent.motivo)
         logger.info(
             "búsqueda NO autorizada por la capa: '%s' (acto=%s, consulta=%s): %s",
             nombre, ent.acto, ent.hay_consulta, ent.motivo,
@@ -3923,6 +4041,12 @@ class ToolRuntime:
             return {"ok": False, "error": "faltante", "detalle": "indica el medicamento"}
         if not self._provider_id:
             return {"ok": False, "error": "sin_provider", "detalle": "sin catálogo configurado"}
+        # F15.1 (hueco nuevo, §1.2 del spec): esta era la SEGUNDA puerta al catálogo sin
+        # candado — el modelo podía pedir genéricos de cualquier término que inventara y
+        # el listado llegaba al cliente. Misma puerta que `buscar_medicamento`.
+        _negado = await self._autorizar_busqueda(nombre)
+        if _negado is not None:
+            return _negado
         data = await self._ctx.crm.get_products(self._provider_id, q=nombre, limit=8)
         products = data.get("products") or []
         # Genéricos = los que tienen nombre generico distinto del nombre buscado

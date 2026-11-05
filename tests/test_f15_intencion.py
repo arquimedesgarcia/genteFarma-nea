@@ -339,6 +339,11 @@ class TestAuditoria:
             assert _tiene_evidencia_de_producto(si), si
         for no in ("ladrones", "estafa", "delivery", "puedo devolverlas", "marca"):
             assert not _tiene_evidencia_de_producto(no), no
+        # F15.1 — un documento NO es una dosis: el OCR de una receta pone delante del modelo
+        # el nombre del paciente y su colegiatura/cédula, y eso llegaba al catálogo.
+        for documento in ("maria fernandez cmp 45231", "cedula 12345678",
+                          "dra maria fernandez colegiatura 123456", "firma 20261"):
+            assert not _tiene_evidencia_de_producto(documento), documento
 
     def test_med_queries_sin_capa_no_revienta(self):
         store = MemoryStore()
@@ -432,3 +437,274 @@ class TestAutorizacionCentral:
         assert runtime.intent_autorizado is False
         assert runtime.intent_fuente == "fail-safe"
         assert runtime.decision_registrada is True
+
+
+# --------------------------------------- autorización POR TÉRMINO (F15.1) ---
+
+class TestAutorizacionPorTermino:
+    """F15.1 — la puerta autoriza cada TÉRMINO, no el turno entero.
+
+    Hueco medido (PENDIENTE #1 de F15): con el turno ya autorizado, las búsquedas que el
+    MODELO lanzaba después (`vitamina`, `acabo`, `ustedes`) pasaban la puerta y sus
+    resultados llegaban al cliente — listados de VITAMINA C/K/E partiendo de «tienes
+    vivacina?». Y `sugerir_generico` era una segunda puerta al catálogo sin candado.
+    """
+
+    def _runtime(self, **campos):
+        from app.tools import ToolRuntime
+
+        runtime = ToolRuntime.__new__(ToolRuntime)
+        runtime.intent_fuente = ""
+        runtime.intent_acto = ""
+        runtime.intent_motivo = ""
+        runtime.intent_confianza = None
+        runtime.intent_hay_consulta = None
+        runtime.intent_termino = None
+        runtime.intent_autorizado = None
+        runtime.texto_cliente = ""
+        runtime.last_product = None
+        runtime.intent_terminos_autorizados = set()
+        runtime.intent_rechazos = {}
+        runtime.decisiones = []
+        for k, v in campos.items():
+            setattr(runtime, k, v)
+
+        class _Ctx:
+            llm = None
+            settings = None
+
+        runtime._ctx = _Ctx()
+
+        async def registrar_decision_intencion(candidato=None):
+            runtime.decisiones.append(candidato)
+
+        runtime.registrar_decision_intencion = registrar_decision_intencion
+        return runtime
+
+    def _turno_autorizado(self, termino: str = "losartan", **campos):
+        """Estado del turno JUSTO después de aprobar `termino` (lo que deja la puerta)."""
+        return self._runtime(
+            texto_cliente="tienes losartan 50 mg?",
+            intent_fuente="capa",
+            intent_acto="consulta_medicamento",
+            intent_motivo="consulta por losartan",
+            intent_confianza=0.95,
+            intent_hay_consulta=True,
+            intent_termino=termino,
+            intent_autorizado=True,
+            intent_terminos_autorizados={termino},
+            **campos,
+        )
+
+    def _entender_falso(self, monkeypatch, *respuestas, registro=None):
+        """Sustituye la capa: devuelve `respuestas` en orden y anota las llamadas."""
+        import app.intencion
+
+        cola = list(respuestas)
+
+        async def falso(texto, **kwargs):
+            if registro is not None:
+                registro.append({"texto": texto, **kwargs})
+            if not cola:
+                raise AssertionError("la capa no debía ser llamada otra vez")
+            return cola.pop(0)
+
+        monkeypatch.setattr(app.intencion, "entender", falso)
+
+    # --- el mismo término y el mismo producto: nunca pagan llamada -----------------
+
+    def test_mismo_termino_no_vuelve_a_llamar_a_la_capa(self, monkeypatch):
+        import app.intencion
+
+        runtime = self._turno_autorizado("losartan")
+
+        async def no_deberia_clasificar(*args, **kwargs):
+            raise AssertionError("el término ya estaba autorizado en este turno")
+
+        monkeypatch.setattr(app.intencion, "entender", no_deberia_clasificar)
+        assert asyncio.run(runtime._autorizar_busqueda("LOSARTAN")) is None
+
+    def test_mismo_producto_con_otro_formato_no_llama_a_la_capa(self, monkeypatch):
+        """«losartan 50 mg» tras aprobar «losartan 50»: el modelo añadió la dosis."""
+        import app.intencion
+
+        runtime = self._turno_autorizado("losartan 50")
+
+        async def no_deberia_clasificar(*args, **kwargs):
+            raise AssertionError("es el mismo producto, no un término nuevo")
+
+        monkeypatch.setattr(app.intencion, "entender", no_deberia_clasificar)
+        assert asyncio.run(runtime._autorizar_busqueda("losartan 50 mg")) is None
+
+    # --- término nuevo: decide la capa, con el mensaje del cliente -----------------
+
+    def test_termino_distinto_lo_decide_la_capa(self, monkeypatch):
+        llamadas: list[dict] = []
+        self._entender_falso(
+            monkeypatch,
+            Entendimiento(acto="consulta_medicamento", hay_consulta=True,
+                          termino="metformin", confianza=0.9, motivo="el cliente lo pidió",
+                          fuente="capa"),
+            registro=llamadas,
+        )
+        runtime = self._turno_autorizado("losartan")
+        runtime.texto_cliente = "necesito losartan y metformin"
+
+        assert asyncio.run(runtime._autorizar_busqueda("metformin")) is None
+        assert len(llamadas) == 1
+        # La capa ve el MENSAJE del cliente y el término candidato: con eso decide.
+        assert llamadas[0]["texto"] == "necesito losartan y metformin"
+        assert llamadas[0]["termino_candidato"] == "metformin"
+        # Y se le pregunta por ESE término, no por el mensaje (F15.1): sin esto un «sí» del
+        # mensaje autorizaba el término que el modelo eligiera (`oiga`, `firma`).
+        assert llamadas[0]["candidato_obligatorio"] is True
+        assert "metformin" in runtime.intent_terminos_autorizados
+        # Y queda registrada la decisión (auditoría).
+        assert runtime.decisiones == ["metformin"]
+
+    @pytest.mark.parametrize("termino", ["vitamina", "acabo", "ustedes"])
+    def test_termino_inventado_lo_rechaza_la_capa(self, monkeypatch, termino):
+        self._entender_falso(
+            monkeypatch,
+            Entendimiento(acto="dato_personal", hay_consulta=False, termino=None,
+                          confianza=0.9, motivo="no lo pidió el cliente", fuente="capa"),
+        )
+        runtime = self._turno_autorizado("vivacina")
+        runtime.texto_cliente = "tienen vivacina?"
+
+        resultado = asyncio.run(runtime._autorizar_busqueda(termino))
+        assert resultado is not None
+        assert resultado["error"] == "no_autorizado_por_comprension"
+        assert runtime.intent_autorizado is False
+        assert runtime.decisiones == [termino]
+
+    def test_termino_rechazado_no_se_vuelve_a_pagar(self):
+        """Insistir con el MISMO término ya rechazado no cuesta otra llamada."""
+        import app.intencion
+
+        runtime = self._turno_autorizado("vivacina")
+        runtime.texto_cliente = "tienen vivacina?"
+        runtime.intent_rechazos["vitamina"] = ("otro", "no lo pidió el cliente")
+        llamado = False
+
+        async def no_deberia_clasificar(*args, **kwargs):
+            nonlocal llamado
+            llamado = True
+            raise AssertionError("ya se rechazó este término en el turno")
+
+        original = app.intencion.entender
+        app.intencion.entender = no_deberia_clasificar
+        try:
+            resultado = asyncio.run(runtime._autorizar_busqueda("VITAMINA"))
+        finally:
+            app.intencion.entender = original
+
+        assert resultado is not None and not llamado
+
+    # --- el veredicto del backstop se hereda solo para SU término ------------------
+
+    def test_termino_ya_negado_por_el_backstop_no_se_rescata(self, monkeypatch):
+        import app.intencion
+
+        runtime = self._runtime(
+            texto_cliente="usted es una estafa, no me llego",
+            intent_fuente="capa", intent_acto="reclamo", intent_motivo="reclamo",
+            intent_confianza=0.9, intent_hay_consulta=False, intent_termino="estafa",
+            intent_autorizado=False,
+        )
+
+        async def no_deberia_clasificar(*args, **kwargs):
+            raise AssertionError("el backstop ya dictó que 'estafa' no es consulta")
+
+        monkeypatch.setattr(app.intencion, "entender", no_deberia_clasificar)
+        resultado = asyncio.run(runtime._autorizar_busqueda("estafa"))
+        assert resultado is not None
+        assert resultado["error"] == "no_autorizado_por_comprension"
+
+    # --- fail-closed: sigue siendo cerrado, pero no castiga lo ya aprobado ---------
+
+    def test_fail_closed_deniega_el_termino_nuevo(self, monkeypatch):
+        import builtins
+
+        runtime = self._turno_autorizado("losartan")
+        original = builtins.__import__
+
+        def fallo(name, *args, **kwargs):
+            if name == "app.intencion":
+                raise ImportError("simulated import failure")
+            return original(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fallo)
+        resultado = asyncio.run(runtime._autorizar_busqueda("vitamina"))
+        assert resultado is not None
+        assert runtime.intent_fuente == "fail-safe"
+        assert runtime.intent_autorizado is False
+
+    def test_fail_closed_no_repite_lo_ya_autorizado(self, monkeypatch):
+        import builtins
+
+        runtime = self._turno_autorizado("losartan")
+        original = builtins.__import__
+
+        def fallo(name, *args, **kwargs):
+            if name == "app.intencion":
+                raise ImportError("simulated import failure")
+            return original(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fallo)
+        assert asyncio.run(runtime._autorizar_busqueda("losartan")) is None
+
+    # --- segunda puerta: sugerir_generico ----------------------------------------
+
+    def _runtime_con_catalogo(self, **campos):
+        runtime = self._runtime(_provider_id_val="demo", **campos)
+        consultas: list[str] = []
+
+        class _Crm:
+            async def get_products(self, provider_id, q=None, limit=8):
+                consultas.append(q or "")
+                return {"products": [{"producto": "X", "generico": "generico-x",
+                                      "precio": 1.0}], "provider": {}}
+
+        class _Ctx:
+            llm = None
+            settings = None
+            crm = _Crm()
+            store = None
+
+        runtime._ctx = _Ctx()
+        return runtime, consultas
+
+    def test_sugerir_generico_no_consulta_sin_autorizacion(self):
+        import app.intencion
+
+        runtime, consultas = self._runtime_con_catalogo(
+            texto_cliente="tienen vivacina?",
+        )
+        original = app.intencion.entender
+
+        async def no_deberia_clasificar(*args, **kwargs):
+            raise AssertionError("sin capa viva, la puerta es fail-closed")
+
+        app.intencion.entender = no_deberia_clasificar
+        try:
+            resultado = asyncio.run(runtime._sugerir_generico({"nombre": "vitamina"}))
+        finally:
+            app.intencion.entender = original
+
+        assert resultado["ok"] is False
+        assert resultado["error"] == "no_autorizado_por_comprension"
+        assert consultas == []
+
+    def test_sugerir_generico_consulta_cuando_el_termino_esta_autorizado(self):
+        runtime, consultas = self._runtime_con_catalogo(
+            texto_cliente="busco un ibuprofeno generico",
+            intent_fuente="capa", intent_acto="consulta_medicamento",
+            intent_motivo="consulta por ibuprofeno", intent_confianza=0.9,
+            intent_hay_consulta=True, intent_termino="ibuprofeno",
+            intent_autorizado=True,
+            intent_terminos_autorizados={"ibuprofeno"},
+        )
+        resultado = asyncio.run(runtime._sugerir_generico({"nombre": "ibuprofeno"}))
+        assert resultado.get("ok") is True
+        assert consultas == ["ibuprofeno"]

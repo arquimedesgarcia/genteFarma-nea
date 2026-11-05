@@ -94,7 +94,10 @@ cada vez».
   (normalizados); `intent_autorizado` se conserva por compatibilidad/auditoría.
 - **R2** — Un término nuevo **siempre** pasa por la capa, aunque el turno ya tenga una búsqueda
   aprobada. El atajo `_tiene_evidencia_de_producto` solo aplica cuando el turno aún no buscó.
-- **R3** — Mismo término (normalizado) ⇒ reutiliza la autorización, sin llamada.
+- **R3** — Mismo término (normalizado) ⇒ reutiliza la autorización, sin llamada. Y el
+  **mismo producto con otro formato** (`losartan 50 mg` tras aprobar `losartan 50`) también:
+  el modelo añadió la dosis, no cambió de medicamento. Un rechazo **conclusivo** del turno se
+  cachea: insistir con el mismo término no vuelve a pagar llamada ni duplica la fila de auditoría.
 - **R4** — `_sugerir_generico` pasa por la misma puerta, con el término que recibe del modelo.
   Si no está autorizado, devuelve el rechazo (no consulta el catálogo).
 - **R5** — Las **derivaciones internas** de una búsqueda ya autorizada NO vuelven a pedir permiso:
@@ -112,6 +115,15 @@ cada vez».
 - **R8** — La capa recibe el mensaje del cliente y el término candidato (contrato actual). Si al
   medir aparece que aprueba términos que el cliente no mencionó, el ajuste va en el **prompt de la
   capa** (`app/intencion.py`), nunca en `app/prompt.py` ni en `guards.py`.
+- **R9** *(añadida al medir, ver REPORT-F15.1 §2.b)* — La puerta pregunta por **el candidato**, no
+  por el mensaje: `entender(..., candidato_obligatorio=True)` añade al contexto una pregunta estricta
+  («el veredicto es sobre ESTE término»). Sin ella la capa aprobaba «el mensaje trae una consulta»
+  (la del cliente) y ese «sí» autorizaba el término que el modelo eligió: en el Laboratorio entraron
+  al catálogo `oiga`, `firma`, `medica` y `maria fernandez cmp 45231`.
+- **R10** *(añadida al medir)* — El atajo por evidencia **no** se dispara con cualquier número: una
+  cifra suelta solo cuenta como dosis si el término tiene ≤3 tokens y la cifra 2-4 dígitos. Antes,
+  «maria fernandez cmp 45231» (nombre + colegiatura, el texto que el OCR de una receta pone delante
+  del modelo) se autorizaba sin pasar por la capa.
 
 ---
 

@@ -138,6 +138,21 @@ Reglas:
   «ya lo tengo», «no me sirvio».
 - Si el cliente escribe un nombre que no reconoces, pero claramente es un nombre de
   medicamento (marca o fármaco, incluso mal escrito: «vivacina», «omeprasol»), hay_consulta=true.
+- F15.1 — Comprueba SIEMPRE el «Término candidato» contra el mensaje del cliente: es el
+  término que el sistema (o el asistente) quiere buscar. Solo hay_consulta=true si el mensaje
+  pide o describe ESE medicamento (nombre, categoría o síntoma). Un candidato que no aparece en
+  el mensaje es ruido: hay_consulta=false. (Confirmar algo del producto ya mostrado — «sí, esa es
+  la presentación que quiero» — NO es una consulta nueva.)
+  * Mensaje «tienen vivacina?» con candidato «vitamina» → hay_consulta=false (el cliente pidió
+    vivacina; «vitamina» es otra categoría, aunque suene parecido).
+- Si la pregunta lleva «PREGUNTA ESTRICTA», contesta SOLO por el término candidato: es el
+  término que el asistente quiere buscar. hay_consulta=true si el cliente pidió ESE medicamento,
+  lo describió (categoría o síntoma), es el producto que el asistente acaba de mostrar, o es un
+  nombre mal escrito / variante del mismo. Un candidato que NO aparece en el mensaje del cliente
+  solo se aprueba si es, con claridad, un medicamento: fármaco o marca, con o sin dosis. Nombres
+  de personas, cédulas o números de documento, direcciones, fechas, cantidades sueltas, «firma»,
+  «sello» y palabras de relleno (oiga, colmo, bueno) NO son medicamentos: hay_consulta=false y
+  termino=null — aunque el mensaje contenga otra consulta distinta.
 - Si dudas entre conversación y medicamento, pon hay_consulta=false y confianza baja:
   el asistente preguntará. Es preferible preguntar que responder sobre algo que el cliente
   no pidió."""
@@ -341,7 +356,7 @@ def cliente_intencion(settings: Any, llm_chat: Any) -> Any:
 
 
 def _contexto(texto: str, termino_candidato: str | None, producto_previo: str | None,
-              estado: str | None = None) -> str:
+              estado: str | None = None, candidato_obligatorio: bool = False) -> str:
     partes = [f"Mensaje del cliente: {texto.strip()}"]
     if producto_previo:
         partes.append(f"Producto que el asistente acaba de mostrar: {producto_previo}")
@@ -352,6 +367,20 @@ def _contexto(texto: str, termino_candidato: str | None, producto_previo: str | 
     if termino_candidato:
         partes.append(
             f"Término candidato extraído por el sistema (puede ser basura): {termino_candidato}"
+        )
+    if candidato_obligatorio:
+        # F15.1 — el asistente quiere BUSCAR ese término: el veredicto tiene que ser sobre
+        # ÉL, no sobre el mensaje en general. Sin esta pregunta explícita la capa aprobaba
+        # «hay una consulta en el mensaje» (la del cliente) y la puerta aplicaba ese
+        # veredicto al término del modelo: entraron al catálogo `oiga`, `firma`,
+        # `maria fernandez cmp 45231`, `medica`.
+        partes.append(
+            "PREGUNTA ESTRICTA: el asistente quiere BUSCAR ese término candidato. El "
+            "veredicto es sobre ÉL, no sobre el mensaje en general: hay_consulta=true SOLO "
+            "si el cliente pidió o describió ESE medicamento (o es el producto mostrado, o "
+            "un nombre mal escrito / variante del mismo). Si el candidato es relleno, un "
+            "documento, un dato del cliente o de la receta, hay_consulta=false con "
+            "termino=null — aunque el mensaje traiga otra consulta distinta."
         )
     partes.append("Responde SOLO con el JSON.")
     return "\n".join(partes)
@@ -365,12 +394,19 @@ async def entender(
     termino_candidato: str | None = None,
     producto_previo: str | None = None,
     estado: str | None = None,
+    candidato_obligatorio: bool = False,
 ) -> Entendimiento:
     """Veredicto sobre el mensaje: camino rápido → capa LLM → inconcluyente.
 
     `hay_consulta=None` significa **no concluyente**: el llamador NO debe buscar
     (antes reaplicaba el heurístico de forma, que era justamente el que buscaba
     basura — revisión externa: «fail-open, no fail-safe»).
+
+    `candidato_obligatorio=True` (F15.1, puerta de herramientas): el veredicto se pide
+    sobre el TÉRMINO candidato, no sobre el mensaje. Es la diferencia que cierra el hueco
+    de `oiga` / `firma` / `maria fernandez cmp 45231`: el mensaje traía una consulta real
+    (fexofenasina, una receta) y ese «sí» terminaba autorizando el término que el modelo
+    eligió por su cuenta.
     """
     global _FALLOS_SEGUIDOS, _CORTE_HASTA
     if not bool(getattr(settings, "intent_layer", True)):
@@ -408,7 +444,8 @@ async def entender(
                 [
                     {"role": "system", "content": _SISTEMA},
                     {"role": "user", "content": _contexto(texto, termino_candidato,
-                                                          producto_previo, estado)},
+                                                          producto_previo, estado,
+                                                          candidato_obligatorio)},
                 ]
             ),
             timeout=timeout,
