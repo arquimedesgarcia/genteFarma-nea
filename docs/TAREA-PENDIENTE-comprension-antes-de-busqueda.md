@@ -31,9 +31,25 @@ Además hay **atajos que saltan la capa**: `_tiene_evidencia_de_producto` (dosis
 - Revisar el atajo `_tiene_evidencia_de_producto`: mantenerlo solo cuando el término trae dosis/forma inequívoca; en la duda, que decida la capa.
 - Cubrir con sondas deterministas (sin modelo) las frases sin medicamento (H-3) y los casos legítimos de consulta, midiendo 0 búsquedas inventadas y 0 consultas legítimas perdidas.
 
-## Palanca de configuración (sin código)
+## Palanca de configuración (sin código) — HALLAZGO 2026-11-06
 
-La capa de comprensión puede correr en su **propio modelo** vía `Settings.intent_model` / `intent_api_key` / `intent_base_url` (hoy vacío = usa el modelo del chat). Un `intent_model` **más capaz** mejoraría directamente la decisión "¿es consulta de medicamento?" y la inferencia del término, **sin tocar código**. Recomendación: evaluar un modelo de razonamiento para `intent_model` como primer experimento barato, en paralelo al cambio de arquitectura de arriba.
+Estado medido en el repo (`.env.example` + defaults de `Settings`):
+
+| Ajuste | Valor efectivo |
+|---|---|
+| `OPENAI_MODEL` (chat) | `gpt-4o-mini` (rápido, **no razonador**) |
+| `intent_layer` | **ON** (default True; no está en `.env`) |
+| `intent_model` | **vacío** → la capa F15 decide con el **mismo `gpt-4o-mini`** |
+
+**Causa principal probable del síntoma:** la capa de comprensión está encendida, pero **razona con `gpt-4o-mini`**, demasiado débil para clasificar frases conversacionales ambiguas e inferir el término. La heurística con fugas (`_termino_es_medicamento_plausible` devuelve True para `ser indu`, `duele cabeza`, `principio activo del daflon`, `ahora`, `aceptan zelle`) solo entra cuando la capa NO concluye (timeout/fail-safe), pero el grueso de los errores viene del modelo de la capa.
+
+**Primer experimento recomendado (cero código, reversible):** darle a la capa su propio modelo más capaz sin tocar la latencia del chat:
+```env
+INTENT_MODEL=<modelo más fuerte>     # gpt-4o o uno vía OpenRouter
+INTENT_API_KEY=<si va en otro proveedor>
+INTENT_BASE_URL=<si va en otro proveedor>
+```
+La capa solo devuelve un JSON de veredicto dentro de `INTENT_TIMEOUT` (12 s); puede permitirse un modelo mejor sin el gotcha del razonador que afecta al chat. Medir si bajan las búsquedas inventadas ANTES de refactorizar el código afinado de F15.
 
 ## Reglas del proyecto a respetar
 
