@@ -84,6 +84,13 @@ Archivos: `app/tools.py` (puerta, helpers, estado del turno, atajo), `app/intenc
 
 ### 3.1 Laboratorio
 
+Además de las dos corridas sobre el árbol final, se corrió el **A/B pareado** (imagen pre-F15.1 vs
+imagen final, mismo día, DB desechable fresca cada una, mismo juez gratuito):
+**82 → 77** (delta −5, dentro de la banda ±14), con los **dos rojos del cliente idénticos** en ambas
+y un solo caso movido (amarillo en `cliente_enojado` por redacción del escalado, con el handoff
+verificado como real en el CRM). Efecto medible del cambio: **27 → 48 decisiones** de la capa y 27
+términos basura que ya no llegan al catálogo. Detalle y atribución: `eval/lab-ab-f151-REPORT.md`.
+
 | Corrida | Árbol | Score | Verdes / rojos | Atribución |
 |---|---|---|---|---|
 | `run_wvp5ulsexf95fd7t1k2f` | F15.1 inicial (sin R9/R10) | 73 | 8 / 3 | `fuera_de_kb` y `receta_foto` = **del cliente** (los dos del informe F15); `pide_humano` = **del modelo/juez**: el agente SÍ hizo el handoff (`POST /api/bot/handoff` 200, reason «pidió humano» a las 19:14:58) y el juez leyó «ya avisé al equipo» como afirmación falsa. **No hay búsqueda involucrada**: la rama de handoff no la toca este cambio |
