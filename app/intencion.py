@@ -155,7 +155,12 @@ Reglas:
   termino=null — aunque el mensaje contenga otra consulta distinta.
 - Si dudas entre conversación y medicamento, pon hay_consulta=false y confianza baja:
   el asistente preguntará. Es preferible preguntar que responder sobre algo que el cliente
-  no pidió."""
+  no pidió.
+- Cuando hay_consulta=false, el `acto` NUNCA es `consulta_medicamento`: usa el acto real del
+  mensaje (saludo, cortesia, dato_personal, atributo_producto, dilatoria, reclamo u otro). Un
+  `acto=consulta_medicamento` con `hay_consulta=false` es un contrato inválido, el veredicto se
+  descarta y queda como no concluyente: el asistente no puede saber si le negaste algo o no te
+  entendieron."""
 
 
 @dataclass

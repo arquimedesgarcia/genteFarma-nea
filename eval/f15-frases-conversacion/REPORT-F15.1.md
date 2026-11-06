@@ -129,11 +129,20 @@ del mismo nombre (`vibracina`), dos medicamentos en un turno, reintentos interno
 
 ## 5. Observaciones para la siguiente sesión
 
-- **Contrato de la capa con términos rechazados**: con `deepseek-v4.1-flash` la capa a veces devuelve
+- **Contrato de la capa con términos rechazados — ARREGLADO**: la capa devolvía a veces
   `acto=consulta_medicamento` con `hay_consulta=false`, que `_veredicto_desde_json` considera
-  incoherente ⇒ `fail-safe`: el término se rechaza igual, pero sin veredicto conclusivo (no se cachea
-  y la fila queda como fail-safe). Ajustar el prompt para que un rechazo use otro `acto` mejoraría la
-  **auditoría**, no la seguridad.
+  incoherente ⇒ el rechazo quedaba como `fail-safe` (no concluyente, no cacheable). El prompt de la
+  capa ahora prohíbe explícitamente ese par (`app/intencion.py`): tras el cambio, la sonda da
+  **17/17 sin ningún «contrato inválido»** y el corpus volvió a **50/50 con 0 inconclusivos**.
+- **Veto G13 (afirmar una acción que no ocurrió) — especificado, sin implementar**: la corrida del
+  Laboratorio dejó el caso (`comprador_decidido`: «Listo, quedó registrado.» con el carrito vacío y
+  sin llamada a `finalizar_pedido`). La propuesta, con el análisis de falsos positivos medido sobre
+  66 textos del agente (la familia del escalado **no** debe entrar: 2 de 2 falsos positivos porque el
+  handoff sí ocurrió), está en `docs/SPEC-G13-afirmacion-sin-accion.md`. Toca el chasis
+  (`guards.py` + un `elif` en `turn.py`), así que espera tu OK.
+- **Medición pareada del Laboratorio — en marcha**: `eval/lab-ab-f151.sh` corre la imagen pre-F15.1 y
+  la del árbol actual el mismo día, con DB desechable fresca cada una y el mismo juez gratuito
+  (resultados en `eval/lab-ab-f151-{pre-f151,con-f151}.json`), para no depender del 82 documentado.
 - **Foto de receta (OCR)**: el caso `receta_foto` sigue rojo por el lado del cliente (el agente afirma
   «ya vi la receta»), pero además el OCR mete en el turno texto que no es medicamento (nombre del
   paciente, colegiatura). R10 lo corta en la puerta; conviene revisar también qué texto se le pasa al
