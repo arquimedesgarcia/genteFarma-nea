@@ -2180,6 +2180,12 @@ class ToolRuntime:
         # de dejar la duda. None cuando no hubo corrección.
         self.corregido_desde: str | None = None
         self.corregido_a: str | None = None
+        # Mapeo marca → principio activo que el LLM ADIVINÓ (no viene de app/aliases.py).
+        # Se anota (marca, principio) para que la respuesta no pueda AFIRMAR la
+        # equivalencia: "Vivacina es sertralina, y sí la tengo" (prueba en vivo con
+        # tráfico real de Ospino, provider 05, 2026-11-06) — la misma palabra había dado
+        # DOXICICLINA dos turnos antes. Sin certeza se pregunta, no se afirma.
+        self.principio_inferido: tuple[str, str] | None = None
         # Último producto consultado con buscar_medicamento. Lo usan los backstops
         # de carrito: si el cliente responde con una cantidad y el LLM no llama
         # agregar_al_carrito, forzamos el add con este producto.
@@ -3570,7 +3576,10 @@ class ToolRuntime:
                             "y sin puntuación. Ejemplo: 'depomedrol' → "
                             "'metilprednisolona'; 'atamel' → 'paracetamol'; "
                             "'buscapina' → 'hioscina'. Si no conoces el principio "
-                            "activo, responde exactamente 'desconocido'."
+                            "activo, responde exactamente 'desconocido'. "
+                            "NO ADIVINES por parecido con otra palabra ni por lo que "
+                            "suene: si no estás seguro de que esa marca exista en "
+                            "Venezuela, responde exactamente 'desconocido'."
                         ),
                     }
                 ],
@@ -3590,6 +3599,9 @@ class ToolRuntime:
             # caso reportado de la receta "ESOZ 40 MG"). Se reinyecta la dosis
             # que el cliente ya pidió; si no traía, se busca igual que antes.
             dosis = _extraer_dosis(nombre)
+            # Se anota el mapeo como INFERIDO: la respuesta no podrá afirmar
+            # "«X» es <principio>", solo ofrecerlo preguntando.
+            self.principio_inferido = (nombre.strip().lower(), principio)
             consulta = f"{principio} {dosis}".strip() if dosis else principio
             data = await self._ctx.crm.get_products(
                 self._provider_id, q=consulta, limit=20

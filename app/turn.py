@@ -1086,6 +1086,8 @@ async def run_turn(
         # El encabezado no puede prometer la concentración que el mensaje niega.
         clean = _titulo_sin_dosis_negada(clean)
         clean = _con_confirmacion_carrito(clean, runtime)
+        # Ninguna respuesta puede AFIRMAR que una marca es un principio activo adivinado.
+        clean = _sin_equivalencia_inventada(clean, runtime)
         # EL RESUMEN NO SE PRESENTA SIN EL MÉTODO DE ENTREGA.
         #
         # Caso real (provider 19, 2026-10-31): el cliente "Agrégame 3 del 1" y recibió el
@@ -6768,6 +6770,88 @@ def _filtrar_por_envase(
     return out or products
 
 
+# Palabras que nombran la FORMA farmacéutica o el vehículo, no un producto: un aviso
+# "No tengo BUCAL" no dice nada al cliente (ver `_aviso_no_lo_tengo`).
+_PALABRAS_DE_FORMA = frozenset({
+    "bucal", "oral", "sublingual", "topica", "topico", "oftalmica", "oftalmico", "otica",
+    "nasal", "rectal", "vaginal", "inyectable", "solucion", "suspension", "jarabe",
+    "tableta", "tabletas", "tab", "tabs", "comprimido", "comprimidos", "comp", "capsula",
+    "capsulas", "cap", "caps", "ampolla", "ampollas", "amp", "inyectable", "gel", "crema",
+    "unguento", "pomada", "locion", "shampoo", "gotas", "spray", "polvo", "granulado",
+    "sobre", "sob", "supositorio", "supositorios", "ovulo", "ovulos", "ovu", "parche",
+    "sol", "susp", "jab", "pediatrico", "adulto", "infantil", "recubiertas", "recubierta",
+})
+
+
+def _norm_simple(texto: str) -> str:
+    """minúsculas y sin acentos, para comparar palabras sueltas."""
+    base = (texto or "").strip().lower()
+    for a, b in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ü", "u")):
+        base = base.replace(a, b)
+    return base
+
+
+# "Vivacina es sertralina", "«X» corresponde a Y", "se llama Y"…
+_RE_AFIRMA_EQUIVALENCIA = re.compile(
+    r"\b(?:es|corresponde\s+a|equivale\s+a|se\s+llama|su\s+principio\s+activo\s+es)\b",
+    re.IGNORECASE,
+)
+
+
+def _sin_equivalencia_inventada(texto: str, runtime: Any) -> str:
+    """Quita de la respuesta la AFIRMACIÓN de que una marca es un principio activo.
+
+    Prueba en vivo con tráfico real de Ospino (provider 05, 2026-11-06):
+
+        cliente: "tienes vivacina"
+        agente : "Vivacina es sertralina, y sí la tengo" + lista de SERTRALINA
+
+    y dos turnos antes, con la MISMA palabra, había contestado DOXICICLINA. El mapeo lo
+    adivina el LLM en `_buscar_por_principio_activo`; si no viene de `aliases.py` no hay
+    certeza, y afirmarlo es exactamente lo que la regla del negocio prohíbe: si la
+    respuesta no es precisa, mejor no ofrecer productos incoherentes.
+
+    Se conserva el ofrecimiento (útil: 'depomedrol' → metilprednisolona), pero como
+    PREGUNTA y sin afirmar la equivalencia.
+    """
+    info = getattr(runtime, "principio_inferido", None)
+    if not info or not texto:
+        return texto
+    marca, principio = info
+    marca_n = _norm_simple(marca)
+    principio_n = _norm_simple(principio)
+    if not marca_n or not principio_n:
+        return texto
+
+    lineas = texto.splitlines()
+    fuera = False
+    conservadas: list[str] = []
+    for linea in lineas:
+        ln = _norm_simple(linea)
+        afirma = (
+            marca_n in ln
+            and principio_n in ln
+            and _RE_AFIRMA_EQUIVALENCIA.search(ln)
+        )
+        if afirma:
+            fuera = True
+            continue
+        conservadas.append(linea)
+    nuevo = "\n".join(conservadas).strip()
+    if not fuera:
+        return texto
+
+    aviso = (
+        f"⚠️ No tengo «{marca.upper()}» en el catálogo con ese nombre. "
+        f"Si te sirve el principio activo, tengo {principio.upper()}:"
+    )
+    logger.info(
+        "equivalencia inventada retirada: %r → %r (el mapeo no viene de aliases.py)",
+        marca, principio,
+    )
+    return f"{aviso}\n\n{nuevo}" if nuevo else aviso
+
+
 def _aviso_no_lo_tengo(term: str, ausente: str) -> str:
     """Aviso cuando el cliente pidió algo que NO está en el catálogo pero hay lista.
 
@@ -6792,8 +6876,19 @@ def _aviso_no_lo_tengo(term: str, ausente: str) -> str:
     # encima de una lista de VITAMINA C (provider 32, 2026-10-29).
     if len(ausente.strip()) < 2 or _es_letra_de_vitamina(ausente.strip().lower(), term):
         return ""
+    # LA FORMA NO ES UN PRODUCTO. Prueba en vivo con tráfico real (provider 05,
+    # 2026-11-06): "pinvex solución bucal" avisó
+    #     ⚠️ No tengo BUCAL. De PINVEX hay esto:
+    # y "solunoval bucal" avisó
+    #     ⚠️ No tengo SOLUNOVAL. De BUCAL hay esto:
+    # Las dos frases son incoherentes: 'bucal' no es algo que se tenga o no. De la forma
+    # pedida ya se ocupa `_aviso_forma` / el filtro de forma.
+    ausente_norm = _norm_simple(ausente)
+    if ausente_norm in _PALABRAS_DE_FORMA:
+        return ""
     resto = " ".join(w for w in term.split() if w.lower() != ausente.lower())
-    if resto.strip():
+    resto_util = [w for w in resto.split() if _norm_simple(w) not in _PALABRAS_DE_FORMA]
+    if resto_util:
         return f"⚠️ No tengo {ausente.upper()}. De {resto.upper()} hay esto:"
     return f"⚠️ No tengo {ausente.upper()}."
 
