@@ -1623,6 +1623,11 @@ async def _tool_loop(
     # Cuenta rondas consecutivas donde el LLM llamó tools con arguments vacíos
     # ({}): señal de bucle degenerado — cortamos con un texto de respaldo.
     empty_rounds = 0
+    # D-A4: firma de la última ronda de tool-calls y cuántas veces seguidas se ha
+    # repetido idéntica (misma herramienta + argumentos): detecta el bucle de la
+    # misma llamada aunque traiga argumentos.
+    firma_previa: tuple = ()
+    rondas_repetidas = 0
     # Pre-check de elección por número de opción ("quiero 2 cajas de la opción 3"
     # o selección múltiple "quiero 1 caja de 1,4,7 y 8"): se resuelve ANTES de
     # la primera llamada al LLM, para que el modelo no sobrescriba
@@ -2681,7 +2686,18 @@ async def _tool_loop(
                 # 2. O consultó pero no encontró nada (med_not_found) — quizás
                 #    usó un término distinto al deterministicamente correcto.
                 #    Re-consultar con el término extraído puede encontrar productos.
-                if term and (not runtime.consulted_catalog or (runtime.med_not_found and not runtime.catalog_retried)):
+                # D-A3: UN SOLO intento de búsqueda forzada por término y turno.
+                # Antes la condición dependía de `consulted_catalog`, que NUNCA pasa
+                # a True si la puerta F15.1 no autoriza el término (capa off, fail-safe
+                # o rechazo conclusivo): el backstop re-forzaba el mismo término cada
+                # ronda hasta agotar → silencio. Con `catalog_retried` (que ya se pone
+                # True al primer intento, igual que los backstops de OCR/voz) se sale
+                # del bucle con la respuesta honesta que F15.1 prevé.
+                if (
+                    term
+                    and not runtime.catalog_retried
+                    and (not runtime.consulted_catalog or runtime.med_not_found)
+                ):
                     # Nunca forzar la búsqueda con una frase que NO parece un
                     # medicamento (reclamos, garantías, saludos, "caja cada
                     # uno"): consultar el catálogo con basura devuelve
@@ -2741,9 +2757,33 @@ async def _tool_loop(
                     "turno: %d rondas seguidas con tool-calls sin arguments — corto con respaldo",
                     empty_rounds,
                 )
-                return _fallback_farmacia(user_text, runtime, ctx, farmacia)
+                # D-A1: _fallback_farmacia es `async def`; sin `await` se devolvía
+                # la coroutine como texto y el turno reventaba en los guards
+                # (TypeError) → silencio. Con await (vía _respaldo_sin_texto, que
+                # además es resiliente a fallos de catálogo) se envía el respaldo.
+                return await _respaldo_sin_texto(user_text, runtime, ctx, farmacia)
         else:
             empty_rounds = 0
+        # D-A4: la MISMA llamada (herramienta + argumentos normalizados) repetida
+        # ≥3 veces seguidas es un bucle degenerado aunque los argumentos NO estén
+        # vacíos (el contador `empty_rounds` solo cubre `{}`): quema rondas y cae
+        # en el silencio del final. Una secuencia de búsquedas DISTINTAS no es un
+        # bucle (firmas distintas → el contador se reinicia) y no se corta.
+        firma_ronda = tuple(
+            (tc.name, json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True))
+            for tc in reply.tool_calls
+        )
+        if firma_ronda and firma_ronda == firma_previa:
+            rondas_repetidas += 1
+        else:
+            rondas_repetidas = 1
+            firma_previa = firma_ronda
+        if rondas_repetidas >= 3:
+            logger.warning(
+                "turno: %d rondas idénticas de tool-calls (%s) — corto con respaldo",
+                rondas_repetidas, firma_ronda[0][0] if firma_ronda else "?",
+            )
+            return await _respaldo_sin_texto(user_text, runtime, ctx, farmacia)
         messages.append(
             {
                 "role": "assistant",
@@ -2865,8 +2905,11 @@ async def _tool_loop(
             "se manda la pregunta canónica en vez de silencio"
         )
         return PREGUNTA_RECOMENDACION
-    logger.warning("turno: demasiadas rondas de herramientas — corto sin texto")
-    return None
+    # D-A2: agotar MAX_TOOL_ROUNDS con llamadas válidas pero sin texto NO puede
+    # dejar al cliente en silencio. Respaldo determinista con lo que YA se obtuvo
+    # del catálogo en el turno (sin inventar precio/stock/disponibilidad).
+    logger.warning("turno: demasiadas rondas de herramientas — respaldo determinista en vez de silencio")
+    return await _respaldo_sin_texto(user_text, runtime, ctx, farmacia)
 
 SEND_ATTEMPTS = 4  # backoff 1 s, 2 s, 4 s entre intentos (~7 s en el turno)
 
@@ -4131,6 +4174,33 @@ async def _fallback_farmacia(
 
     lista = _formatear_lista_productos(products, term)
     return lista + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+
+
+async def _respaldo_sin_texto(
+    user_text: str, runtime: ToolRuntime, ctx: AppContext, farmacia: bool
+) -> str:
+    """D-A2/D-A4: respaldo determinista cuando el bucle de herramientas se agota
+    (o se corta por degeneración) sin que el modelo produjera texto.
+
+    Preferimos lo que YA se obtuvo del catálogo en el turno — `productos_turno`
+    acumula TODAS las búsquedas con resultados, así ningún medicamento obtenido
+    se pierde (caso A4: seis medicamentos en un mensaje). Si no hubo ningún
+    resultado, se cae en `_fallback_farmacia` (consulta honesta), que nunca
+    inventa precio, stock ni disponibilidad.
+    """
+    from app.tools import _formatear_lista_productos
+
+    obtenidos = list(getattr(runtime, "productos_turno", None) or runtime.last_products)
+    if farmacia and obtenidos:
+        term = _extraer_termino_medicamento(user_text) or runtime.last_term or ""
+        return _formatear_lista_productos(obtenidos, term) + "\n\n" + MENSAJE_SUGERIDO_CARRITO
+    # Sin resultados: consulta honesta. Si el catálogo está caído (error/timeout),
+    # NO se deja al cliente en silencio ni se inventa nada: limitación honesta.
+    try:
+        return await _fallback_farmacia(user_text, runtime, ctx, farmacia)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("respaldo sin texto: el catálogo falló (%s) — limitación honesta", exc)
+        return guards.TPL_VERIFICACION_CATALOGO
 
 
 def _respuesta_envase_agotado(

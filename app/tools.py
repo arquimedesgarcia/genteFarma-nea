@@ -2256,6 +2256,11 @@ class ToolRuntime:
         self.last_product: dict[str, Any] | None = None
         # Lista completa de productos consultados (backstop de contradicción).
         self.last_products: list[dict[str, Any]] = []
+        # D-A2/D-A4: TODOS los productos con resultados de ESTE turno (deduplicados
+        # por productId), acumulados sobre cada buscar_medicamento. `last_products`
+        # guarda solo la ÚLTIMA búsqueda; esto conserva las anteriores para que el
+        # respaldo de agotamiento no pierda ningún medicamento ya obtenido.
+        self.productos_turno: list[dict[str, Any]] = []
         # TÉRMINO DEL QUE SALIÓ `last_products`. Los backstops de turn.py componen el
         # título con `last_term` y las líneas con `last_products`: si ambos vienen de
         # búsquedas distintas, la respuesta mezcla dos consultas y el cliente recibe un
@@ -2859,6 +2864,19 @@ class ToolRuntime:
             ),
             "busqueda": nombre,
         }
+
+    def _acumular_productos_turno(self, nuevos: list[dict[str, Any]]) -> None:
+        """D-A2/D-A4: suma los productos de una búsqueda al acumulado del turno,
+        deduplicando por productId (o por producto si no hay id)."""
+        vistos = {
+            str(p.get("productId") or p.get("producto") or id(p))
+            for p in self.productos_turno
+        }
+        for p in nuevos or []:
+            clave = str(p.get("productId") or p.get("producto") or id(p))
+            if clave not in vistos:
+                self.productos_turno.append(p)
+                vistos.add(clave)
 
     async def _buscar_medicamento(self, args: dict[str, Any]) -> dict[str, Any]:
         nombre = str(args.get("nombre") or "").strip()
@@ -3578,6 +3596,7 @@ class ToolRuntime:
                 self.last_term = nombre
                 self.last_product = alternativas[0]
                 self.last_products = alternativas
+                self._acumular_productos_turno(alternativas)
                 # El principio activo SÍ corresponde a este término (el LLM lo mapeó
                 # desde él), así que la lista está en contexto: el guard no la invalida.
                 self.last_products_term = nombre
@@ -3724,6 +3743,7 @@ class ToolRuntime:
         # contradicción: si el LLM niega disponibilidad pese a haber resultados,
         # reemplazamos su texto con la lista real).
         self.last_products = products
+        self._acumular_productos_turno(products)
         # Con qué término se obtuvo esta lista. Los backstops componen el título con
         # `last_term`, así que si `last_term` cambia (búsqueda posterior sin resultados)
         # la lista queda huérfana y hay que invalidarla (ver el `if not products` arriba).
