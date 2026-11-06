@@ -374,3 +374,61 @@ class TestCableadoTurno:
         assert "app.intencion" not in guards
         assert "entender_intencion" not in guards
         assert "intent_layer" not in guards
+
+
+# ------------------------------------------------ autorización central de tools ---
+
+class TestAutorizacionCentral:
+    def _runtime_minimo(self):
+        from app.tools import ToolRuntime
+
+        runtime = ToolRuntime.__new__(ToolRuntime)
+        runtime.intent_fuente = ""
+        runtime.intent_acto = ""
+        runtime.intent_motivo = ""
+        runtime.intent_confianza = None
+        runtime.intent_hay_consulta = None
+        runtime.intent_termino = None
+        runtime.intent_autorizado = None
+        runtime.texto_cliente = "puedo devolverlas?"
+        runtime.last_product = None
+        runtime.decision_registrada = False
+
+        async def registrar(candidato=None):
+            runtime.decision_registrada = True
+
+        runtime.registrar_decision_intencion = registrar
+        return runtime
+
+    def test_import_error_deniega_busqueda(self, monkeypatch):
+        import builtins
+
+        runtime = self._runtime_minimo()
+        original_import = builtins.__import__
+
+        def fallo_intencion(name, *args, **kwargs):
+            if name == "app.intencion":
+                raise ImportError("simulated import failure")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fallo_intencion)
+        resultado = asyncio.run(runtime._autorizar_busqueda("devolverlas"))
+        assert resultado["error"] == "no_autorizado_por_comprension"
+        assert runtime.intent_autorizado is False
+        assert runtime.intent_fuente == "fail-safe"
+        assert runtime.decision_registrada is True
+
+    def test_error_inesperado_deniega_busqueda(self, monkeypatch):
+        import app.intencion
+
+        runtime = self._runtime_minimo()
+
+        async def fallo(*args, **kwargs):
+            raise RuntimeError("simulated provider failure")
+
+        monkeypatch.setattr(app.intencion, "entender", fallo)
+        resultado = asyncio.run(runtime._autorizar_busqueda("devolverlas"))
+        assert resultado["error"] == "no_autorizado_por_comprension"
+        assert runtime.intent_autorizado is False
+        assert runtime.intent_fuente == "fail-safe"
+        assert runtime.decision_registrada is True
