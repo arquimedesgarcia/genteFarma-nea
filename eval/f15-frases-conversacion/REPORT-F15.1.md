@@ -144,3 +144,24 @@ del mismo nombre (`vibracina`), dos medicamentos en un turno, reintentos interno
 - El ciclo de medición de esta fase está automatizado en dos scripts de `eval/`:
   `camino-real-f151.sh` (escenarios) y `camino-real-reps.sh` (repeticiones), con DB desechable fresca
   por corrida y **sin tocar** el volumen del cliente.
+
+## 6. Procedencia — piezas de otros agentes (nada se descarta)
+
+El trabajo de las ramas del espejo `arquimedesgarcia/genteFarma-nea` se revisó commit por commit.
+Esto es lo que aportó cada uno y dónde está ahora:
+
+| Commit / rama | Qué aportaba | Dónde quedó |
+|---|---|---|
+| `238ad7a` · `fix/f15-fail-closed` (PR #1) | búsqueda denegada cuando la capa no puede decidir | integrado antes como `be8d8ce` y **preservado** en F15.1: `_rechazar_por_fallo_comprension` intacto + sus 2 tests siguen verdes |
+| `238ad7a` · `fix/f15-term-scoped-search` (PR #2) | autorización **por término** (estado `intent_terminos_autorizados`, reutilización del mismo término, cada término nuevo a la capa) | es el núcleo de F15.1 → R1-R3 (commit `20dda54`) |
+| `ab746ec` (PR #2) | sus tests de no-heredar la autorización (`vitamina`/`acabo`/`ustedes`) | cubiertos y ampliados en `TestAutorizacionPorTermino` (12 tests, superconjunto de los suyos) |
+| `a334ab7` (PR #2) | rechazo **determinista** de términos adicionales (`fuente='guard-term'`, error `termino_no_plausible`) | **retirado por su propio commit siguiente** (`9bab279`, 1 minuto después): la decisión se delega a la capa. No se porta (volvería a introducir un rechazo por forma). Lo que sí se conserva de esa idea es el **registro del rechazo** en `intent_decisions` con `candidato` + `motivo` |
+| `9bab279` (PR #2, head) | «cada término nuevo se reclasifica contra el mensaje del cliente» | R2, ampliado con la pregunta por el candidato (R9) y el atajo por número (R10) |
+| Ramas `fix/f15-fail-closed` y `fix/f15-term-scoped-search` | — | **intactas** en el espejo (`238ad7a` / `9bab279`): no se han borrado, ni reescrito, ni se les ha hecho force-push. PR #1 y #2 siguen abiertos como referencia |
+| `_norm` (importado de `app.relevancia` en su rama) | normalización de términos | equivalente a `_clave_termino` (la mía añade tildes y colapsa espacios) |
+
+Lo único que **no** encaja sin cambios es el head del PR #2 tal cual: pierde la definición de
+`_rechazar_por_fallo_comprension` que sigue llamando (`app/tools.py:2709` y `:2726`) → 2 tests en
+rojo, medido también sobre el resultado del merge del PR (`refs/pull/2/merge` = `9dd1a5d`). La rama
+no se ha tocado: el fallo está documentado aquí para que el codificador lo rehaga sobre `desarrollo`
+si continúa con el bucle de herramientas y G5.
