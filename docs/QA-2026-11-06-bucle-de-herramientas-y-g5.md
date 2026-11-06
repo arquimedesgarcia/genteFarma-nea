@@ -238,4 +238,4 @@ Las sondas no tocan el CRM, la red ni el modelo: corren el código real con un L
 - `eval/qa-2026-11-06/sonda_g5.py` · `sonda_g5.json` — G5 de punta a punta (T-06)
 - Este informe: `docs/QA-2026-11-06-bucle-de-herramientas-y-g5.md`
 
-Todo commiteado en `desarrollo` (solo estos paths; el árbol de trabajo tiene artefactos de otra sesión que NO se tocan). Los arreglos NO están implementados aquí: el encargo del QA prohibía modificar código. La instrucción para el codificador vive en `docs/PROMPT-CODIFICADOR-BUCLE-Y-G5.md`.
+Todo commiteado en `desarrollo` (solo estos paths; el árbol de trabajo tiene artefactos de otra sesión que NO se tocan). Los arreglos NO están implementados aquí: el encargo del QA prohibía modificar código. La orden de cierre para el codificador (3 paquetes: bucle, G5, G13) vive en `docs/ORDEN-CODIFICADOR-CIERRE-2026-11-06.md`.
