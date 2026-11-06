@@ -3895,6 +3895,22 @@ class ToolRuntime:
         """
         if not self._provider_id:
             return []
+        # SIN ALIAS CURADO NO HAY CERTEZA. Medido en vivo con tráfico real (provider 05,
+        # 2026-11-06): la MISMA palabra dio tres principios distintos en tres turnos —
+        # 'vivacina' → doxiciclina, sertralina y ácido ascórbico. El LLM no sabe qué marca
+        # es y adivina por parecido. La regla del negocio es explícita: cuando la respuesta
+        # no es precisa, mejor no ofrecer productos incoherentes. Por eso el mapeo
+        # automático marca→principio solo se usa si viene de la tabla curada
+        # (`app/aliases.py` + `med_aliases` en la BD); si no, se responde que no se tiene y
+        # se pide el nombre de la caja.
+        from app import aliases as _aliases
+
+        if not _aliases.es_alias(nombre):
+            logger.info(
+                "principio activo: '%s' no está en la tabla de alias curada — no se adivina",
+                nombre,
+            )
+            return []
         try:
             reply = await self._ctx.llm.complete(
                 [
