@@ -2231,6 +2231,13 @@ class ToolRuntime:
         # sugerir_generico). Sirve como backstop anti-alucinación: si el usuario
         # preguntó por un medicamento y NO se consultó, forzamos la consulta.
         self.consulted_catalog = False
+        # RESULTADOS YA OBTENIDOS EN ESTE TURNO, por término. El backstop de receta
+        # vuelve a pedir cada medicamento y con él se repetían búsquedas que el LLM ya
+        # había hecho segundos antes: misma consulta al catálogo, misma cascada de typos y
+        # un turno que se alargaba hasta dejar al cliente sin respuesta (medido en vivo,
+        # provider 05, 2026-11-07: dos mensajes a las 22:36:42 y 22:36:44, una sola
+        # respuesta, y el turno en vuelo más de 3 minutos).
+        self.busquedas_previas: dict[str, list[dict[str, Any]]] = {}
         # Último término consultado con buscar_medicamento (para re-consultar
         # cuando el cliente refina con miligramo/marca sin repetir el nombre).
         self.last_term = ""
@@ -3724,6 +3731,8 @@ class ToolRuntime:
                 "buscar_medicamento: '%s' — %d productos tras acotar a la forma · %s",
                 nombre, len(products), self.aviso_forma,
             )
+        if products:
+            self.busquedas_previas[(nombre or "").strip().lower()] = list(products)
         # Recordar el primer producto (para el backstop de carrito).
         # La lista puede quedar VACÍA aquí: `_aplicar_forma` descarta todo cuando la forma
         # pedida no está y deja la lista en cero con el aviso. `products[0]` reventaba con
