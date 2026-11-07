@@ -61,6 +61,7 @@ from app.tools import (
     _VIAS_ADMINISTRACION,
     _sin_frase_de_indicacion,
     _termino_es_medicamento_plausible,
+    _clave_busqueda,
     _termino_sin_forma,
     _titulo_normalizado,
     _tokens_de_titulo,
@@ -2190,7 +2191,7 @@ async def _tool_loop(
                             # Decirlo así sería mentir sobre el catálogo.
                             sin_consultar = [p for p in pendientes]
                             break
-                        clave_med = (med or "").strip().lower()
+                        clave_med = _clave_busqueda(med)
                         if clave_med in runtime.busquedas_previas:
                             # Ya se consultó en ESTE turno (el LLM lo buscó hace un
                             # momento): se reutiliza. Sin esto, la misma búsqueda se
