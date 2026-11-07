@@ -7976,8 +7976,8 @@ def _parsear_medicamentos_receta(texto: str) -> list[str]:
 def _formatear_receta(
     grupos: list[tuple[str, list[dict[str, Any]]]],
     no_disponibles: list[str] | None = None,
-    sin_consultar: list[str] | None = None,
     avisos: dict[str, str] | None = None,
+    sin_consultar: list[str] | None = None,
 ) -> str:
     """Genera la respuesta de receta en formato determinista, con numeración
     GLOBAL corrida entre medicamentos:
