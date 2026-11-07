@@ -983,10 +983,17 @@ async def run_turn(
             not es_negativa_con_carrito
             and not runtime.last_products
             and not runtime.cart_summary_text
+            and not _montos_respaldados(final_text, runtime)
             and guards.afirma_dato_catalogo(final_text)
         ):
             logger.warning("guarda G6 VETO: datos de producto sin respaldo de catálogo — plantilla verificación")
-            final_text = guards.TPL_VERIFICACION_CATALOGO
+            # Con una lista ya mostrada, la pregunta correcta es POR LA OPCIÓN, no
+            # "¿cuál es el medicamento que buscas?".
+            final_text = (
+                guards.TPL_VERIFICACION_CATALOGO_CON_LISTA
+                if runtime.last_options
+                else guards.TPL_VERIFICACION_CATALOGO
+            )
         # G7 — eco: el agente devuelve casi literalmente el mensaje del cliente
         # en lugar de ejecutar la acción (buscar, agregar, confirmar) o pedir
         # el dato que falta. Caso QA 'Comprador decidido': el agente repitió
@@ -6796,6 +6803,68 @@ _RE_AFIRMA_EQUIVALENCIA = re.compile(
     r"\b(?:es|corresponde\s+a|equivale\s+a|se\s+llama|su\s+principio\s+activo\s+es)\b",
     re.IGNORECASE,
 )
+
+
+# Ojo con los miles: `\d+(?:[.,]\d{1,2})?` cortaba "Bs 9.415,18" en "9.41". El primer
+# grupo reconoce 9.415,18 / 2.629 / 1.234.567,89; el segundo, 7,02 / 7.02.
+_RE_MONTO_CITADO = re.compile(
+    r"\$\s*(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
+    r"|\bBs\.?\s*(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)",
+    re.I,
+)
+
+
+def _montos_respaldados(texto: str, runtime: Any) -> bool:
+    """¿Los importes que cita la respuesta son de la lista que el cliente YA vio?
+
+    G6 vetaba "datos de producto sin respaldo de catálogo" mirando solo
+    `last_products` (los del turno actual). Cuando el cliente contesta "Este" o
+    "Si tienen disponibilidad." el turno no busca nada, `last_products` está vacío, y el
+    agente —que SÍ tiene respaldo, la lista del turno anterior— acababa recibiendo la
+    plantilla "No tengo información confirmada sobre ese medicamento…", que no viene a
+    cuento. Medido en la prueba en vivo del 2026-11-07 (4 de 4 vetos G6).
+    """
+    opciones = getattr(runtime, "last_options", None) or []
+    if not opciones:
+        return False
+    reales: list[float] = []
+    for p in opciones:
+        for clave in ("precio", "precioBs", "precio_bs"):
+            v = p.get(clave) if isinstance(p, dict) else None
+            if isinstance(v, (int, float)):
+                reales.append(round(float(v), 2))
+            elif isinstance(v, str):
+                try:
+                    reales.append(round(float(v.replace(".", "").replace(",", ".")), 2))
+                except ValueError:
+                    pass
+    if not reales:
+        return False
+    citados = [v for v in (_a_float(a or b) for a, b in _RE_MONTO_CITADO.findall(texto)) if v is not None]
+    if not citados:
+        return False
+    return all(any(abs(c - r) < 0.02 for r in reales) for c in citados)
+
+
+def _a_float(cifra: str) -> float | None:
+    """'7,02' → 7.02 · '6.290,78' → 6290.78 · '2.629' → 2629.0 (formato venezolano)."""
+    s = (cifra or "").strip()
+    if not s:
+        return None
+    tiene_coma, tiene_punto = "," in s, "." in s
+    try:
+        if tiene_coma and tiene_punto:
+            return float(s.replace(".", "").replace(",", "."))
+        if tiene_coma:
+            return float(s.replace(",", "."))
+        if tiene_punto:
+            entero, _, dec = s.partition(".")
+            if len(dec) == 3 and entero:          # '2.629' son miles, no decimales
+                return float(s.replace(".", ""))
+            return float(s)
+        return float(s)
+    except ValueError:
+        return None
 
 
 def _sin_equivalencia_inventada(texto: str, runtime: Any) -> str:
