@@ -2195,7 +2195,11 @@ async def _tool_loop(
                             # Ya se consultó en ESTE turno (el LLM lo buscó hace un
                             # momento): se reutiliza. Sin esto, la misma búsqueda se
                             # repetía y el turno tardaba el doble.
-                            prods = list(runtime.busquedas_previas[clave_med])
+                            prods, aviso_previo = runtime.busquedas_previas[clave_med]
+                            prods = list(prods)
+                            # El aviso de forma viaja CON los productos: sin esto se
+                            # reutiliza la lista y se pierde el "No tengo X en grageas".
+                            runtime.aviso_forma = aviso_previo
                             logger.info(
                                 "backstop receta: '%s' ya consultado en este turno — se reutiliza",
                                 med,
@@ -2203,7 +2207,9 @@ async def _tool_loop(
                         else:
                             result = await runtime.execute("buscar_medicamento", {"nombre": med})
                             prods = (result or {}).get("products") or []
-                            runtime.busquedas_previas[clave_med] = list(prods)
+                            runtime.busquedas_previas[clave_med] = (
+                                list(prods), getattr(runtime, "aviso_forma", "") or "",
+                            )
                         # EL TÉRMINO ERA EL LABORATORIO, NO UN MEDICAMENTO.
                         # Caso real (conv 7, provider 05, 2026-10-27): la foto de una caja de
                         # 'Fexofenadina Clorhidrato CALOX' se leyó como dos medicamentos,
