@@ -11,6 +11,7 @@ import difflib
 import json
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, AsyncIterator
@@ -140,6 +141,11 @@ async def _typing_heartbeat(ctx: AppContext, crm_conv_id: str, stop: asyncio.Eve
 # WhatsApp: límite duro por mensaje (el CRM valida ≤4096 y WhatsApp corta/da
 # error por encima). Margen de seguridad para encabezados de partes.
 WA_MAX_CHARS = 4000
+# Presupuesto de tiempo para consultar los medicamentos de una lista en un mismo turno.
+# Pasado ese tiempo se responde con lo ya consultado y se dice qué quedó pendiente: un
+# turno eterno deja al cliente sin respuesta y bloquea los mensajes que llegan entretanto
+# (el lock es por identidad). Medido en vivo, provider 05, 2026-11-07.
+PRESUPUESTO_BACKSTOP_S = 45
 
 
 def _partir_mensaje_largo(texto: str, max_chars: int) -> list[str]:
@@ -2154,6 +2160,8 @@ async def _tool_loop(
                         len(medicamentos),
                     )
                     grupos: list[tuple[str, list[dict[str, Any]]]] = []
+                    _t0_backstop = time.monotonic()
+                    sin_consultar: list[str] = []
                     no_disponibles: list[str] = []
                     # Términos que se descartaron por no ser un medicamento (solo la marca
                     # del laboratorio o solo la sal). Si no queda ningún grupo, la respuesta
@@ -2167,8 +2175,35 @@ async def _tool_loop(
                     for med in medicamentos:
                         runtime.corregido_desde = None
                         runtime.corregido_a = None
-                        result = await runtime.execute("buscar_medicamento", {"nombre": med})
-                        prods = (result or {}).get("products") or []
+                        # PRESUPUESTO DE TIEMPO: un turno que se eterniza deja al cliente
+                        # sin respuesta y bloquea los mensajes que llegan entretanto (el
+                        # lock por identidad los hace esperar). Si se agota, se responde
+                        # con lo consultado y se dice qué falta.
+                        if time.monotonic() - _t0_backstop > PRESUPUESTO_BACKSTOP_S:
+                            pendientes = medicamentos[medicamentos.index(med):]
+                            logger.warning(
+                                "backstop receta: presupuesto de %ds agotado — se responde "
+                                "con lo consultado y quedan %s",
+                                PRESUPUESTO_BACKSTOP_S, pendientes[:3],
+                            )
+                            # NO son "no disponibles": no se alcanzaron a consultar.
+                            # Decirlo así sería mentir sobre el catálogo.
+                            sin_consultar = [p for p in pendientes]
+                            break
+                        clave_med = (med or "").strip().lower()
+                        if clave_med in runtime.busquedas_previas:
+                            # Ya se consultó en ESTE turno (el LLM lo buscó hace un
+                            # momento): se reutiliza. Sin esto, la misma búsqueda se
+                            # repetía y el turno tardaba el doble.
+                            prods = list(runtime.busquedas_previas[clave_med])
+                            logger.info(
+                                "backstop receta: '%s' ya consultado en este turno — se reutiliza",
+                                med,
+                            )
+                        else:
+                            result = await runtime.execute("buscar_medicamento", {"nombre": med})
+                            prods = (result or {}).get("products") or []
+                            runtime.busquedas_previas[clave_med] = list(prods)
                         # EL TÉRMINO ERA EL LABORATORIO, NO UN MEDICAMENTO.
                         # Caso real (conv 7, provider 05, 2026-10-27): la foto de una caja de
                         # 'Fexofenadina Clorhidrato CALOX' se leyó como dos medicamentos,
@@ -2438,7 +2473,10 @@ async def _tool_loop(
                                     ),
                                 )
                                 return None  # turno atendido
-                        receta_final = _formatear_receta(grupos, no_disponibles, avisos)
+                        receta_final = _formatear_receta(
+                            grupos, no_disponibles, avisos,
+                            sin_consultar=sin_consultar,
+                        )
                         # La receta se envía DIRECTO desde aquí, así que no pasa por el
                         # post-proceso de `run_turn`: el encabezado se corrige aquí.
                         receta_final = _titulo_sin_dosis_negada(receta_final)
@@ -7938,6 +7976,7 @@ def _parsear_medicamentos_receta(texto: str) -> list[str]:
 def _formatear_receta(
     grupos: list[tuple[str, list[dict[str, Any]]]],
     no_disponibles: list[str] | None = None,
+    sin_consultar: list[str] | None = None,
     avisos: dict[str, str] | None = None,
 ) -> str:
     """Genera la respuesta de receta en formato determinista, con numeración
@@ -7963,6 +8002,12 @@ def _formatear_receta(
     if no_disponibles:
         nombres = ", ".join(m.upper() for m in no_disponibles)
         lineas.append(f"⚠️ No disponibles en el catálogo: {nombres}")
+        lineas.append("")
+    if sin_consultar:
+        # Se acabó el presupuesto de tiempo del turno. Honesto: no se consultaron.
+        # Prometer "no disponible" sin haber mirado el catálogo es peor que admitirlo.
+        nombres = ", ".join(m.upper() for m in sin_consultar)
+        lineas.append(f"⚠️ No me alcanzó a consultar: {nombres}. ¿Me los repites?")
         lineas.append("")
     n = 0
     for titulo, products in grupos:
