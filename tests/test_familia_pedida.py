@@ -5,9 +5,16 @@ Origen: prueba en vivo con tráfico real (provider 05, FarmaHogar, 2026-11-07).
     "Buenas tardes por favor el precio de solunoval solución bucal"
     → BEDEX SOL TOPICA BUCAL · MIEL DE BORAX TOPICO BUCAL · FLODONT · TANTUM SOL. BUCAL
 
-'solunoval' no existe en ese catálogo (0 resultados buscándolo solo: 9.991 productos),
-pero como el buscador usa OR entre tokens, el token 'solución bucal' sí encontró y el
-cliente recibió cuatro marcas de otra familia como si fueran lo que pidió.
+'solunoval' no existe en ese catálogo (0 resultados buscándolo solo, sobre 9.991), pero el
+buscador usa OR entre tokens: 'bucal' —que es una VÍA, no un nombre— matcheó cuatro marcas
+de otra familia y el cliente las recibió como si fueran lo que pidió.
+
+Dos agujeros, los dos en `app/relevancia.py`:
+
+  a) `bucal`, `topico`, `oftalmica`, `vaginal`… no estaban en `_PRESENTACION_AUDIENCIA`,
+     así que contaban como señal del fármaco.
+  b) la regla de prefijo aceptaba tokens de 3 letras del producto (`len(t) >= 3`), así que
+     "SOL" de TANTUM SOL. BUCAL validaba 'solunovar' por prefijo.
 
 La regla del negocio: cuando la respuesta no es precisa es mejor no responder con
 productos que no sean coherentes.
@@ -16,7 +23,7 @@ import sys
 
 sys.path.insert(0, "/Users/robertosomoza/HermesProyectos/nea-agent")
 
-from app import tools  # noqa: E402
+from app.relevancia import filtrar_relevantes, tokens_farmaco  # noqa: E402
 
 
 def _p(nombre):
@@ -24,79 +31,92 @@ def _p(nombre):
 
 
 CASOS = [
-    # ── el nombre no existe: NO se contesta con la forma ──────────────────
+    # ── el nombre no existe: NO se contesta con la vía ni con la forma ────
     (
-        "solunoval solución bucal",
+        "solunoval bucal",
         [
             "BEDEX SOL TOPICA BUCAL X 120ML",
+            "TANTUM SOL. BUCAL 0.15%",
             "MIEL DE BORAX TOPICO BUCAL X 20 ML",
             "FLODONT ENJUAGUE BUCAL X 180ML",
-            "TANTUM SOL. BUCAL 0.15%",
         ],
-        [],
-        "nombre inexistente: no se ofrece la forma",
+        0,
+        "nombre inexistente: la vía 'bucal' no valida",
+    ),
+    (
+        "solunovar bucal",
+        ["BEDEX SOL TOPICA BUCAL X 120ML", "TANTUM SOL. BUCAL 0.15%"],
+        0,
+        "el token de 3 letras 'SOL' no valida por prefijo",
     ),
     (
         "vivacina 100 mg",
         ["VITAMINA C 500MG X 10 TAB", "VITAMINA E 400UI X 30 CAPS"],
-        [],
+        0,
         "vivacina ≠ vitamina",
+    ),
+    (
+        "dovilin jarabe adulto",
+        ["BRONCOXOL JARABE ADULTO", "JARABE PARA LA TOS ADULTO"],
+        0,
+        "jarabe/adulto no validan (DOVILIN no existe)",
     ),
     # ── el nombre existe: se queda lo suyo y se va lo ajeno ───────────────
     (
-        "pinvex solución bucal",
-        ["PINVEX 5G-1G/100 ML (E) COFASA", "BEDEX SOL TOPICA BUCAL X 120ML"],
-        ["PINVEX 5G-1G/100 ML (E) COFASA"],
-        "se queda PINVEX, se va BEDEX",
+        "pinvex bucal",
+        ["PINVEX 5G-1G/100 ML (E) COFASA", "TANTUM SOL. BUCAL 0.15%"],
+        1,
+        "se queda PINVEX, se va TANTUM",
     ),
     (
         "nitrofurantoina 100 mg",
         ["NITROFURANTOINA  100MG CAPSULAS X 10 LAPROFF", "MACRODANTINA 50MGX30TAB FARMA"],
-        ["NITROFURANTOINA  100MG CAPSULAS X 10 LAPROFF"],
+        1,
         "macrodantina no es nitrofurantoina por nombre",
     ),
     (
         "metronidazol ovulos",
         ["METRONIDAZOL 500MG X 10OVU ALESS", "OVUMET 500MG X 10OVU"],
-        ["METRONIDAZOL 500MG X 10OVU ALESS"],
+        1,
         "marca distinta no entra por nombre",
     ),
     # ── typos reales: NO se pueden perder ────────────────────────────────
-    (
-        "omeprasol 20 mg",
-        ["OMEPRAZOL 20MG X 10 CAPS GENERICO"],
-        ["OMEPRAZOL 20MG X 10 CAPS GENERICO"],
-        "typo largo omeprasol → omeprazol",
-    ),
-    (
-        "atamle 40 mg",
-        ["ATAMEL 40MG X 10 TAB"],
-        ["ATAMEL 40MG X 10 TAB"],
-        "typo corto atamle → atamel",
-    ),
+    ("omeprasol 20 mg", ["OMEPRAZOL 20MG X 10 CAPS GENERICO"], 1, "omeprasol → omeprazol"),
+    ("atamle 40 mg", ["ATAMEL 40MG X 10 TAB"], 1, "atamle → atamel"),
     (
         "acido acetalicio 100 mg",
         ["ACIDO ACETILSALICILICO 100MG X 10 TAB"],
-        ["ACIDO ACETILSALICILICO 100MG X 10 TAB"],
-        "typo acetalicio → acetilsalicilico",
+        1,
+        "acetalicio → acetilsalicilico",
     ),
+    # ── controles legítimos que ya funcionaban ───────────────────────────
     (
         "losartan potasico 50 mg",
-        ["LOSARTAN POTASICO 50MG X 30 TAB"],
-        ["LOSARTAN POTASICO 50MG X 30 TAB"],
-        "sal del compuesto",
+        ["LOSARTAN POTASICO 50MG X 30 TAB", "LOSARTAN 50MG X 30 TAB"],
+        1,
+        "la sal del compuesto",
     ),
-    # ── pedidos sin nombre (categoría / forma): no se vacía la lista ─────
+    ("sertralina 50 mg", ["SERTRALINA 50MG X 30 TAB"], 1, "principio directo"),
+    ("buscapina amp", ["BUSCAPINA 20MG/ML AMP X 1"], 1, "marca + presentación"),
+    ("enjuague bucal", ["FLODONT ENJUAGUE BUCAL X 180ML"], 1, "'enjuague' sí identifica"),
+    ("agua de rosas", ["AGUA DE ROSAS X 250ML"], 1, "producto de dos palabras"),
     (
-        "crema para hongos",
-        ["CLOTRIMAZOL CREMA 1% X 20GR", "MICONAZOL CREMA 2%"],
-        ["CLOTRIMAZOL CREMA 1% X 20GR", "MICONAZOL CREMA 2%"],
-        "categoría + enfermedad + forma: no hay token de nombre",
+        "venta aceite oregano",
+        ["ACEITE OREGANO X 30ML GOT NATURAL PREMIUM"],
+        1,
+        "'venta' ya no es término",
     ),
+    (
+        "amoxicilina acido clavulanico",
+        ["AMOXICILINA+CLAVULANICO SUSP 400MG"],
+        1,
+        "compuesto con +",
+    ),
+    # ── pedidos sin nombre (forma / síntoma): no se vacía la lista ───────
     (
         "jarabe para la tos",
         ["BROXOL JARABE X 120ML", "TUKOL JARABE X 120ML"],
-        ["BROXOL JARABE X 120ML", "TUKOL JARABE X 120ML"],
+        2,
         "solo forma + síntoma",
     ),
 ]
@@ -105,17 +125,21 @@ CASOS = [
 def main():
     ok = 0
     for termino, devueltos, esperados, nota in CASOS:
-        got = tools._solo_de_la_familia_pedida(termino, [_p(n) for n in devueltos])
-        nombres = [g["nombre"] for g in got]
-        bien = nombres == esperados
+        got = filtrar_relevantes(termino, [_p(n) for n in devueltos])
+        bien = len(got) == esperados
         ok += 1 if bien else 0
-        print(f"  {'OK ' if bien else 'MAL'} {nota}")
-        print(f"       pidió {termino!r} → {len(nombres)}/{len(devueltos)}")
+        print(f"  {'OK ' if bien else 'MAL'} {termino!r:32} -> {len(got)}/{len(devueltos)}  ({nota})")
         if not bien:
-            print(f"       esperado {esperados}")
-            print(f"       obtenido {nombres}")
-    print(f"\n  {ok}/{len(CASOS)} OK")
-    return 0 if ok == len(CASOS) else 1
+            print(f"       esperado {esperados} · obtenido {[g['nombre'] for g in got]}")
+    # la vía y la forma no son tokens de fármaco
+    for termino in ("solunoval bucal", "solunoval solución bucal"):
+        tokens = tokens_farmaco(termino)
+        bien = tokens == ["solunoval"]
+        ok += 1 if bien else 0
+        print(f"  {'OK ' if bien else 'MAL'} tokens_farmaco({termino!r}) = {tokens}")
+    total = len(CASOS) + 2
+    print(f"\n  {ok}/{total} OK")
+    return 0 if ok == total else 1
 
 
 if __name__ == "__main__":
