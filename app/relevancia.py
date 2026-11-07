@@ -589,6 +589,15 @@ def es_relevante(
     senales = tokens_senal(termino, _MIN_LEN_SENAL)
     if not senales:
         return False
+    # SI EL CLIENTE NOMBRÓ UN FÁRMACO, LA COINCIDENCIA TIENE QUE VENIR DE ÉL.
+    # Una forma o una vía de administración no identifican nada: "solunoval solución bucal"
+    # validaba BEDEX SOL TOPICA BUCAL, MIEL DE BORAX TOPICO BUCAL y TANTUM SOL. BUCAL solo
+    # porque compartían 'bucal' (medido en vivo, provider 05, 2026-11-07). Con el fármaco
+    # como única señal, si ese nombre no está en el catálogo la lista queda vacía y el
+    # agente dice que no lo tiene, que es lo correcto.
+    _farmacos = tokens_farmaco(termino)
+    if _farmacos:
+        senales = _farmacos
     # C2/F14.4: con UN solo token de señal, la distancia 2 de typo exige
     # evidencia de parentesco ('vivacina' ≈ 'vitamina' NO cruza de categoría).
     # Se deduce del TÉRMINO para que el resultado no dependa de quién llame.
@@ -614,7 +623,11 @@ def es_relevante(
         # Prefijo en cualquier dirección: el catálogo trunca o el cliente corta.
         # Se exceptúa la sal: 'potasico' empieza por 'potasio' pero es otro compuesto.
         for t in hay_tokens:
-            if (len(t) >= _MIN_LEN_SENAL - 1 and (t.startswith(w) or w.startswith(t))
+            # `_MIN_LEN_SENAL - 1` (3) dejaba que "SOL" —3 letras— validara 'solunovar' por
+            # prefijo, y con eso entraban TANTUM SOL. BUCAL y BEDEX SOL TOPICA BUCAL como
+            # respuesta a "solunoval". Un token de 3 letras en un catálogo es una
+            # abreviatura (SOL, AMP, TAB), no un nombre: no identifica nada.
+            if (len(t) >= _MIN_LEN_SENAL and (t.startswith(w) or w.startswith(t))
                     and not _difiere_por_sal(w, t)):
                 return True
         # Compuesto: el token vive dentro de una palabra más larga.
@@ -686,6 +699,13 @@ _PRESENTACION_AUDIENCIA = {
     # 'omeprazol', así que el rescate elegía la FORMA y devolvía productos que no
     # tienen omeprazol. Una forma farmacéutica nunca identifica el fármaco.
     "pastilla", "pastillas", "pildora", "pildoras",
+    # VÍA DE ADMINISTRACIÓN. Tampoco identifica el fármaco, y es la que se colaba:
+    # el cliente pidió "el precio de solunoval solución bucal", 'solunoval' no existe en
+    # el catálogo del provider 05, y 'bucal' —que sí— matcheó BEDEX SOL TOPICA BUCAL,
+    # MIEL DE BORAX TOPICO BUCAL, FLODONT ENJUAGUE BUCAL y TANTUM SOL. BUCAL. Cuatro
+    # marcas de otra familia presentadas como lo que pidió (medido en vivo, 2026-11-07).
+    "bucal", "bucales", "sublingual", "topica", "topico", "oftalmica", "oftalmico",
+    "otica", "otico", "nasal", "vaginal", "rectal", "intravenosa", "intramuscular",
     # Audiencia
     "adulto", "adultos", "pediatrico", "pediatrica", "nino", "nina", "ninos",
     "ninas", "infantil", "bebe", "bebes", "lactante", "lactantes", "mayores",
