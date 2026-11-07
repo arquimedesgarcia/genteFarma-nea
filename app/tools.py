@@ -8,6 +8,7 @@ turno.
 from __future__ import annotations
 
 import difflib
+import unicodedata
 import logging
 import re
 from datetime import datetime, timezone
@@ -1915,6 +1916,75 @@ def _titulo_de_producto(p: dict[str, Any]) -> str:
     return str(p.get("producto") or p.get("nombre") or p.get("title") or "")
 
 
+# ── LA RESPUESTA TIENE QUE SER DE LA FAMILIA QUE SE PIDIÓ ────────────────────
+# El buscador del catálogo usa OR entre tokens: si el NOMBRE no existe, cae a los
+# demás tokens y contesta con lo que sí hay. Medido en vivo (provider 05, 2026-11-07):
+#
+#   "precio de la solunoval solución bucal"  →  BEDEX SOL TOPICA BUCAL · MIEL DE BORAX
+#                                              TOPICO BUCAL · FLODONT · TANTUM SOL. BUCAL
+#
+# 'solunoval' no está en el catálogo (0 resultados buscándolo solo), pero como
+# 'solución bucal' sí, el cliente recibió cuatro marcas de otra familia como si fueran
+# lo que pidió. Regla del negocio: cuando la respuesta no es precisa es mejor no
+# responder con productos que no sean coherentes.
+_UMBRAL_FAMILIA = 0.82
+
+
+def _palabras_de(texto: str) -> list[str]:
+    """Palabras en minúsculas y sin acentos, para comparar títulos con el pedido."""
+    limpio = unicodedata.normalize("NFD", (texto or "").lower())
+    limpio = "".join(c for c in limpio if unicodedata.category(c) != "Mn")
+    return re.findall(r"[a-z0-9]+", limpio)
+
+
+def _tokens_de_nombre(termino: str) -> list[str]:
+    """Palabras que IDENTIFICAN el producto pedido (no forma, categoría ni relleno)."""
+    base = _termino_sin_forma(termino) or termino or ""
+    salida: list[str] = []
+    for palabra in _palabras_de(base):
+        if len(palabra) < 4:
+            continue
+        if palabra in _PALABRAS_FUNCIONALES or palabra in _ENFERMEDADES:
+            continue
+        if palabra in _CATEGORIAS_TERAPEUTICAS or palabra in _FORMA_CANONICA:
+            continue
+        if palabra in _SALES_FARMACEUTICAS:
+            continue
+        salida.append(palabra)
+    return salida
+
+
+def _solo_de_la_familia_pedida(termino: str, products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Descarta resultados que no comparten NINGÚN token con el nombre pedido.
+
+    Solo actúa cuando el pedido tiene un token identificativo (marca o principio). Si el
+    cliente pidió una categoría o una forma ('crema', 'para hongos') no queda token de
+    nombre y se devuelve todo tal cual: ahí lo correcto es preguntar cuál, no vaciar.
+    """
+    tokens = _tokens_de_nombre(termino)
+    if not tokens or not products:
+        return products
+    utiles: list[dict[str, Any]] = []
+    for p in products:
+        palabras = _palabras_de(_titulo_de_producto(p))
+        if not palabras:
+            continue
+        if any(
+            token in palabras
+            or difflib.SequenceMatcher(None, token, otra).ratio() >= _UMBRAL_FAMILIA
+            for token in tokens
+            for otra in palabras
+            if len(otra) >= 4
+        ):
+            utiles.append(p)
+    if len(utiles) < len(products):
+        logger.info(
+            "familia: '%s' — %d de %d resultados son de otra familia y se descartan",
+            termino, len(products) - len(utiles), len(products),
+        )
+    return utiles
+
+
 def _termino_sin_forma(termino: str) -> str:
     """El término sin la palabra de la forma ('apiret suspensión' → 'apiret').
 
@@ -3694,6 +3764,8 @@ class ToolRuntime:
                 ),
                 "busqueda": nombre,
             }
+        # ANTES de acotar por forma: fuera lo que no es de la familia pedida.
+        products = _solo_de_la_familia_pedida(nombre, list(products))
         # ACOTAR A LA FORMA QUE PIDIÓ (suspensión, tabletas, gotas, crema…). Va aquí, en
         # el punto único de la búsqueda, para que TODOS los caminos lo hereden: el LLM
         # cuando redacta la lista y los backstops cuando la sustituyen.
