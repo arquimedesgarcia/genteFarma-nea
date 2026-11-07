@@ -3394,7 +3394,11 @@ class ToolRuntime:
                 nombre, len(products), self.aviso_forma,
             )
         # Recordar el primer producto (para el backstop de carrito).
-        self.last_product = products[0]
+        # La lista puede quedar VACÍA aquí: `_aplicar_forma` descarta todo cuando la forma
+        # pedida no está y deja la lista en cero con el aviso. `products[0]` reventaba con
+        # IndexError y el turno moría EN SILENCIO (medido en vivo, provider 05, 2026-11-07:
+        # "el precio de solunoval solución bucal" no recibió respuesta).
+        self.last_product = products[0] if products else None
         # Lista completa de productos consultados (para el backstop de
         # contradicción: si el LLM niega disponibilidad pese a haber resultados,
         # reemplazamos su texto con la lista real).
