@@ -3731,8 +3731,13 @@ class ToolRuntime:
                 "buscar_medicamento: '%s' — %d productos tras acotar a la forma · %s",
                 nombre, len(products), self.aviso_forma,
             )
-        if products:
-            self.busquedas_previas[(nombre or "").strip().lower()] = list(products)
+        # Se cachea TAMBIÉN el aviso de forma: el backstop de receta compone el título y el
+        # encabezado con `runtime.aviso_forma`, y al reutilizar solo los productos el aviso
+        # se perdía. Caso real (provider 05, 2026-11-07): "y de la buscapina grageas"
+        # contestó con la AMPOLLA sin decir que grageas no hay.
+        self.busquedas_previas[(nombre or "").strip().lower()] = (
+            list(products), self.aviso_forma,
+        )
         # Recordar el primer producto (para el backstop de carrito).
         # La lista puede quedar VACÍA aquí: `_aplicar_forma` descarta todo cuando la forma
         # pedida no está y deja la lista en cero con el aviso. `products[0]` reventaba con
