@@ -8,6 +8,7 @@ turno.
 from __future__ import annotations
 
 import difflib
+import unicodedata
 import logging
 import re
 from datetime import datetime, timezone
@@ -1915,6 +1916,19 @@ def _titulo_de_producto(p: dict[str, Any]) -> str:
     return str(p.get("producto") or p.get("nombre") or p.get("title") or "")
 
 
+def _clave_busqueda(termino: str) -> str:
+    """Clave del cache de búsquedas del turno.
+
+    Sin acentos, en minúsculas y con los espacios COLAPSADOS: el mismo medicamento llega
+    como 'buscapina grageas' del LLM y como 'buscapina  grageas' del extractor, y con
+    `.strip().lower()` a secas el cache fallaba en silencio (por eso la búsqueda se repetía
+    y el aviso de forma no se restauraba).
+    """
+    base = unicodedata.normalize("NFD", (termino or "").lower())
+    base = "".join(c for c in base if unicodedata.category(c) != "Mn")
+    return " ".join(base.split())
+
+
 def _termino_sin_forma(termino: str) -> str:
     """El término sin la palabra de la forma ('apiret suspensión' → 'apiret').
 
@@ -3735,8 +3749,14 @@ class ToolRuntime:
         # encabezado con `runtime.aviso_forma`, y al reutilizar solo los productos el aviso
         # se perdía. Caso real (provider 05, 2026-11-07): "y de la buscapina grageas"
         # contestó con la AMPOLLA sin decir que grageas no hay.
-        self.busquedas_previas[(nombre or "").strip().lower()] = (
+        self.busquedas_previas[_clave_busqueda(nombre)] = (
             list(products), self.aviso_forma,
+        )
+        logger.info(
+            "buscar_medicamento: cache del turno → %s (%d productos, aviso=%r)",
+            sorted(self.busquedas_previas),
+            len(products),
+            self.aviso_forma[:60],
         )
         # Recordar el primer producto (para el backstop de carrito).
         # La lista puede quedar VACÍA aquí: `_aplicar_forma` descarta todo cuando la forma
