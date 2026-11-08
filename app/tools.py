@@ -2181,7 +2181,10 @@ class ToolRuntime:
         # un turno que se alargaba hasta dejar al cliente sin respuesta (medido en vivo,
         # provider 05, 2026-11-07: dos mensajes a las 22:36:42 y 22:36:44, una sola
         # respuesta, y el turno en vuelo más de 3 minutos).
-        self.busquedas_previas: dict[str, list[dict[str, Any]]] = {}
+        self.busquedas_previas: dict[str, Any] = {}
+        # Líneas del mensaje del cliente ya usadas para resolver una FORMA. Una línea
+        # contesta por un solo medicamento (ver `_forma_del_pedido`).
+        self.lineas_forma_usadas: set[str] = set()
         # Último término consultado con buscar_medicamento (para re-consultar
         # cuando el cliente refina con miligramo/marca sin repetir el nombre).
         self.last_term = ""
@@ -2600,6 +2603,10 @@ class ToolRuntime:
 
     async def _buscar_medicamento(self, args: dict[str, Any]) -> dict[str, Any]:
         nombre = str(args.get("nombre") or "").strip()
+        # El término TAL COMO LO PIDIERON. Más abajo `nombre` se queda con el sustantivo
+        # ('buscapina grageas' → 'buscapina') y con él se pierde la forma pedida, así que
+        # se guarda aparte para el cache del turno y para recuperar la forma.
+        nombre_pedido = nombre
         # Se resetean en CADA búsqueda: si no, el flag de la búsqueda anterior
         # ('calox' era un laboratorio) se arrastra al siguiente medicamento de la misma
         # receta y lo saltaría en silencio.
@@ -3418,9 +3425,12 @@ class ToolRuntime:
         # encabezado con `runtime.aviso_forma`, y al reutilizar solo los productos el aviso
         # se perdía. Caso real (provider 05, 2026-11-07): "y de la buscapina grageas"
         # contestó con la AMPOLLA sin decir que grageas no hay.
-        self.busquedas_previas[_clave_busqueda(nombre)] = (
-            list(products), self.aviso_forma,
-        )
+        # Bajo las DOS claves: el backstop pide 'buscapina grageas' (con forma) y aquí el
+        # término ya es el sustantivo 'buscapina'. Con una sola clave el cache nunca acertaba
+        # y la búsqueda se repetía (visto en producción, provider 05, 2026-11-08).
+        for _clave_cache in {_clave_busqueda(nombre), _clave_busqueda(nombre_pedido)}:
+            if _clave_cache:
+                self.busquedas_previas[_clave_cache] = (list(products), self.aviso_forma)
         logger.info(
             "buscar_medicamento: cache del turno → %s (%d productos, aviso=%r)",
             sorted(self.busquedas_previas),
@@ -3485,11 +3495,20 @@ class ToolRuntime:
         clave = _normalizar_tildes((nombre or "").lower()).split()
         if not clave:
             return None, None
+        # CADA LÍNEA SIRVE PARA UN SOLO MEDICAMENTO. Con el mismo fármaco dos veces
+        # ("precio de la buscapina amp" / "y de la buscapina grageas") la primera línea
+        # contestaba por las dos: el segundo medicamento heredaba la forma del primero
+        # ('inyectable') y el aviso "no tengo grageas" no salía nunca (medido en vivo,
+        # provider 05, 2026-11-08).
         for linea in re.split(r"[\n;,]|\s+y\s+", texto):
             if clave[0] not in _normalizar_tildes(linea.lower()):
                 continue
+            marca_linea = _normalizar_tildes(linea.strip().lower())
+            if marca_linea in self.lineas_forma_usadas:
+                continue
             familia, etiqueta = _forma_pedida(linea)
             if familia:
+                self.lineas_forma_usadas.add(marca_linea)
                 return familia, etiqueta
         return None, None
 
