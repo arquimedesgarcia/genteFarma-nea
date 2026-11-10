@@ -2338,6 +2338,11 @@ class ToolRuntime:
         # flags de backstops de resumen/finalizar (evitan loops).
         self.summary_forced = False
         self.finalize_forced = False
+        # G13 (señales de estado aditivas): la acción afirmada ¿ocurrió de verdad
+        # en ESTE turno? pedido_finalizado solo si _finalizar_pedido devolvió ok;
+        # carrito_agregado_turno si _agregar_al_carrito agregó (modelo o backstop).
+        self.pedido_finalizado = False
+        self.carrito_agregado_turno = False
         # true si este turno se consultó un medicamento que NO está en el catálogo.
         # Lo usa el turno para escalar a humano de forma determinista (no depender
         # de que el LLM llame handoff).
@@ -4260,6 +4265,8 @@ class ToolRuntime:
         # doblada (pidió 1 caja y quedan 2). Devolvemos ok sin tocar el carrito.
         sku_final = str(product_id or "").strip()
         if sku_final and sku_final in self.backstop_added_skus:
+            # G13: el backstop YA agregó este SKU en el turno → la acción ocurrió.
+            self.carrito_agregado_turno = True
             return {
                 "ok": True,
                 "dedup": True,
@@ -4437,6 +4444,8 @@ class ToolRuntime:
             float(precio_usd) if precio_usd is not None else None,
             float(precio_bs) if precio_bs is not None else None,
         )
+        # G13: la acción de agregar al carrito SÍ ocurrió en este turno.
+        self.carrito_agregado_turno = True
         # EL CARRITO CAMBIÓ DESPUÉS DEL RESUMEN: el flag `cart_summary_shown` debe
         # volver a False. Si no, el cliente que ya vio el resumen, agrega otra cosa y
         # dice "LISTO" finalizaría SIN ver el resumen actualizado — cerrando un pedido
@@ -4642,6 +4651,8 @@ class ToolRuntime:
             )
         except Exception as exc:  # no derribe el turno: best-effort
             logger.warning("tools: no pude registrar pedido en el CRM: %s", exc)
+        # G13: el pedido SÍ se finalizó en este turno (había items y se cerró).
+        self.pedido_finalizado = True
         await self._ctx.store.cart_clear(self._conv.id)
         # El pedido queda CERRADO: la próxima consulta de medicamento arranca un
         # carrito nuevo en vez de acumular sobre el ya procesado. Esto es lo que

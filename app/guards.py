@@ -566,3 +566,73 @@ def contiene_toolcall_json(texto: str) -> bool:
         if _NOMBRES_HERRAMIENTA.search(m.group(1)) and '"name"' in m.group(1).lower():
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# G13 — Afirmación de una ACCIÓN que no ocurrió
+# ---------------------------------------------------------------------------
+# El juez marca `alucinacion` cuando el agente afirma una acción que nunca pasó.
+# Caso medido (comprador_decidido): "Listo, quedó registrado." con el carrito
+# VACÍO y SIN llamada a finalizar_pedido. Rojo visible al cliente.
+#
+# El detector es LÉXICO por familia. El veto solo dispara cuando la frase
+# aparece Y la señal de estado del turno dice que la acción NO ocurrió (la
+# condición de estado se evalúa en turn.py). La frase sola NUNCA dispara.
+# Familias (spec G13 §2): pedido_registrado / agregado_al_pedido /
+# apartado_o_agendado. No juzga escalado (G11), ni promesas, ni precios/stock.
+# Nota: los stems son PARCIALES ('registrad' → registrado/registrada), así que la
+# alternativa NO lleva `\b` de cierre (rompería 'registrado'); el `\b` de apertura sí.
+G13_PEDIDO_REGISTRADO = re.compile(
+    r"\b(qued[oó]\s+registrad|lo\s+registr[ée]|"
+    r"finalic[ée]\s+(tu|el|su)\s+pedido|cerr[ée]\s+(tu|el|su)\s+pedido|"
+    r"pedido\s+(ya\s+)?(qued[oó]\s+)?(registrad|confirmad|finalizad|cerrad)|"
+    r"tu\s+pedido\s+(ya\s+)?(qued[oó]|est[áa])\s+(registrad|list)|"
+    r"listo,?\s+qued[oó]\s+registrad)",
+    re.I,
+)
+
+G13_AGREGADO_AL_PEDIDO = re.compile(
+    r"\b((ya\s+)?lo\s+(agregu[ée]|a[ñn]ad[íi])\s+(a\s+tu|al)\s+(pedido|carrito)|"
+    r"(ya\s+)?(agregu[ée]|a[ñn]ad[íi])\s+\w+\s+(a\s+tu|al)\s+(pedido|carrito)|"
+    r"ya\s+est[áa]\s+en\s+tu\s+pedido)",
+    re.I,
+)
+
+G13_APARTADO_O_AGENDADO = re.compile(
+    r"\b((te\s+)?lo\s+(apart[ée]|reserv[ée])|"
+    r"(te\s+)?(lo\s+)?agend[ée]|queda\s+(apartad|reservad)|"
+    r"reservad[oa]\s+a\s+tu\s+nombre)",
+    re.I,
+)
+
+# Guarda de negación: no dispara si el texto NIEGA el hecho (spec §2.1).
+G13_NEGACION = re.compile(
+    r"\bno\s+(puedo|se\s+puede|hay|qued[oó]|logr[ée]|alcanc[ée]|pude)\b",
+    re.I,
+)
+
+# Plantilla constante (spec §2.4): no afirma nada nuevo, ofrece dejarlo listo.
+TPL_G13_ACCION = (
+    "No puedo confirmar que eso quedara registrado: en este chat no hay un "
+    "pedido cerrado. Si quieres, lo dejamos listo ahora — dime el medicamento "
+    "y cuántas cajas."
+)
+
+
+def familia_accion_afirmada(texto: str) -> str | None:
+    """G13: devuelve la familia de acción que el AGENTE afirma —'pedido',
+    'agregado' o 'apartado'— o None. Con guarda de negación: una frase que
+    NIEGA el hecho ('no puedo cerrar el pedido') no cuenta. La señal de estado
+    (si la acción ocurrió) la evalúa turn.py; aquí solo está la detección léxica.
+    """
+    if not texto:
+        return None
+    if G13_NEGACION.search(texto):
+        return None
+    if G13_PEDIDO_REGISTRADO.search(texto):
+        return "pedido"
+    if G13_AGREGADO_AL_PEDIDO.search(texto):
+        return "agregado"
+    if G13_APARTADO_O_AGENDADO.search(texto):
+        return "apartado"
+    return None

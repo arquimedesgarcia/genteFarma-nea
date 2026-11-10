@@ -251,6 +251,17 @@ async def handle_flush(ctx: AppContext, identity: str, items: list[Any]) -> None
         logger.exception("turno de %s reventó — silencio", identity)
 
 
+def _g13_accion_ocurrio(runtime: ToolRuntime, familia: str) -> bool:
+    """G13: ¿la acción de la familia detectada SÍ ocurrió en este turno?
+    pedido→pedido_finalizado; agregado→carrito_agregado_turno; apartado→nunca
+    (esta farmacia no tiene herramienta de agenda/apartado)."""
+    if familia == "pedido":
+        return bool(getattr(runtime, "pedido_finalizado", False))
+    if familia == "agregado":
+        return bool(getattr(runtime, "carrito_agregado_turno", False))
+    return False  # apartado/agendado: no existe la herramienta → nunca ocurrió
+
+
 async def run_turn(
     ctx: AppContext, identity: str, inbound: list[InboundMessage]
 ) -> None:
@@ -1036,6 +1047,16 @@ async def run_turn(
         elif guards.contiene_toolcall_json(final_text):
             logger.warning("guarda G12 VETO: tool-call JSON cruda en texto final — plantilla G12")
             final_text = guards.TPL_G12_TOOLCALL
+        # G13 — el agente afirmó una ACCIÓN que no ocurrió (pedido registrado,
+        # agregado al carrito, apartado). Dispara SOLO si la frase de la familia
+        # aparece Y la señal de estado del turno dice que la acción NO sucedió.
+        # La frase sola nunca veta. No juzga escalado (G11), promesas ni precios.
+        elif (
+            (_fam_g13 := guards.familia_accion_afirmada(final_text))
+            and not _g13_accion_ocurrio(runtime, _fam_g13)
+        ):
+            logger.warning("guarda G13: afirmó una acción que no ocurrió (%s) — plantilla G13", _fam_g13)
+            final_text = guards.TPL_G13_ACCION
         # G9 — cliente pide hablar con humano pero el LLM no llamó handoff:
         # el bench marcaba el cierre seco ("Entendido…") como debio_escalar/tono.
         # Plantilla constante empática + handoff garantizado.
