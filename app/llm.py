@@ -37,29 +37,6 @@ class LlmReply:
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 class Llm(Protocol):
-    def _extras(self) -> dict[str, Any]:
-        """Parámetros opcionales fuera del contrato OpenAI; vacíos = no enviar."""
-        if not self._extras_ok:
-            return {}
-        extra: dict[str, Any] = {}
-        if self._reasoning_effort:
-            extra["reasoning"] = {"effort": self._reasoning_effort}
-        if self._provider_sort:
-            extra["provider"] = {"sort": self._provider_sort}
-        return extra
-
-    def _quiza_por_los_extras(self, exc: Exception) -> None:
-        """Desactiva los hints si el proveedor los rechaza; nunca sacrifica respuesta."""
-        if not self._extras_ok:
-            return
-        message = str(exc).lower()
-        if "reasoning" in message or "provider" in message:
-            self._extras_ok = False
-            logger.warning(
-                "llm: el proveedor rechazó los ajustes opcionales; se desactivan "
-                "para este proceso y se reintenta sin ellos"
-            )
-
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -381,6 +358,29 @@ class OpenAiLlm:
             if attempt == 0:
                 await asyncio.sleep(1.0)
         raise LlmExhausted(str(last_error))
+
+    def _extras(self) -> dict[str, Any]:
+        """Parámetros opcionales fuera del contrato OpenAI; vacíos = no enviar."""
+        if not self._extras_ok:
+            return {}
+        extra: dict[str, Any] = {}
+        if self._reasoning_effort:
+            extra["reasoning"] = {"effort": self._reasoning_effort}
+        if self._provider_sort:
+            extra["provider"] = {"sort": self._provider_sort}
+        return extra
+
+    def _quiza_por_los_extras(self, exc: Exception) -> None:
+        """Desactiva los hints si el proveedor los rechaza; nunca sacrifica respuesta."""
+        if not self._extras_ok:
+            return
+        message = str(exc).lower()
+        if "reasoning" in message or "provider" in message:
+            self._extras_ok = False
+            logger.warning(
+                "llm: el proveedor rechazó los ajustes opcionales; se desactivan "
+                "para este proceso y se reintenta sin ellos"
+            )
 
     async def complete(
         self,
