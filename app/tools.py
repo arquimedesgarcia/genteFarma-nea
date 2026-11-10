@@ -8,6 +8,7 @@ turno.
 from __future__ import annotations
 
 import difflib
+import unicodedata
 import logging
 import re
 from datetime import datetime, timezone
@@ -1915,6 +1916,19 @@ def _titulo_de_producto(p: dict[str, Any]) -> str:
     return str(p.get("producto") or p.get("nombre") or p.get("title") or "")
 
 
+def _clave_busqueda(termino: str) -> str:
+    """Clave del cache de búsquedas del turno.
+
+    Sin acentos, en minúsculas y con los espacios COLAPSADOS: el mismo medicamento llega
+    como 'buscapina grageas' del LLM y como 'buscapina  grageas' del extractor, y con
+    `.strip().lower()` a secas el cache fallaba en silencio (por eso la búsqueda se repetía
+    y el aviso de forma no se restauraba).
+    """
+    base = unicodedata.normalize("NFD", (termino or "").lower())
+    base = "".join(c for c in base if unicodedata.category(c) != "Mn")
+    return " ".join(base.split())
+
+
 def _termino_sin_forma(termino: str) -> str:
     """El término sin la palabra de la forma ('apiret suspensión' → 'apiret').
 
@@ -2231,6 +2245,16 @@ class ToolRuntime:
         # sugerir_generico). Sirve como backstop anti-alucinación: si el usuario
         # preguntó por un medicamento y NO se consultó, forzamos la consulta.
         self.consulted_catalog = False
+        # RESULTADOS YA OBTENIDOS EN ESTE TURNO, por término. El backstop de receta
+        # vuelve a pedir cada medicamento y con él se repetían búsquedas que el LLM ya
+        # había hecho segundos antes: misma consulta al catálogo, misma cascada de typos y
+        # un turno que se alargaba hasta dejar al cliente sin respuesta (medido en vivo,
+        # provider 05, 2026-11-07: dos mensajes a las 22:36:42 y 22:36:44, una sola
+        # respuesta, y el turno en vuelo más de 3 minutos).
+        self.busquedas_previas: dict[str, Any] = {}
+        # Líneas del mensaje del cliente ya usadas para resolver una FORMA. Una línea
+        # contesta por un solo medicamento (ver `_forma_del_pedido`).
+        self.lineas_forma_usadas: set[str] = set()
         # Último término consultado con buscar_medicamento (para re-consultar
         # cuando el cliente refina con miligramo/marca sin repetir el nombre).
         self.last_term = ""
@@ -2250,6 +2274,12 @@ class ToolRuntime:
         # de dejar la duda. None cuando no hubo corrección.
         self.corregido_desde: str | None = None
         self.corregido_a: str | None = None
+        # Mapeo marca → principio activo que el LLM ADIVINÓ (no viene de app/aliases.py).
+        # Se anota (marca, principio) para que la respuesta no pueda AFIRMAR la
+        # equivalencia: "Vivacina es sertralina, y sí la tengo" (prueba en vivo con
+        # tráfico real de Ospino, provider 05, 2026-11-06) — la misma palabra había dado
+        # DOXICICLINA dos turnos antes. Sin certeza se pregunta, no se afirma.
+        self.principio_inferido: tuple[str, str] | None = None
         # Último producto consultado con buscar_medicamento. Lo usan los backstops
         # de carrito: si el cliente responde con una cantidad y el LLM no llama
         # agregar_al_carrito, forzamos el add con este producto.
@@ -2862,6 +2892,10 @@ class ToolRuntime:
 
     async def _buscar_medicamento(self, args: dict[str, Any]) -> dict[str, Any]:
         nombre = str(args.get("nombre") or "").strip()
+        # El término TAL COMO LO PIDIERON. Más abajo `nombre` se queda con el sustantivo
+        # ('buscapina grageas' → 'buscapina') y con él se pierde la forma pedida, así que
+        # se guarda aparte para el cache del turno y para recuperar la forma.
+        nombre_pedido = nombre
         # Se resetean en CADA búsqueda: si no, el flag de la búsqueda anterior
         # ('calox' era un laboratorio) se arrastra al siguiente medicamento de la misma
         # receta y lo saltaría en silencio.
@@ -3718,8 +3752,28 @@ class ToolRuntime:
                 "buscar_medicamento: '%s' — %d productos tras acotar a la forma · %s",
                 nombre, len(products), self.aviso_forma,
             )
+        # Se cachea TAMBIÉN el aviso de forma: el backstop de receta compone el título y el
+        # encabezado con `runtime.aviso_forma`, y al reutilizar solo los productos el aviso
+        # se perdía. Caso real (provider 05, 2026-11-07): "y de la buscapina grageas"
+        # contestó con la AMPOLLA sin decir que grageas no hay.
+        # Bajo las DOS claves: el backstop pide 'buscapina grageas' (con forma) y aquí el
+        # término ya es el sustantivo 'buscapina'. Con una sola clave el cache nunca acertaba
+        # y la búsqueda se repetía (visto en producción, provider 05, 2026-11-08).
+        for _clave_cache in {_clave_busqueda(nombre), _clave_busqueda(nombre_pedido)}:
+            if _clave_cache:
+                self.busquedas_previas[_clave_cache] = (list(products), self.aviso_forma)
+        logger.info(
+            "buscar_medicamento: cache del turno → %s (%d productos, aviso=%r)",
+            sorted(self.busquedas_previas),
+            len(products),
+            self.aviso_forma[:60],
+        )
         # Recordar el primer producto (para el backstop de carrito).
-        self.last_product = products[0]
+        # La lista puede quedar VACÍA aquí: `_aplicar_forma` descarta todo cuando la forma
+        # pedida no está y deja la lista en cero con el aviso. `products[0]` reventaba con
+        # IndexError y el turno moría EN SILENCIO (medido en vivo, provider 05, 2026-11-07:
+        # "el precio de solunoval solución bucal" no recibió respuesta).
+        self.last_product = products[0] if products else None
         # Lista completa de productos consultados (para el backstop de
         # contradicción: si el LLM niega disponibilidad pese a haber resultados,
         # reemplazamos su texto con la lista real).
@@ -3772,11 +3826,20 @@ class ToolRuntime:
         clave = _normalizar_tildes((nombre or "").lower()).split()
         if not clave:
             return None, None
+        # CADA LÍNEA SIRVE PARA UN SOLO MEDICAMENTO. Con el mismo fármaco dos veces
+        # ("precio de la buscapina amp" / "y de la buscapina grageas") la primera línea
+        # contestaba por las dos: el segundo medicamento heredaba la forma del primero
+        # ('inyectable') y el aviso "no tengo grageas" no salía nunca (medido en vivo,
+        # provider 05, 2026-11-08).
         for linea in re.split(r"[\n;,]|\s+y\s+", texto):
             if clave[0] not in _normalizar_tildes(linea.lower()):
                 continue
+            marca_linea = _normalizar_tildes(linea.strip().lower())
+            if marca_linea in self.lineas_forma_usadas:
+                continue
             familia, etiqueta = _forma_pedida(linea)
             if familia:
+                self.lineas_forma_usadas.add(marca_linea)
                 return familia, etiqueta
         return None, None
 
@@ -3889,6 +3952,22 @@ class ToolRuntime:
         """
         if not self._provider_id:
             return []
+        # SIN ALIAS CURADO NO HAY CERTEZA. Medido en vivo con tráfico real (provider 05,
+        # 2026-11-06): la MISMA palabra dio tres principios distintos en tres turnos —
+        # 'vivacina' → doxiciclina, sertralina y ácido ascórbico. El LLM no sabe qué marca
+        # es y adivina por parecido. La regla del negocio es explícita: cuando la respuesta
+        # no es precisa, mejor no ofrecer productos incoherentes. Por eso el mapeo
+        # automático marca→principio solo se usa si viene de la tabla curada
+        # (`app/aliases.py` + `med_aliases` en la BD); si no, se responde que no se tiene y
+        # se pide el nombre de la caja.
+        from app import aliases as _aliases
+
+        if not _aliases.es_alias(nombre):
+            logger.info(
+                "principio activo: '%s' no está en la tabla de alias curada — no se adivina",
+                nombre,
+            )
+            return []
         try:
             reply = await self._ctx.llm.complete(
                 [
@@ -3901,7 +3980,10 @@ class ToolRuntime:
                             "y sin puntuación. Ejemplo: 'depomedrol' → "
                             "'metilprednisolona'; 'atamel' → 'paracetamol'; "
                             "'buscapina' → 'hioscina'. Si no conoces el principio "
-                            "activo, responde exactamente 'desconocido'."
+                            "activo, responde exactamente 'desconocido'. "
+                            "NO ADIVINES por parecido con otra palabra ni por lo que "
+                            "suene: si no estás seguro de que esa marca exista en "
+                            "Venezuela, responde exactamente 'desconocido'."
                         ),
                     }
                 ],
@@ -3921,6 +4003,9 @@ class ToolRuntime:
             # caso reportado de la receta "ESOZ 40 MG"). Se reinyecta la dosis
             # que el cliente ya pidió; si no traía, se busca igual que antes.
             dosis = _extraer_dosis(nombre)
+            # Se anota el mapeo como INFERIDO: la respuesta no podrá afirmar
+            # "«X» es <principio>", solo ofrecerlo preguntando.
+            self.principio_inferido = (nombre.strip().lower(), principio)
             consulta = f"{principio} {dosis}".strip() if dosis else principio
             data = await self._ctx.crm.get_products(
                 self._provider_id, q=consulta, limit=20

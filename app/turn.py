@@ -11,6 +11,7 @@ import difflib
 import json
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, AsyncIterator
@@ -61,6 +62,7 @@ from app.tools import (
     _VIAS_ADMINISTRACION,
     _sin_frase_de_indicacion,
     _termino_es_medicamento_plausible,
+    _clave_busqueda,
     _termino_sin_forma,
     _titulo_normalizado,
     _tokens_de_titulo,
@@ -141,6 +143,11 @@ async def _typing_heartbeat(ctx: AppContext, crm_conv_id: str, stop: asyncio.Eve
 # WhatsApp: límite duro por mensaje (el CRM valida ≤4096 y WhatsApp corta/da
 # error por encima). Margen de seguridad para encabezados de partes.
 WA_MAX_CHARS = 4000
+# Presupuesto de tiempo para consultar los medicamentos de una lista en un mismo turno.
+# Pasado ese tiempo se responde con lo ya consultado y se dice qué quedó pendiente: un
+# turno eterno deja al cliente sin respuesta y bloquea los mensajes que llegan entretanto
+# (el lock es por identidad). Medido en vivo, provider 05, 2026-11-07.
+PRESUPUESTO_BACKSTOP_S = 45
 
 
 def _partir_mensaje_largo(texto: str, max_chars: int) -> list[str]:
@@ -984,10 +991,17 @@ async def run_turn(
             not es_negativa_con_carrito
             and not runtime.last_products
             and not runtime.cart_summary_text
+            and not _montos_respaldados(final_text, runtime)
             and guards.afirma_dato_catalogo(final_text)
         ):
             logger.warning("guarda G6 VETO: datos de producto sin respaldo de catálogo — plantilla verificación")
-            final_text = guards.TPL_VERIFICACION_CATALOGO
+            # Con una lista ya mostrada, la pregunta correcta es POR LA OPCIÓN, no
+            # "¿cuál es el medicamento que buscas?".
+            final_text = (
+                guards.TPL_VERIFICACION_CATALOGO_CON_LISTA
+                if runtime.last_options
+                else guards.TPL_VERIFICACION_CATALOGO
+            )
         # G7 — eco: el agente devuelve casi literalmente el mensaje del cliente
         # en lugar de ejecutar la acción (buscar, agregar, confirmar) o pedir
         # el dato que falta. Caso QA 'Comprador decidido': el agente repitió
@@ -1087,6 +1101,8 @@ async def run_turn(
         # El encabezado no puede prometer la concentración que el mensaje niega.
         clean = _titulo_sin_dosis_negada(clean)
         clean = _con_confirmacion_carrito(clean, runtime)
+        # Ninguna respuesta puede AFIRMAR que una marca es un principio activo adivinado.
+        clean = _sin_equivalencia_inventada(clean, runtime)
         # EL RESUMEN NO SE PRESENTA SIN EL MÉTODO DE ENTREGA.
         #
         # Caso real (provider 19, 2026-10-31): el cliente "Agrégame 3 del 1" y recibió el
@@ -2146,6 +2162,8 @@ async def _tool_loop(
                         len(medicamentos),
                     )
                     grupos: list[tuple[str, list[dict[str, Any]]]] = []
+                    _t0_backstop = time.monotonic()
+                    sin_consultar: list[str] = []
                     no_disponibles: list[str] = []
                     # Términos que se descartaron por no ser un medicamento (solo la marca
                     # del laboratorio o solo la sal). Si no queda ningún grupo, la respuesta
@@ -2159,8 +2177,41 @@ async def _tool_loop(
                     for med in medicamentos:
                         runtime.corregido_desde = None
                         runtime.corregido_a = None
-                        result = await runtime.execute("buscar_medicamento", {"nombre": med})
-                        prods = (result or {}).get("products") or []
+                        # PRESUPUESTO DE TIEMPO: un turno que se eterniza deja al cliente
+                        # sin respuesta y bloquea los mensajes que llegan entretanto (el
+                        # lock por identidad los hace esperar). Si se agota, se responde
+                        # con lo consultado y se dice qué falta.
+                        if time.monotonic() - _t0_backstop > PRESUPUESTO_BACKSTOP_S:
+                            pendientes = medicamentos[medicamentos.index(med):]
+                            logger.warning(
+                                "backstop receta: presupuesto de %ds agotado — se responde "
+                                "con lo consultado y quedan %s",
+                                PRESUPUESTO_BACKSTOP_S, pendientes[:3],
+                            )
+                            # NO son "no disponibles": no se alcanzaron a consultar.
+                            # Decirlo así sería mentir sobre el catálogo.
+                            sin_consultar = [p for p in pendientes]
+                            break
+                        clave_med = _clave_busqueda(med)
+                        if clave_med in runtime.busquedas_previas:
+                            # Ya se consultó en ESTE turno (el LLM lo buscó hace un
+                            # momento): se reutiliza. Sin esto, la misma búsqueda se
+                            # repetía y el turno tardaba el doble.
+                            prods, aviso_previo = runtime.busquedas_previas[clave_med]
+                            prods = list(prods)
+                            # El aviso de forma viaja CON los productos: sin esto se
+                            # reutiliza la lista y se pierde el "No tengo X en grageas".
+                            runtime.aviso_forma = aviso_previo
+                            logger.info(
+                                "backstop receta: '%s' ya consultado en este turno — se reutiliza",
+                                med,
+                            )
+                        else:
+                            result = await runtime.execute("buscar_medicamento", {"nombre": med})
+                            prods = (result or {}).get("products") or []
+                            runtime.busquedas_previas[clave_med] = (
+                                list(prods), getattr(runtime, "aviso_forma", "") or "",
+                            )
                         # EL TÉRMINO ERA EL LABORATORIO, NO UN MEDICAMENTO.
                         # Caso real (conv 7, provider 05, 2026-10-27): la foto de una caja de
                         # 'Fexofenadina Clorhidrato CALOX' se leyó como dos medicamentos,
@@ -2430,7 +2481,10 @@ async def _tool_loop(
                                     ),
                                 )
                                 return None  # turno atendido
-                        receta_final = _formatear_receta(grupos, no_disponibles, avisos)
+                        receta_final = _formatear_receta(
+                            grupos, no_disponibles, avisos,
+                            sin_consultar=sin_consultar,
+                        )
                         # La receta se envía DIRECTO desde aquí, así que no pasa por el
                         # post-proceso de `run_turn`: el encabezado se corrige aquí.
                         receta_final = _titulo_sin_dosis_negada(receta_final)
@@ -6848,6 +6902,150 @@ def _filtrar_por_envase(
     return out or products
 
 
+# Palabras que nombran la FORMA farmacéutica o el vehículo, no un producto: un aviso
+# "No tengo BUCAL" no dice nada al cliente (ver `_aviso_no_lo_tengo`).
+_PALABRAS_DE_FORMA = frozenset({
+    "bucal", "oral", "sublingual", "topica", "topico", "oftalmica", "oftalmico", "otica",
+    "nasal", "rectal", "vaginal", "inyectable", "solucion", "suspension", "jarabe",
+    "tableta", "tabletas", "tab", "tabs", "comprimido", "comprimidos", "comp", "capsula",
+    "capsulas", "cap", "caps", "ampolla", "ampollas", "amp", "inyectable", "gel", "crema",
+    "unguento", "pomada", "locion", "shampoo", "gotas", "spray", "polvo", "granulado",
+    "sobre", "sob", "supositorio", "supositorios", "ovulo", "ovulos", "ovu", "parche",
+    "sol", "susp", "jab", "pediatrico", "adulto", "infantil", "recubiertas", "recubierta",
+})
+
+
+def _norm_simple(texto: str) -> str:
+    """minúsculas y sin acentos, para comparar palabras sueltas."""
+    base = (texto or "").strip().lower()
+    for a, b in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ü", "u")):
+        base = base.replace(a, b)
+    return base
+
+
+# "Vivacina es sertralina", "«X» corresponde a Y", "se llama Y"…
+_RE_AFIRMA_EQUIVALENCIA = re.compile(
+    r"\b(?:es|corresponde\s+a|equivale\s+a|se\s+llama|su\s+principio\s+activo\s+es)\b",
+    re.IGNORECASE,
+)
+
+
+# Ojo con los miles: `\d+(?:[.,]\d{1,2})?` cortaba "Bs 9.415,18" en "9.41". El primer
+# grupo reconoce 9.415,18 / 2.629 / 1.234.567,89; el segundo, 7,02 / 7.02.
+_RE_MONTO_CITADO = re.compile(
+    r"\$\s*(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
+    r"|\bBs\.?\s*(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)",
+    re.I,
+)
+
+
+def _montos_respaldados(texto: str, runtime: Any) -> bool:
+    """¿Los importes que cita la respuesta son de la lista que el cliente YA vio?
+
+    G6 vetaba "datos de producto sin respaldo de catálogo" mirando solo
+    `last_products` (los del turno actual). Cuando el cliente contesta "Este" o
+    "Si tienen disponibilidad." el turno no busca nada, `last_products` está vacío, y el
+    agente —que SÍ tiene respaldo, la lista del turno anterior— acababa recibiendo la
+    plantilla "No tengo información confirmada sobre ese medicamento…", que no viene a
+    cuento. Medido en la prueba en vivo del 2026-11-07 (4 de 4 vetos G6).
+    """
+    opciones = getattr(runtime, "last_options", None) or []
+    if not opciones:
+        return False
+    reales: list[float] = []
+    for p in opciones:
+        for clave in ("precio", "precioBs", "precio_bs"):
+            v = p.get(clave) if isinstance(p, dict) else None
+            if isinstance(v, (int, float)):
+                reales.append(round(float(v), 2))
+            elif isinstance(v, str):
+                try:
+                    reales.append(round(float(v.replace(".", "").replace(",", ".")), 2))
+                except ValueError:
+                    pass
+    if not reales:
+        return False
+    citados = [v for v in (_a_float(a or b) for a, b in _RE_MONTO_CITADO.findall(texto)) if v is not None]
+    if not citados:
+        return False
+    return all(any(abs(c - r) < 0.02 for r in reales) for c in citados)
+
+
+def _a_float(cifra: str) -> float | None:
+    """'7,02' → 7.02 · '6.290,78' → 6290.78 · '2.629' → 2629.0 (formato venezolano)."""
+    s = (cifra or "").strip()
+    if not s:
+        return None
+    tiene_coma, tiene_punto = "," in s, "." in s
+    try:
+        if tiene_coma and tiene_punto:
+            return float(s.replace(".", "").replace(",", "."))
+        if tiene_coma:
+            return float(s.replace(",", "."))
+        if tiene_punto:
+            entero, _, dec = s.partition(".")
+            if len(dec) == 3 and entero:          # '2.629' son miles, no decimales
+                return float(s.replace(".", ""))
+            return float(s)
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _sin_equivalencia_inventada(texto: str, runtime: Any) -> str:
+    """Quita de la respuesta la AFIRMACIÓN de que una marca es un principio activo.
+
+    Prueba en vivo con tráfico real de Ospino (provider 05, 2026-11-06):
+
+        cliente: "tienes vivacina"
+        agente : "Vivacina es sertralina, y sí la tengo" + lista de SERTRALINA
+
+    y dos turnos antes, con la MISMA palabra, había contestado DOXICICLINA. El mapeo lo
+    adivina el LLM en `_buscar_por_principio_activo`; si no viene de `aliases.py` no hay
+    certeza, y afirmarlo es exactamente lo que la regla del negocio prohíbe: si la
+    respuesta no es precisa, mejor no ofrecer productos incoherentes.
+
+    Se conserva el ofrecimiento (útil: 'depomedrol' → metilprednisolona), pero como
+    PREGUNTA y sin afirmar la equivalencia.
+    """
+    info = getattr(runtime, "principio_inferido", None)
+    if not info or not texto:
+        return texto
+    marca, principio = info
+    marca_n = _norm_simple(marca)
+    principio_n = _norm_simple(principio)
+    if not marca_n or not principio_n:
+        return texto
+
+    lineas = texto.splitlines()
+    fuera = False
+    conservadas: list[str] = []
+    for linea in lineas:
+        ln = _norm_simple(linea)
+        afirma = (
+            marca_n in ln
+            and principio_n in ln
+            and _RE_AFIRMA_EQUIVALENCIA.search(ln)
+        )
+        if afirma:
+            fuera = True
+            continue
+        conservadas.append(linea)
+    nuevo = "\n".join(conservadas).strip()
+    if not fuera:
+        return texto
+
+    aviso = (
+        f"⚠️ No tengo «{marca.upper()}» en el catálogo con ese nombre. "
+        f"Si te sirve el principio activo, tengo {principio.upper()}:"
+    )
+    logger.info(
+        "equivalencia inventada retirada: %r → %r (el mapeo no viene de aliases.py)",
+        marca, principio,
+    )
+    return f"{aviso}\n\n{nuevo}" if nuevo else aviso
+
+
 def _aviso_no_lo_tengo(term: str, ausente: str) -> str:
     """Aviso cuando el cliente pidió algo que NO está en el catálogo pero hay lista.
 
@@ -6872,8 +7070,19 @@ def _aviso_no_lo_tengo(term: str, ausente: str) -> str:
     # encima de una lista de VITAMINA C (provider 32, 2026-10-29).
     if len(ausente.strip()) < 2 or _es_letra_de_vitamina(ausente.strip().lower(), term):
         return ""
+    # LA FORMA NO ES UN PRODUCTO. Prueba en vivo con tráfico real (provider 05,
+    # 2026-11-06): "pinvex solución bucal" avisó
+    #     ⚠️ No tengo BUCAL. De PINVEX hay esto:
+    # y "solunoval bucal" avisó
+    #     ⚠️ No tengo SOLUNOVAL. De BUCAL hay esto:
+    # Las dos frases son incoherentes: 'bucal' no es algo que se tenga o no. De la forma
+    # pedida ya se ocupa `_aviso_forma` / el filtro de forma.
+    ausente_norm = _norm_simple(ausente)
+    if ausente_norm in _PALABRAS_DE_FORMA:
+        return ""
     resto = " ".join(w for w in term.split() if w.lower() != ausente.lower())
-    if resto.strip():
+    resto_util = [w for w in resto.split() if _norm_simple(w) not in _PALABRAS_DE_FORMA]
+    if resto_util:
         return f"⚠️ No tengo {ausente.upper()}. De {resto.upper()} hay esto:"
     return f"⚠️ No tengo {ausente.upper()}."
 
@@ -7855,6 +8064,7 @@ def _formatear_receta(
     grupos: list[tuple[str, list[dict[str, Any]]]],
     no_disponibles: list[str] | None = None,
     avisos: dict[str, str] | None = None,
+    sin_consultar: list[str] | None = None,
 ) -> str:
     """Genera la respuesta de receta en formato determinista, con numeración
     GLOBAL corrida entre medicamentos:
@@ -7879,6 +8089,12 @@ def _formatear_receta(
     if no_disponibles:
         nombres = ", ".join(m.upper() for m in no_disponibles)
         lineas.append(f"⚠️ No disponibles en el catálogo: {nombres}")
+        lineas.append("")
+    if sin_consultar:
+        # Se acabó el presupuesto de tiempo del turno. Honesto: no se consultaron.
+        # Prometer "no disponible" sin haber mirado el catálogo es peor que admitirlo.
+        nombres = ", ".join(m.upper() for m in sin_consultar)
+        lineas.append(f"⚠️ No me alcanzó a consultar: {nombres}. ¿Me los repites?")
         lineas.append("")
     n = 0
     for titulo, products in grupos:

@@ -182,6 +182,16 @@ TPL_VERIFICACION_CATALOGO = (
 )
 
 
+# Cuando el cliente acaba de ver una lista, la frase que pide "¿cuál es el medicamento?"
+# no tiene sentido: hay que preguntar POR LA OPCIÓN. Medido en la prueba en vivo con
+# tráfico real (provider 05, 2026-11-07): a "Este", "De ese" y "Si tienen disponibilidad."
+# el agente contestó "¿Cuál es el medicamento que buscas?".
+TPL_VERIFICACION_CATALOGO_CON_LISTA = (
+    "Para no darte un precio equivocado, dime cuál de las opciones que te mostré "
+    "quieres (la 1, la 2…) y te lo confirmo."
+)
+
+
 def afirma_dato_catalogo(texto: str) -> bool:
     """G6: el texto del AGENTE afirma precio con dígitos, cantidad de stock o principio activo directo."""
     return bool(texto) and bool(AFIRMA_DATO_CATALOGO.search(texto))
