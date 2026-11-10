@@ -1,5 +1,9 @@
 # Prompt para el agente codificador — integrar (selectivamente) los avances del autor original
 
+> **SUPERSEDIDO el 2026-11-09.** Vigente: **`docs/ORDEN-CODIFICADOR-CURADURIA-UPSTREAM-2026-11-09.md`**
+> (base `8813f12`, 252 tests). Se conserva solo como registro histórico: su base (`cee0092`, 174 tests)
+> está obsoleta y ya se integró lo que este documento pedía. **No lo sigas.**
+
 > Pegar esto como primer mensaje de la sesión del codificador. Es autosuficiente: rutas, estado,
 > reglas, método de evaluación, validación y entregables.
 
