@@ -124,6 +124,10 @@ producción. La tarea es de **curaduría**: elegir, adaptar y verificar cambio p
 
 ## 8. Trampas ya medidas (no las repitas)
 
+- **Al 9-nov-2026 la máquina venía de un reinicio**: el proxy `:11500` estaba caído (se relanzó) y **el
+  daemon de Docker Desktop no estaba corriendo** → arráncalo antes de cualquier corrida del
+  Laboratorio; y ojo: `docker compose up -d` puede no levantar nada en silencio, así que revisa
+  `docker ps` y usa `docker start <contenedor>` + health si hace falta.
 - Sin proxy `:11500` arriba, el corpus devuelve ~2/50 y las sondas fallan: **no es una regresión**.
 - El árbol del autor **no** tiene el flujo de farmacia: comparar archivo a archivo, no por nombre de
   función.
