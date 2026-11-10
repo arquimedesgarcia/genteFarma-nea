@@ -131,12 +131,41 @@ def cita_superlativo_precio(texto: str) -> bool:
 # respalden. Hallazgo del Laboratorio: Daflon con "principio activo ramiprilo"
 # o Daflon con "el genérico más económico del...". Plantilla que no afirma
 # nada y ofrece buscar en el catálogo.
+# El detector corre sobre el texto NORMALIZADO (minúsculas y SIN tildes): los
+# modelos escriben "composicion" y "composición" indistintamente (D-B3). Por eso
+# los patrones van sin acentos.
 AFIRMA_COMPOSICION = re.compile(
-    r"\b(principio\s+activo|mismo\s+principio\s+activo|"
-    r"es\s+el\s+gen[eé]rico\s+de|gen[eé]rico\s+equivalente|"
-    r"equivalente\s+gen[eé]rico|ingrediente\s+activo|"
-    r"composici[oó]n\s+\w|contiene\s+[a-záéíóúñ]{4,})\b",
+    r"principio\s+activo"                          # su/el/mismo principio activo
+    r"|ingrediente\s+activo"
+    r"|generico\s+(de|del|es|equivalente)"         # es el genérico de/del, el genérico es
+    r"|equivalente\s+generico"
+    r"|equivalente?\s+a(l|\s)"                      # es equivalente a/al, equivale a/al
+    r"|equivale\s+a(l|\s)"
+    r"|mismo\s+efecto"                             # tiene el mismo efecto que
+    r"|se\s+(puede\s+)?reemplaza(r)?\s+por"        # se puede reemplazar por
+    r"|mismo\s+medicamento"                        # es el mismo medicamento que
+    r"|composicion\s+\w"                           # composición incluye/del/es (D-B3: sin \b final)
+    r"|contiene\s+[a-z]{4,}"
+    r"|lleva\s+[a-z]{4,}",
     re.I,
+)
+
+# Modo NO afirmativo: preguntas y negaciones/limitaciones honestas NO deben
+# vetarse (D-B4). Se excluye el texto interrogativo y el que niega el hecho.
+_NO_AFIRMA_COMPOSICION = re.compile(
+    r"\bno\s+(tengo|puedo|se\b|quiero|hay|confirmo|estoy\s+segur)"
+    r"|\bprefiero\s+no\b"
+    r"|\bsin\s+(confirmar|datos)\b",
+    re.I,
+)
+
+# Campos del payload del producto que exponen composición/principio activo. El
+# catálogo ACTUAL (producto, nombre, precio, precioBs, presentacion, productId,
+# laboratorio) NO expone ninguno → fail-closed: la afirmación nunca se respalda.
+_CAMPOS_COMPOSICION = (
+    "composicion", "principioactivo", "principio_activo",
+    "ingredienteactivo", "ingrediente_activo", "monodroga",
+    "sustanciaactiva", "sustancia_activa",
 )
 
 TPL_SIN_COMPOSICION = (
@@ -147,9 +176,57 @@ TPL_SIN_COMPOSICION = (
 )
 
 
+def _sin_tildes(texto: str) -> str:
+    """Minúsculas y sin diacríticos (los modelos mezclan 'composicion'/'composición')."""
+    t = unicodedata.normalize("NFD", (texto or "").lower())
+    return "".join(c for c in t if unicodedata.category(c) != "Mn")
+
+
 def afirma_composicion(texto: str) -> bool:
-    """G5: el texto del AGENTE afirma principio activo, composición o equivalencia genérica."""
-    return bool(texto) and bool(AFIRMA_COMPOSICION.search(texto))
+    """G5: el texto del AGENTE afirma —en modo AFIRMATIVO— principio activo,
+    composición o equivalencia genérica. Excluye preguntas y negaciones honestas
+    (D-B4) y normaliza tildes (D-B3).
+
+    Se evalúa POR ORACIÓN: una afirmación declarativa dispara aunque OTRA oración
+    del mensaje (p. ej. el pie '¿Otro medicamento?' del carrito) sea interrogativa.
+    """
+    if not texto:
+        return False
+    for oracion in re.findall(r"[^.!?\n]*[.!?\n]|[^.!?\n]+$", texto):
+        if "?" in oracion or "¿" in oracion:
+            continue  # interrogativa: no afirma
+        norm = _sin_tildes(oracion)
+        if _NO_AFIRMA_COMPOSICION.search(norm):
+            continue  # negación/limitación honesta
+        if AFIRMA_COMPOSICION.search(norm):
+            return True
+    return False
+
+
+def hay_evidencia_composicion(
+    products: list[dict] | None, texto: str
+) -> bool:
+    """G5 (D-B1) — evidencia por (afirmación, producto), FAIL-CLOSED: True solo si
+    algún producto devuelto por la herramienta expone un campo de composición cuyo
+    valor aparece en el texto del agente. Si el payload no expone composición (el
+    catálogo de hoy no lo hace), devuelve False → la afirmación NO se respalda."""
+    if not products or not texto:
+        return False
+    texto_norm = _sin_tildes(texto)
+    for p in products:
+        if not isinstance(p, dict):
+            continue
+        for clave, valor in p.items():
+            clave_norm = _sin_tildes(str(clave)).replace(" ", "")
+            if not any(c in clave_norm for c in _CAMPOS_COMPOSICION):
+                continue
+            if not isinstance(valor, str) or not valor.strip():
+                continue
+            valor_norm = _sin_tildes(valor)
+            for token in re.findall(r"[a-z]{4,}", valor_norm):
+                if token in texto_norm:
+                    return True
+    return False
 
 
 # ---------------------------------------------------------------------------

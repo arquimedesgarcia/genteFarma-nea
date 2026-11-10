@@ -978,10 +978,24 @@ async def run_turn(
         elif (
             not es_negativa_con_carrito
             and guards.afirma_composicion(final_text)
-            and not runtime.last_products
+            and not guards.hay_evidencia_composicion(runtime.last_products, final_text)
         ):
-            logger.warning("guarda G5 VETO: afirmación de composición/genérico sin respaldo — plantilla sin-composición")
-            final_text = guards.TPL_SIN_COMPOSICION
+            # D-B1: la evidencia es por (afirmación, producto), no por turno.
+            # Cualquier resultado del catálogo (irrelevante o parcial) ya NO apaga
+            # la guarda: solo la respalda un producto que exponga la composición
+            # afirmada. Fail-closed: el catálogo de hoy no la expone → se veta.
+            logger.warning("guarda G5 VETO: afirmación de composición/genérico sin respaldo por producto — plantilla sin-composición")
+            if runtime.last_products:
+                # Conserva la información comercial respaldada (precio/lista): el
+                # veto no vacía la respuesta, solo retira la afirmación sin respaldo.
+                from app.tools import _formatear_lista_productos
+                _term_g5 = runtime.last_products_term or runtime.last_term or ""
+                final_text = (
+                    _formatear_lista_productos(runtime.last_products, _term_g5)
+                    + "\n\n" + guards.TPL_SIN_COMPOSICION
+                )
+            else:
+                final_text = guards.TPL_SIN_COMPOSICION
         # G6 — precio con dígitos, stock o principio activo directo afirmado
         # sin respaldo de catálogo. Complementa G1 (que solo actúa cuando el
         # cliente preguntó el precio) y G5 (composición más amplia): G6 cubre
