@@ -521,6 +521,12 @@ def _termino_es_medicamento_plausible(term: str) -> bool:
         return False
     # Quitar tildes para comparar contra las funcionales (sin tildes).
     t_sin = t.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+    # Una META-FRASE sobre composición ('principio activo del daflon', 'ingrediente
+    # activo de...') NO es un nombre de medicamento para buscar: forzar esa frase al
+    # catálogo devuelve basura. El medicamento (si lo hay) lo extrae la comprensión
+    # (`_termino_inferido_si_mejora`) o lo maneja G5; aquí no se fuerza la búsqueda.
+    if re.search(r"\b(principio|ingrediente)\s+activo\b", t_sin):
+        return False
     palabras = _tokens_con_decimal(t_sin)
     if not palabras:
         return False
@@ -2913,6 +2919,41 @@ class ToolRuntime:
                 self.productos_turno.append(p)
                 vistos.add(clave)
 
+    def _termino_inferido_si_mejora(self, nombre: str) -> str | None:
+        """Comprender → inferir el medicamento → buscar.
+
+        Si la capa de comprensión autorizó esta búsqueda e infirió un término
+        (`intent_termino`) que es una EXTRACCIÓN más limpia de `nombre` (el
+        medicamento sacado de una frase conversacional), lo devuelve para buscar
+        con él en vez de con la frase cruda. Devuelve None si no aplica.
+
+        Guardas: (1) solo si la capa concluyó que hay consulta; (2) el inferido
+        debe ser subconjunto de tokens del crudo —así es una extracción de ESTE
+        término, no un fármaco distinto ni un veredicto viejo (stale)—; (3) debe
+        tener menos tokens (quitó ruido); (4) no se pierde una dosis que el crudo
+        traía (no degradar la concentración pedida).
+        """
+        if self.intent_hay_consulta is not True:
+            return None
+        inferido = (self.intent_termino or "").strip()
+        crudo = (nombre or "").strip()
+        if not inferido or not crudo:
+            return None
+
+        def _toks(s: str) -> list[str]:
+            s = s.lower().replace("á", "a").replace("é", "e").replace("í", "i")
+            s = s.replace("ó", "o").replace("ú", "u").replace("ü", "u")
+            return re.findall(r"[a-z0-9]+", s)
+
+        ti, tc = _toks(inferido), _toks(crudo)
+        if not ti or ti == tc:
+            return None
+        if not set(ti).issubset(set(tc)) or len(ti) >= len(tc):
+            return None
+        if re.search(r"\d", crudo) and not re.search(r"\d", inferido):
+            return None  # el crudo traía dosis y el inferido la perdería
+        return inferido
+
     async def _buscar_medicamento(self, args: dict[str, Any]) -> dict[str, Any]:
         nombre = str(args.get("nombre") or "").strip()
         # El término TAL COMO LO PIDIERON. Más abajo `nombre` se queda con el sustantivo
@@ -2942,6 +2983,17 @@ class ToolRuntime:
         _negado = await self._autorizar_busqueda(nombre)
         if _negado is not None:
             return _negado
+        # Comprender → inferir el medicamento → buscar: si la capa autorizó e
+        # infirió un término más limpio (extrajo el fármaco de una frase), se busca
+        # con ÉL en vez de con la frase cruda del backstop/modelo.
+        _inferido = self._termino_inferido_si_mejora(nombre)
+        if _inferido:
+            logger.info(
+                "buscar_medicamento: uso el término inferido por la comprensión '%s' (en vez de '%s')",
+                _inferido, nombre,
+            )
+            nombre = _inferido
+            args = {**args, "nombre": _inferido}
         # Guarda anti-saludo: si el LLM llamó buscar_medicamento con un término
         # que es SOLO saludos/cortesía ("saludos", "buen día"), NO es una
         # consulta de medicamento. Devolver una lista de productos aquí sería
