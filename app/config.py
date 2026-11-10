@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     vision_model: str = ""
     vision_api_key: str = ""
     vision_base_url: str = ""
+    # Ajustes opcionales de rendimiento para proveedores OpenAI-compatible.
+    # Vacíos por defecto: no cambian el comportamiento hasta medir y habilitar.
+    llm_reasoning_effort: str = ""
+    llm_provider_sort: str = ""
     # F15 — CAPA DE COMPRENSIÓN DEL ACTO DE CONVERSACIÓN. Decide si el mensaje trae
     # una consulta de medicamento ANTES de buscar en el catálogo. Quejas oct-2026:
     # «No puede ser Indu.» → el agente contestó «No tengo SER INDU»; «Vivo en Ciudad
