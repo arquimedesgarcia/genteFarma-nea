@@ -75,6 +75,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     vision_model=settings.vision_model or None,
                     vision_api_key=settings.vision_api_key or None,
                     vision_base_url=settings.vision_base_url or None,
+                    reasoning_effort=settings.llm_reasoning_effort or None,
+                    provider_sort=settings.llm_provider_sort or None,
                 ),
                 profile=ProfileProvider(
                     crm,
