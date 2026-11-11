@@ -6,7 +6,10 @@ llama al LLM y **no** toma decisiones de autorización: la puerta única F15.1
 ([ADR-0002](../../docs/architecture/ADR/ADR-0002-llm-sin-autoridad.md),
 [ADR-0003](../../docs/architecture/ADR/ADR-0003-puerta-unica-autorizacion.md)).
 
-Es **aditivo**: hoy ningún componente de la ruta caliente lo invoca.
+Desde el Paso 5 está **cableado** en la ruta caliente: `ToolRuntime.execute`
+despacha `buscar_medicamento` a `ToolRuntime._buscar_catalogo`, que construye este
+caso de uso sobre el motor existente y lo invoca una sola vez
+(`app/application/adapters.py::ToolRuntimeEngineCatalogAdapter`).
 """
 from __future__ import annotations
 

@@ -25,12 +25,13 @@ tocó.
 
 | Archivo | Cambio | Rol |
 |---|---|---|
-| `app/tools.py` | +25 / −1 | 3 imports + 1 línea de despacho + `_buscar_catalogo` (orquestador fino de 20 líneas). **El motor `_buscar_medicamento` no se modifica.** |
-| `app/application/adapters.py` | +37 | Nuevo `ToolRuntimeEngineCatalogAdapter` (envuelve el **motor** directo) + nota en el adaptador existente. |
-| `app/application/contracts.py` | +129 / −37 | `CatalogSearchResult` gana `fuente`, `campos_disponibles`, `limitaciones`; `mapear_resultado` los deriva (puro) y se unifica en un único punto de construcción. `raw`/`to_tool_dict()` sin cambios. |
+| `app/tools.py` | +24 / −1 | 3 imports + 1 línea de despacho + `_buscar_catalogo` (orquestador fino de 20 líneas). **El motor `_buscar_medicamento` no se modifica.** |
+| `app/application/adapters.py` | +36 / −1 | Nuevo `ToolRuntimeEngineCatalogAdapter` (envuelve el **motor** directo) + nota en el adaptador existente. |
+| `app/application/contracts.py` | +107 / −38 | `CatalogSearchResult` gana `fuente`, `campos_disponibles`, `limitaciones`; `mapear_resultado` los deriva (puro) y se unifica en un único punto de construcción. `raw`/`to_tool_dict()` sin cambios. |
+| `app/application/catalog_search.py` | +4 / −1 | Docstring: el caso de uso ya está cableado en la ruta caliente (antes decía que no lo invocaba nadie). Sin cambios de lógica. |
 | `tests/test_catalog_search_wiring.py` | nuevo | 16 pruebas del Paso 5 (ver §4). |
 
-`git diff --stat`: 3 archivos de runtime, 154 inserciones / 37 borrados + 1 test nuevo.
+`git diff 140770d HEAD --numstat -- app/`: 4 archivos de runtime, **+171 / −41** + 1 test nuevo.
 
 ## 3. Antes de editar — responsabilidades y puertas identificadas
 
