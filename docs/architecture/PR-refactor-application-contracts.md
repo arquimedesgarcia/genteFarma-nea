@@ -99,7 +99,7 @@ excepción de aplicación), **timeout** (TimeoutError→PROVEEDOR_NO_DISPONIBLE)
 ### Antes / después
 
 `turn.py`/`tools.py` sin cambios ⇒ sondas P1/P2 y las 252 pruebas previas con el mismo
-resultado que la baseline (`BASELINE.md`). Los 23 tests nuevos solo ejercitan la capa
+resultado que la baseline (`BASELINE.md`). Los 26 tests nuevos solo ejercitan la capa
 nueva.
 
 ## 5. Pruebas no ejecutadas y motivo
