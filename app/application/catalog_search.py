@@ -29,17 +29,21 @@ class BuscarCatalogoUseCase:
     async def ejecutar(self, request: CatalogSearchRequest) -> CatalogSearchResult:
         try:
             raw = await self._port.buscar(request.termino)
-        except ProveedorNoDisponibleError as exc:
-            # Un adaptador sobre infraestructura cruda puede señalar la caída así; se
-            # normaliza a un resultado tipado sin filtrar la excepción de infra.
-            detalle = str(exc) or None
+        except (ProveedorNoDisponibleError, TimeoutError) as exc:
+            # Un adaptador sobre infraestructura cruda puede señalar la caída así; un
+            # timeout de una dependencia externa es, igualmente, "proveedor no
+            # disponible" (en el AS-IS el timeout del CRM ya se envuelve como CrmError).
+            # Se normaliza a un resultado tipado sin filtrar la excepción de infra y, en
+            # particular, SIN convertirlo silenciosamente en NO_CONSULTA.
+            detalle = str(exc) or type(exc).__name__
             return CatalogSearchResult(
                 status=CatalogSearchStatus.PROVEEDOR_NO_DISPONIBLE,
                 termino=request.termino,
                 detalle=detalle,
                 raw={"ok": False, "error": "crm_error", "detalle": detalle},
             )
-        # `asyncio.CancelledError` NO se captura: una cancelación/timeout del turno debe
-        # propagarse tal cual (no convertir una cancelación en un resultado de negocio).
+        # `asyncio.CancelledError` NO se captura (es BaseException, no Exception, y queda
+        # fuera del `except TimeoutError` de arriba): una cancelación del turno debe
+        # propagarse tal cual, nunca convertirse en un resultado de negocio.
         aviso = getattr(self._port, "aviso_forma", "") or ""
         return mapear_resultado(raw, aviso_forma=aviso, termino=request.termino)

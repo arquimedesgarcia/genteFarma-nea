@@ -103,9 +103,20 @@ def test_familia_no_consulta_se_agrupa(error):
     assert r.status is CatalogSearchStatus.NO_CONSULTA
 
 
-def test_error_desconocido_es_failsafe_no_consulta():
+def test_error_desconocido_se_tipa_como_error():
+    """Un error no reconocido NO se asume NO_CONSULTA: se tipa como ERROR explícito
+    para no enmascarar un fallo real como 'el cliente no pidió un medicamento'."""
     r = mapear_resultado({"ok": False, "error": "algo_raro"}, termino="x")
-    assert r.status is CatalogSearchStatus.NO_CONSULTA
+    assert r.status is CatalogSearchStatus.ERROR
+    assert r.status is not CatalogSearchStatus.NO_CONSULTA
+
+
+def test_familia_no_consulta_no_se_contamina_con_error_desconocido():
+    """Los mapeos existentes se conservan pese al nuevo estado ERROR."""
+    assert mapear_resultado({"ok": False, "error": "solo_saludo"}, termino="h").status is CatalogSearchStatus.NO_CONSULTA
+    assert mapear_resultado({"ok": False, "error": "sin_resultados"}, termino="z").status is CatalogSearchStatus.NO_ENCONTRADO
+    assert mapear_resultado({"ok": False, "error": "no_autorizado_por_comprension"}, termino="l").status is CatalogSearchStatus.NO_AUTORIZADO
+    assert mapear_resultado({"ok": False, "error": "crm_error"}, termino="c").status is CatalogSearchStatus.PROVEEDOR_NO_DISPONIBLE
 
 
 def test_to_tool_dict_es_identidad():
@@ -152,8 +163,26 @@ def test_use_case_error_externo_se_normaliza():
     assert r.raw["error"] == "crm_error"
 
 
+def test_use_case_timeout_es_proveedor_no_disponible():
+    """Un timeout de una dependencia externa es 'proveedor no disponible', NO una
+    cancelación del turno ni, mucho menos, un NO_CONSULTA silencioso."""
+    puerto = _PuertoQueLanza(TimeoutError("el CRM no respondió a tiempo"))
+    r = asyncio.run(BuscarCatalogoUseCase(puerto).ejecutar(CatalogSearchRequest(termino="losartan 50 mg")))
+    assert r.status is CatalogSearchStatus.PROVEEDOR_NO_DISPONIBLE
+    assert r.status is not CatalogSearchStatus.NO_CONSULTA
+    assert r.detalle == "el CRM no respondió a tiempo"
+
+
+def test_use_case_timeout_de_asyncio_tambien_es_proveedor_no_disponible():
+    """`asyncio.TimeoutError` es alias de `TimeoutError` en 3.11: mismo trato."""
+    puerto = _PuertoQueLanza(asyncio.TimeoutError())
+    r = asyncio.run(BuscarCatalogoUseCase(puerto).ejecutar(CatalogSearchRequest(termino="x")))
+    assert r.status is CatalogSearchStatus.PROVEEDOR_NO_DISPONIBLE
+
+
 def test_use_case_propaga_cancelacion():
-    """Una cancelación/timeout NO se convierte en resultado de negocio: propaga."""
+    """Una CANCELACIÓN del turno (distinta de un timeout) NO se convierte en resultado
+    de negocio: se propaga tal cual (CancelledError es BaseException, no Exception)."""
     puerto = _PuertoQueLanza(asyncio.CancelledError())
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(BuscarCatalogoUseCase(puerto).ejecutar(CatalogSearchRequest(termino="x")))

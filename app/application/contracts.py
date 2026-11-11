@@ -31,6 +31,7 @@ class CatalogSearchStatus(str, Enum):
     NO_AUTORIZADO = "no_autorizado"
     NO_CONSULTA = "no_consulta"
     PROVEEDOR_NO_DISPONIBLE = "proveedor_no_disponible"
+    ERROR = "error"  # error no reconocido del handler — no se asume que sea NO_CONSULTA
     AMBIGUO = "ambiguo"  # reservado — sin fuente distinta en el AS-IS actual
 
 
@@ -139,9 +140,10 @@ def mapear_resultado(
     elif error in _ERRORES_NO_CONSULTA:
         status = CatalogSearchStatus.NO_CONSULTA
     else:
-        # Fail-safe conservador: un error no catalogado no es ni un hallazgo ni una
-        # caída de proveedor; se trata como "no es una consulta usable del catálogo".
-        status = CatalogSearchStatus.NO_CONSULTA
+        # Un error no catalogado NO se asume como NO_CONSULTA: podría ser un fallo real
+        # que quedaría enmascarado como "el cliente no pidió un medicamento". Se tipa
+        # como ERROR explícito para que el consumidor lo trate como anomalía.
+        status = CatalogSearchStatus.ERROR
     return CatalogSearchResult(
         status=status,
         termino=termino,

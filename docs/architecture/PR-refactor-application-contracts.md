@@ -1,8 +1,13 @@
 # PR — Paso 4: Contratos de aplicación y puertos mínimos
 
-> **Rama:** `refactor/application-contracts` · **Base/HEAD inicial:** `b55866c`
+> **Rama:** `refactor/application-contracts` · **Base inicial:** `b55866c`
 > (`docs/pharmacy-domain-design`) · **Fecha:** 2026-11-10 · **Modo:** implementación
-> limitada, aditiva. **Sin commit/push** (pendiente de autorización).
+> limitada, aditiva.
+>
+> **Estado de publicación:** el commit original de la etapa, `d388b58`, ya fue
+> **confirmado y publicado** (`git push -u gentefarma refactor/application-contracts`).
+> Las correcciones descritas en §10 son **posteriores a la revisión** y se confirman
+> sobre esta misma rama.
 
 ## 1. Resumen ejecutivo
 
@@ -46,8 +51,12 @@ del caso de uso en el turno corresponde al Paso 5.
    diseña contra un supuesto.
 6. **Serialización preservada.** `CatalogSearchResult.raw` guarda el dict original y
    `to_tool_dict()` lo devuelve por identidad (test dedicado).
-7. **Cancelación/timeout.** El caso de uso **no** captura `asyncio.CancelledError`
-   (propaga); solo normaliza `ProveedorNoDisponibleError` a estado tipado.
+7. **Cancelación vs. timeout.** El caso de uso **no** captura `asyncio.CancelledError`
+   (propaga, por ser `BaseException`): una cancelación del turno nunca se vuelve
+   resultado de negocio. Un `TimeoutError`/`asyncio.TimeoutError` (y
+   `ProveedorNoDisponibleError`) sí se normaliza a `PROVEEDOR_NO_DISPONIBLE` — un timeout
+   de dependencia externa es "proveedor no disponible", no un `NO_CONSULTA` silencioso
+   (corrección de revisión §10.2).
 
 ### Mapeo (handler real → estado tipado)
 
@@ -60,8 +69,12 @@ error="no_autorizado_por_comprension"                -> NO_AUTORIZADO
 error="crm_error"                                    -> PROVEEDOR_NO_DISPONIBLE
 error in {nombre_vacio, solo_sal, sin_medicamento,
           solo_saludo, no_medicamento}               -> NO_CONSULTA
-error desconocido                                    -> NO_CONSULTA (fail-safe)
+error desconocido                                    -> ERROR  (no se asume NO_CONSULTA)
 ```
+
+> **Corrección de revisión (§10.1):** un error no catalogado se tipa como `ERROR`
+> explícito, no como `NO_CONSULTA`, para no enmascarar un fallo real como "el cliente
+> no pidió un medicamento".
 
 ## 4. Pruebas (comandos y resultados)
 
@@ -71,8 +84,8 @@ Intérprete: `.venv-test/Scripts/python.exe` (Python 3.11.16). Encoding:
 | Prueba | Comando | Resultado |
 |---|---|---|
 | Compilación | `python -m py_compile app/application/*.py` | **PASS** |
-| Contrato + adaptador | `python -m pytest tests/test_application_catalog_contract.py tests/test_application_catalog_adapter.py -q` | **23 passed** |
-| Suite completa | `python -m pytest tests/ -q` | **275 passed** (252 baseline + 23 nuevos) |
+| Contrato + adaptador | `python -m pytest tests/test_application_catalog_contract.py tests/test_application_catalog_adapter.py -q` | **26 passed** |
+| Suite completa | `python -m pytest tests/ -q` | **278 passed** (252 baseline + 26 nuevos) |
 | Ruta caliente intacta | `git diff --stat -- app/turn.py app/tools.py` | **vacío** |
 | Sonda P1 | `PYTHONPATH=. python tests/harness_agente_p1.py` | **exit 0** (paso) |
 | Sonda P2 | `PYTHONPATH=. python tests/harness_agente_p2.py` | **exit 0** (paso) |
@@ -80,7 +93,8 @@ Intérprete: `.venv-test/Scripts/python.exe` (Python 3.11.16). Encoding:
 Cobertura de contrato exigida por el prompt (punto 8): **éxito** (ENCONTRADO),
 **no encontrado** (NO_ENCONTRADO), **parcial** (PARCIAL por forma y por principio
 activo), **error externo** (CrmError→PROVEEDOR_NO_DISPONIBLE, vía adaptador real y vía
-excepción de aplicación) y **cancelación** (CancelledError propaga).
+excepción de aplicación), **timeout** (TimeoutError→PROVEEDOR_NO_DISPONIBLE) y
+**cancelación** (CancelledError propaga). Además: **error desconocido**→ERROR.
 
 ### Antes / después
 
@@ -123,3 +137,27 @@ relevancia, opción N, multi-med) está entrelazado en `ToolRuntime._buscar_medi
 
 **Continuar** con el Paso 5 (extraer el motor de búsqueda detrás de `CatalogSearchPort`)
 tras aprobación del propietario. No avanzar por iniciativa propia.
+
+## 10. Correcciones posteriores a la revisión
+
+Aplicadas sobre la misma rama `refactor/application-contracts`, partiendo del commit
+publicado `d388b58`. No modifican `turn.py`/`tools.py` ni la ruta caliente, ni amplían
+el alcance.
+
+1. **Clasificación de errores desconocidos** (`app/application/contracts.py`): se añade el
+   estado `CatalogSearchStatus.ERROR`. Un error no reconocido ya **no** se clasifica como
+   `NO_CONSULTA`; se tipa como `ERROR`. Se conservan intactos los mapeos de
+   `NO_AUTORIZADO`, `NO_CONSULTA`, `NO_ENCONTRADO` y `PROVEEDOR_NO_DISPONIBLE`. Pruebas:
+   `test_error_desconocido_se_tipa_como_error`,
+   `test_familia_no_consulta_no_se_contamina_con_error_desconocido`.
+2. **Timeout** (`app/application/catalog_search.py`): `TimeoutError`/`asyncio.TimeoutError`
+   se normaliza a `PROVEEDOR_NO_DISPONIBLE` (no a `NO_CONSULTA`), diferenciado de la
+   propagación de `asyncio.CancelledError`. Pruebas:
+   `test_use_case_timeout_es_proveedor_no_disponible`,
+   `test_use_case_timeout_de_asyncio_tambien_es_proveedor_no_disponible`,
+   `test_use_case_propaga_cancelacion`.
+3. **Este informe**: se registra el commit original `d388b58` como publicado y se marcan
+   las correcciones como posteriores a la revisión.
+
+**Resultados tras las correcciones:** tests nuevos **26 passed**; suite completa
+**278 passed**; `py_compile` OK; `git diff` sobre `turn.py`/`tools.py` **vacío**.
