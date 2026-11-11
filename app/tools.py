@@ -30,6 +30,9 @@ from app.relevancia import (
     tokens_farmaco,
 )
 from app.aliases import reescribir as _reescribir_alias
+from app.application.adapters import ToolRuntimeEngineCatalogAdapter
+from app.application.catalog_search import BuscarCatalogoUseCase
+from app.application.contracts import CatalogSearchRequest
 
 # Palabras que revelan que el LLM alucinó una frase como término de búsqueda
 # (backstops del prompt, mensajes de "unsupported", instrucciones, etc.).
@@ -2447,7 +2450,7 @@ class ToolRuntime:
             if name == "handoff":
                 return self._handoff(args)
             if name == "buscar_medicamento":
-                return await self._buscar_medicamento(args)
+                return await self._buscar_catalogo(args)
             if name == "sugerir_generico":
                 return await self._sugerir_generico(args)
             if name == "info_provider":
@@ -2953,6 +2956,26 @@ class ToolRuntime:
         if re.search(r"\d", crudo) and not re.search(r"\d", inferido):
             return None  # el crudo traía dosis y el inferido la perdería
         return inferido
+
+    async def _buscar_catalogo(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Adaptador de la herramienta `buscar_medicamento` → caso de uso UC-01.
+
+        `execute` despacha aquí: construye el caso de uso sobre el motor existente
+        (sin reescribirlo) y lo invoca **una sola vez**. El caso de uso orquesta la
+        búsqueda y produce un `CatalogSearchResult` tipado (fuente/campos/limitaciones);
+        a la herramienta se le devuelve `to_tool_dict()`, que es el **mismo dict** que
+        emitía el motor, para no cambiar el formato externo ni lo que ve el LLM.
+
+        El caso de uso NO autoriza ni llama al LLM: la puerta única F15.1
+        (`_autorizar_busqueda`) sigue dentro del motor (`_buscar_medicamento`). Un
+        `CrmError` del motor propaga a través del caso de uso hasta el `except CrmError`
+        de `execute` (mismo manejo que antes).
+        """
+        caso_de_uso = BuscarCatalogoUseCase(ToolRuntimeEngineCatalogAdapter(self))
+        resultado = await caso_de_uso.ejecutar(
+            CatalogSearchRequest(termino=str(args.get("nombre") or ""))
+        )
+        return resultado.to_tool_dict()
 
     async def _buscar_medicamento(self, args: dict[str, Any]) -> dict[str, Any]:
         nombre = str(args.get("nombre") or "").strip()
