@@ -32,8 +32,22 @@ Parte **diseñable ya** (no depende de la pregunta abierta):
 3. **El estado comunicado al cliente debe proceder del sistema fuente**; mientras
    no exista entidad de pedido en el CRM, NEA **no** afirma estados que no puede
    demostrar (se sostiene con G13).
-4. **Idempotency key** por pedido (candidato: `conversation_id` + hash del carrito
-   confirmado) para evitar doble registro por doble webhook/reintento.
+4. **Identificador único por intento de pedido (idempotency key).** Cada *intento
+   de confirmación* genera un `order_attempt_id` único (p. ej. UUID) en el momento
+   en que el cliente confirma, **persistido** antes de llamar al sistema fuente.
+   - **No** basta con `conversation_id` + hash del carrito: dos pedidos legítimos
+     **distintos** con el mismo contenido (misma conversación, mismos ítems y
+     cantidades en otro momento) colisionarían y el segundo se descartaría como
+     "duplicado". El hash del carrito puede usarse como **dato de contexto/control
+     de cambios**, nunca como clave de unicidad del intento.
+   - El `order_attempt_id` protege frente a **reintentos** del mismo intento (doble
+     webhook, timeout + retry, doble tap del cliente): la confirmación es
+     **atómica** — se registra el intento con el id y una comprobación de
+     existencia (p. ej. `INSERT … ON CONFLICT (order_attempt_id) DO NOTHING`),
+     de modo que un reintento del **mismo** intento es inocuo y un intento
+     **nuevo** (otro id) sí procede.
+   - El resultado del sistema fuente se liga al `order_attempt_id` para poder
+     reconciliar y no afirmar un registro que no se pueda demostrar (G13).
 
 Parte **🔸 PENDIENTE (bloquea el modelo transaccional completo del Paso 7):** si el
 pedido debe persistirse como entidad en el CRM, con estados

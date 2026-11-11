@@ -12,15 +12,31 @@
 
 1. **Determinista y en backend.** La política decide; el LLM no concede permisos
    ([ADR-0002](ADR/ADR-0002-llm-sin-autoridad.md)).
-2. **Puerta única para búsqueda de catálogo.** El Policy Engine **delega** la
-   autorización por término en `tools._autorizar_busqueda:2768` (F15/F15.1); **no
-   crea una segunda puerta** ([ADR-0003](ADR/ADR-0003-puerta-unica-autorizacion.md)).
-3. **Fail-closed.** Si la comprensión falla, se deniega (`_rechazo_comprension`).
-4. **Tenant validado por backend.** El `providerId` viene del contexto CRM, nunca
-   del LLM ni del texto del mensaje (PLAN §7).
-5. **Mínimo privilegio.** Un cliente no invoca acciones Staff; un empleado (futuro)
-   no opera fuera de su farmacia/rol (PLAN §9).
-6. **Las guardas no autorizan** ([ADR-0004](ADR/ADR-0004-guards-ultima-linea.md)).
+2. **Dos planos de decisión, no uno.** Se distinguen:
+   - **Política general de acceso** (actor × acción × recurso × farmacia × canal):
+     quién puede intentar qué sobre qué recurso de qué farmacia. La decide el
+     Policy Engine.
+   - **Autorización específica de búsqueda de catálogo** (por **término**): la
+     decide **exclusivamente** `tools._autorizar_busqueda:2768` (F15/F15.1).
+   Son capas complementarias: la política general puede admitir "este actor puede
+   buscar catálogo", pero **cada término** sigue pasando por la puerta única.
+3. **Puerta única para búsqueda de catálogo.** El Policy Engine **delega** la
+   autorización por término en `_autorizar_busqueda`; **nunca la duplica ni la
+   sustituye** y **no crea una segunda puerta**
+   ([ADR-0003](ADR/ADR-0003-puerta-unica-autorizacion.md)).
+4. **Fail-closed.** Si la comprensión falla, se deniega (`_rechazo_comprension`).
+5. **Tenant validado por backend.** El `providerId` proviene **siempre** del
+   contexto CRM resuelto en backend, **nunca** del LLM ni del texto del mensaje
+   (PLAN §7). Toda consulta y mutación aplica *tenant scope* por `providerId`
+   (catálogo, analytics, perfiles) o por `conversation_id` (carrito, atado a un
+   tenant); **no se cruza data entre farmacias**. El parámetro `providerId` de las
+   rutas de analytics se valida contra el contexto de la integración, no se acepta
+   a ciegas desde el cliente.
+6. **Mínimo privilegio.** Un cliente no invoca acciones Staff. Los roles
+   individuales (empleado, farmacéutico, administrador) **no existen todavía**
+   (ver §2); cuando existan, operarán bajo mínimo privilegio por farmacia/rol
+   (PLAN §9).
+7. **Las guardas no autorizan** ([ADR-0004](ADR/ADR-0004-guards-ultima-linea.md)).
 
 ---
 
@@ -41,11 +57,18 @@ Columnas: **Actor** · **Acción** · **Recurso** · **Alcance de farmacia** ·
 | Cliente | Consulta clínica (UC-08) | handoff CRM | `providerId` | **fail-closed**: derivar, no aconsejar | motivo mínimo (🔸) |
 | Sistema | Seguimiento (UC-07) | conversación | `conversation_id` | pedido abierto + franja/días + IA activa | `bot_conversation` (`followup_*`) |
 | Sistema | Relay / Sender | CRM | — | best-effort, nunca descarta | `relay_queue`, `pending_send` |
-| Staff (API key) | Leer analytics top-meds | `med_queries` | `providerId` (query) | `X-API-Key == CRM_BOT_API_KEY` | — |
-| Staff (API key) | Leer pacientes crónicos | `patient_profiles` | `providerId` | `X-API-Key` | — |
-| Staff | Marcar consent crónico | `patient_profiles` | `providerId` | **🔸 sin endpoint hoy** (`marcar_consent:831`) | PENDIENTE |
-| Empleado/Farmacéutico/Admin | Operaciones internas | — | — | **🔸 PENDIENTE** (sin identidad/rol; PLAN §8 q3) | PENDIENTE |
+| Integración (API key) | Leer analytics top-meds | `med_queries` | `providerId` (query) | `X-API-Key == CRM_BOT_API_KEY` | — |
+| Integración (API key) | Leer pacientes crónicos | `patient_profiles` | `providerId` | `X-API-Key` | — |
+| Integración (API key) | Marcar consent crónico | `patient_profiles` | `providerId` | **🔸 sin endpoint hoy** (`marcar_consent:831`) | PENDIENTE |
+| Empleado/Farmacéutico/Admin (individual) | Operaciones internas | — | — | **🔸 PENDIENTE** (sin identidad/rol individual; PLAN §8 q3) | PENDIENTE |
 | LLM | — | — | — | **ninguna**: no autoriza, no ejecuta, no afirma hechos | — |
+
+> **La `X-API-Key` identifica una *integración* (el CRM/dashboard que llama), no a
+> un empleado individual.** `CRM_BOT_API_KEY` es un secreto compartido por canal,
+> sin usuario, rol ni actor por persona. Por eso las filas de analytics se
+> atribuyen al actor **"Integración (API key)"** y **no** a un "Staff" con
+> permisos individuales: ese actor **no existe todavía** (ver [`DOMAIN-MODEL.md`](DOMAIN-MODEL.md) §1).
+> No se deben inferir permisos individuales a partir de la posesión de la API key.
 
 ---
 

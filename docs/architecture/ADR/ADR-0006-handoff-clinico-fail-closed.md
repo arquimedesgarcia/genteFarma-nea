@@ -23,13 +23,21 @@ documentado de derivación clínica (PLAN §8 pregunta 6).
 
 ## Decisión
 
-1. **Principio fail-closed (diseñable ya):** ante una consulta que parezca clínica
-   (diagnóstico, tratamiento personalizado, interacción, cambio de dosis), el
-   sistema **no genera recomendación clínica autónoma**; deriva a humano. Esto es
-   coherente con [ADR-0002](ADR-0002-llm-sin-autoridad.md).
-2. **Reutilizar la puerta de handoff existente**, no crear un segundo mecanismo de
+1. **Principio fail-closed (diseñable ya):** "fail-closed" significa, en este
+   contexto, **que el sistema NO genera recomendaciones clínicas autónomas**
+   (no diagnostica, no prescribe, no ajusta dosis, no sustituye tratamiento) ante
+   una consulta que parezca clínica (diagnóstico, tratamiento personalizado,
+   interacción, cambio de dosis). La respuesta segura por defecto es **no aconsejar
+   y derivar a humano**. Esto es coherente con [ADR-0002](ADR-0002-llm-sin-autoridad.md).
+2. **Alcance limitado del mecanismo actual.** Fail-closed **no implica** que la
+   puerta de handoff existente esté **preparada para gestionar derivaciones
+   clínicas completas**. Hoy solo marca `handoff_reason` y pausa la IA; **no**
+   tiene taxonomía clínica, ni profesional responsable, ni estados de derivación,
+   ni motivo `clinico`. Es suficiente para **detener** el consejo autónomo y
+   escalar, pero **no** para operar un proceso clínico end-to-end.
+3. **Reutilizar la puerta de handoff existente**, no crear un segundo mecanismo de
    escalado.
-3. **🔸 PENDIENTE (bloquea Paso 8):** la **taxonomía clínica**, el **profesional
+4. **🔸 PENDIENTE (bloquea Paso 8):** la **taxonomía clínica**, el **profesional
    responsable**, los **estados de derivación** (detectado → solicitado → asignado
    → atendido → retomado/cerrado) y si se añade un motivo `clinico` a
    `HANDOFF_REASONS` requieren **decisión de producto/clínica aprobada**. No se

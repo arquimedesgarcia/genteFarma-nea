@@ -71,7 +71,7 @@ Lo que el Paso 4 **no** debe hacer: mover la lógica compleja de `turn.py`/`tool
 ## 5. Gate mínimo por PR (PLAN §6)
 
 - `python -m py_compile app/*.py`
-- suite `pytest` completa (línea base: 252 pass — [`BASELINE.md`](BASELINE.md))
+- suite `pytest` completa
 - tests nuevos del módulo
 - sondas F14/F15/F15.1 y guardas afectadas
 - QA de loop/handoff/pedido según alcance
@@ -79,6 +79,18 @@ Lo que el Paso 4 **no** debe hacer: mover la lógica compleja de `turn.py`/`tool
 - informe `docs/architecture/PR-<rama>-VALIDATION.md`
 
 Los casos no ejecutados se reportan **BLOCKED** o **NOT RUN**, nunca PASS.
+
+> **Sobre la línea base de pruebas (no es cobertura completa).** Los **252 tests
+> que pasan** ([`BASELINE.md`](BASELINE.md)) son la **línea base medida** en el
+> Paso 1 bajo las limitaciones de ese entorno, **no una garantía de cobertura
+> total** del comportamiento. La matriz [`BASELINE-TEST-MATRIX.md`](BASELINE-TEST-MATRIX.md)
+> documenta explícitamente pruebas **BLOCKED** (filas 11–13: F14 conversacional
+> contra CRM real, integración Docker/DB desechable, F14 simulador — requieren CRM
+> o Docker no disponibles en local) y **NOT RUN** (fila 14: corpus F15 de 50
+> frases, fuera del alcance del Paso 1). Esas pruebas **siguen pendientes**: cada
+> PR debe reportarlas como BLOCKED/NOT RUN si no se ejecutan, **sin convertirlas en
+> PASS**, y debe habilitar las que su alcance desbloquee (p. ej. CRM sandbox o DB
+> desechable) antes de dar por cubierta la funcionalidad correspondiente.
 
 ---
 

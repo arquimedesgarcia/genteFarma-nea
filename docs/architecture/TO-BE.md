@@ -162,12 +162,25 @@ en el CRM/persistencia reales ([`FLOW-ORDERS.md`](FLOW-ORDERS.md)). Puntos clave
 | Separación | Componente TO-BE | Hoy | Invariante |
 |---|---|---|---|
 | **Comprensión** | `safety/intent/` | `intencion.entender` (F15) | decide si hay consulta y el término, **antes** de buscar; fail-safe `hay_consulta=None` |
-| **Autorización** | `core/policies/` + `_autorizar_busqueda` | repartido | determinista; **puerta única** por término para catálogo ([ADR-0003](ADR/ADR-0003-puerta-unica-autorizacion.md)); fail-closed |
+| **Autorización** | `core/policies/` (acceso general) **+** `_autorizar_busqueda` (búsqueda por término) | repartido | determinista; fail-closed. Ver desglose de los dos planos abajo |
 | **Ejecución** | `application/use_cases/` | handlers `tools.py` | solo casos de uso permitidos; nunca efectos a partir de texto del LLM sin autorización |
 | **Validación** | `domain/` + `safety/response_guards/` | backstops + G1–G13 | evidencia por afirmación; G13 = post-condición de acción |
 | **Redacción** | compositor de respuesta | prompt + `wtext` + backstops | fiel a la evidencia; el LLM redacta, no decide |
 
-Las guardas **no autorizan** ([ADR-0004](ADR/ADR-0004-guards-ultima-linea.md)).
+La **autorización** tiene **dos planos que no se confunden**:
+
+1. **Política general de acceso** (`core/policies/`, futuro Policy Engine): actor ×
+   acción × recurso × farmacia × canal. Decide si un actor puede *intentar* una
+   acción sobre un recurso de una farmacia. Consolida allowlist, X-API-Key y
+   *tenant scope*.
+2. **Autorización específica de búsqueda de catálogo** (`_autorizar_busqueda`,
+   F15/F15.1): decide, **por término**, si una búsqueda puede tocar el catálogo.
+
+El Policy Engine **delega** el plano 2 en `_autorizar_busqueda`; **nunca lo duplica
+ni lo sustituye** ([ADR-0003](ADR/ADR-0003-puerta-unica-autorizacion.md)). "Puedo
+buscar catálogo" (plano 1) no implica "este término está autorizado" (plano 2):
+cada término sigue pasando por la puerta única. Las guardas **no autorizan** en
+ninguno de los dos planos ([ADR-0004](ADR/ADR-0004-guards-ultima-linea.md)).
 
 ---
 
@@ -180,11 +193,11 @@ Las guardas **no autorizan** ([ADR-0004](ADR/ADR-0004-guards-ultima-linea.md)).
 |---|---|---|---|
 | **F14** extracción/búsqueda, alias, typos, opción N, multi-med | `tools._buscar_medicamento:2957`, `relevancia.*`, `aliases.reescribir` | `domain/pharmacy/catalog/` | **mover** algoritmos sin cambiarlos (Paso 5), paridad por fixtures |
 | **F15** comprensión | `intencion.entender:394` | `safety/intent/` | **mantener** como clasificador; formalizar contrato (aditivo) |
-| **F15.1** autorización por término | `tools._autorizar_busqueda:2768` (`candidato_obligatorio=True`) | `core/policies/` **delega** aquí | **puerta única**; Policy Engine la envuelve, no la duplica |
+| **F15.1** autorización por término | `tools._autorizar_busqueda:2768` (`candidato_obligatorio=True`) | `core/policies/` **delega** aquí | **puerta única** (plano 2); el Policy Engine la invoca/delega, **nunca la duplica ni la sustituye** |
 | **G1–G12** vetos de salida | `guards.py` + `turn.py:950-1098` | `safety/response_guards/` | **mantener** como fail-safe de redacción |
 | **G13** acción no ocurrida | `guards.familia_accion_afirmada:622` + `turn._g13_accion_ocurrio:254` | `safety/response_guards/` + señales de caso de uso | **validación de post-condición** |
 | Hostilidad / stall | `hostility.py`, `stall.py` | `safety/` transversal | conteo determinista entre turnos, fuera del LLM |
-| Allowlist / X-API-Key / tester | `turn.py:288`, `webhook.py:195`, `turn.py:300` | `core/policies/` + `api/` | autorización de acceso/canal; se consolida como política |
+| Allowlist / X-API-Key / tester | `turn.py:288`, `webhook.py:195`, `turn.py:300` | `core/policies/` + `api/` | autorización de **acceso general** (plano 1); se consolida como política, distinta de la autorización de búsqueda por término |
 
 ---
 
