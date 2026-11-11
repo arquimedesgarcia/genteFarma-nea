@@ -143,9 +143,16 @@ Máquina de estados y reglas en [`DOMAIN-MODEL.md`](DOMAIN-MODEL.md) §3–§4, 
 en el CRM/persistencia reales ([`FLOW-ORDERS.md`](FLOW-ORDERS.md)). Puntos clave:
 
 - **Separar `preparar pedido` de `confirmar pedido`** ([ADR-0007](ADR/ADR-0007-fuente-verdad-pedido.md)).
-- **Idempotencia:** upsert `ON CONFLICT` que suma (`db.cart_add`), dedupe
-  intra-turno (`backstop_added_skus`) e inter-turno por cantidad; dedup de webhook
-  (`processed_message`). Falta **idempotency key a nivel de pedido** (se añade).
+- **Idempotencia:** a nivel de **carrito** ya existe (upsert `ON CONFLICT` que suma
+  en `db.cart_add`, dedupe intra-turno `backstop_added_skus` e inter-turno por
+  cantidad) y de **webhook** (`processed_message`). A nivel de **pedido** se define
+  un `order_attempt_id` por **intento lógico de confirmación**: los reintentos del
+  mismo intento (timeout, doble webhook, reenvío) **reutilizan** ese identificador,
+  y una confirmación intencional nueva puede generar uno nuevo aunque el carrito sea
+  idéntico. La **coordinación atómica ante concurrencia** (reconocer/reutilizar el
+  intento lógico con solicitudes concurrentes) **sigue PENDIENTE del Paso 7**; no se
+  afirma idempotencia de pedido completamente resuelta
+  ([ADR-0007](ADR/ADR-0007-fuente-verdad-pedido.md), [`DOMAIN-MODEL.md`](DOMAIN-MODEL.md) §7).
 - **Concurrencia:** `conversation_lock` por identidad es el único mecanismo; no hay
   `SELECT … FOR UPDATE` sobre `bot_cart`.
 - **Expiración:** `CART_SESSION_HOURS=12h` (carrito), `FOLLOWUP_MAX_AGE_HOURS=48h`
