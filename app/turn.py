@@ -32,7 +32,12 @@ from app.relevancia import (
 from app.stall import ALERTA as STALL_ALERT, racha_vacia, sin_rumbo
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt
-from app.wtext import a_formato_whatsapp
+from app.wtext import WA_MAX_CHARS, a_formato_whatsapp, partir_mensaje_largo
+
+# Alias de compatibilidad: la partición de mensajes largos y su tope viven ahora
+# en wtext (texto saliente de WhatsApp). turn.py mantiene el nombre interno como
+# fachada para no romper call-sites ni `from app.turn import _partir_mensaje_largo`.
+_partir_mensaje_largo = partir_mensaje_largo
 from app.state import (
     AppContext,
     Conversation,
@@ -142,47 +147,11 @@ async def _typing_heartbeat(ctx: AppContext, crm_conv_id: str, stop: asyncio.Eve
 
 # WhatsApp: límite duro por mensaje (el CRM valida ≤4096 y WhatsApp corta/da
 # error por encima). Margen de seguridad para encabezados de partes.
-WA_MAX_CHARS = 4000
 # Presupuesto de tiempo para consultar los medicamentos de una lista en un mismo turno.
 # Pasado ese tiempo se responde con lo ya consultado y se dice qué quedó pendiente: un
 # turno eterno deja al cliente sin respuesta y bloquea los mensajes que llegan entretanto
 # (el lock es por identidad). Medido en vivo, provider 05, 2026-11-07.
 PRESUPUESTO_BACKSTOP_S = 45
-
-
-def _partir_mensaje_largo(texto: str, max_chars: int) -> list[str]:
-    """Divide un mensaje >max_chars en partes enviables por WhatsApp.
-
-    Corta por PÁRRAFOS (líneas vacías) para no romper una opción 💊 a la
-    mitad: acumula párrafos mientras entren; un párrafo individual más largo
-    que max_chars se corta duro por líneas. Nunca devuelve partes vacías.
-    """
-    texto = (texto or "").strip()
-    if len(texto) <= max_chars:
-        return [texto] if texto else []
-    partes: list[str] = []
-    actual = ""
-    for parrafo in re.split(r"\n\s*\n", texto):
-        parrafo = parrafo.strip()
-        if not parrafo:
-            continue
-        candidato = f"{actual}\n\n{parrafo}" if actual else parrafo
-        if len(candidato) <= max_chars:
-            actual = candidato
-            continue
-        if actual:
-            partes.append(actual)
-        # Párrafo individual demasiado largo: cortar por líneas.
-        while len(parrafo) > max_chars:
-            corte = parrafo.rfind("\n", 0, max_chars)
-            if corte <= 0:
-                corte = max_chars
-            partes.append(parrafo[:corte].rstrip())
-            parrafo = parrafo[corte:].lstrip()
-        actual = parrafo
-    if actual:
-        partes.append(actual)
-    return partes
 
 
 # Cuánto calla el agente tras cerrar por falta de rumbo. Un lead que vuelve al
