@@ -32,22 +32,47 @@ Parte **diseñable ya** (no depende de la pregunta abierta):
 3. **El estado comunicado al cliente debe proceder del sistema fuente**; mientras
    no exista entidad de pedido en el CRM, NEA **no** afirma estados que no puede
    demostrar (se sostiene con G13).
-4. **Identificador único por intento de pedido (idempotency key).** Cada *intento
-   de confirmación* genera un `order_attempt_id` único (p. ej. UUID) en el momento
-   en que el cliente confirma, **persistido** antes de llamar al sistema fuente.
-   - **No** basta con `conversation_id` + hash del carrito: dos pedidos legítimos
-     **distintos** con el mismo contenido (misma conversación, mismos ítems y
-     cantidades en otro momento) colisionarían y el segundo se descartaría como
-     "duplicado". El hash del carrito puede usarse como **dato de contexto/control
-     de cambios**, nunca como clave de unicidad del intento.
-   - El `order_attempt_id` protege frente a **reintentos** del mismo intento (doble
-     webhook, timeout + retry, doble tap del cliente): la confirmación es
-     **atómica** — se registra el intento con el id y una comprobación de
-     existencia (p. ej. `INSERT … ON CONFLICT (order_attempt_id) DO NOTHING`),
-     de modo que un reintento del **mismo** intento es inocuo y un intento
-     **nuevo** (otro id) sí procede.
-   - El resultado del sistema fuente se liga al `order_attempt_id` para poder
-     reconciliar y no afirmar un registro que no se pueda demostrar (G13).
+4. **Identificador único por intento de pedido (`order_attempt_id`).** Cada
+   *intento lógico de confirmación* se identifica con un `order_attempt_id` único
+   (p. ej. UUID), **persistido** antes de llamar al sistema fuente. El resultado del
+   sistema fuente se liga a ese id para reconciliar y no afirmar un registro que no
+   se pueda demostrar (G13). Se distinguen tres escenarios y lo que queda abierto:
+
+   **A. Reintentos del mismo intento.**
+   - Un intento lógico genera **un único** `order_attempt_id`.
+   - Los reintentos por **timeout, doble webhook o reenvío** del mismo intento
+     **reutilizan** ese mismo id.
+   - **No** se genera un id nuevo por cada solicitud HTTP ni por cada entrega del
+     webhook; el id se ata al intento lógico, no al transporte.
+
+   **B. Doble tap y solicitudes concurrentes.**
+   - Dos solicitudes **concurrentes** que corresponden a la **misma** confirmación
+     lógica **no** deben crear dos intentos distintos.
+   - La **creación/reserva** del intento debe ser **atómica**, y debe existir un
+     **mecanismo de transición o reserva** que permita **recuperar el intento ya
+     creado** cuando llegue la solicitud duplicada (en vez de crear otro).
+   - `INSERT … ON CONFLICT (order_attempt_id) DO NOTHING` solo protege cuando ambas
+     solicitudes **comparten el mismo id**; **no** resuelve por sí solo el caso de
+     dos ids distintos que representan la misma confirmación lógica.
+   - Por tanto **no se afirma que la idempotencia esté completamente resuelta**
+     hasta definir **cómo se reconoce y reutiliza el intento lógico ante
+     concurrencia** (correlación/reserva). Ver parte PENDIENTE (D).
+
+   **C. Pedidos legítimos distintos.**
+   - Una **nueva confirmación intencional** del cliente debe poder generar un
+     **nuevo** `order_attempt_id`, **aunque** el carrito tenga exactamente los
+     mismos productos y cantidades.
+   - El **hash del carrito no es el identificador único** del pedido (puede servir
+     como dato de contexto/control de cambios, nunca como clave de unicidad).
+
+   **D. 🔸 PENDIENTE (decisión de diseño del Paso 7).**
+   - No se cierra aquí el **mecanismo técnico definitivo** de persistencia y
+     coordinación del intento (reserva atómica, correlación de concurrencia,
+     ventana de reutilización): depende de la **arquitectura transaccional del
+     Paso 7** y de la fuente de verdad del pedido.
+   - Se documenta explícitamente el **detalle de concurrencia** (cómo se reconoce y
+     reutiliza el intento lógico ante solicitudes concurrentes) como **decisión de
+     diseño pendiente del Paso 7**; no se inventa ni se cierra ahora.
 
 Parte **🔸 PENDIENTE (bloquea el modelo transaccional completo del Paso 7):** si el
 pedido debe persistirse como entidad en el CRM, con estados

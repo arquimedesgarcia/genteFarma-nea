@@ -200,7 +200,7 @@ junto al dato mostrado**; añadirlo es trabajo de los Pasos 5/7/10 (no en este p
 |---|---|---|
 | **Dedup de entrada** | `processed_message` INSERT ON CONFLICT (`db.py:99-108`) | se conserva |
 | **Idempotencia de carrito** | upsert suma; `backstop_added_skus` intra-turno; misma cantidad inter-turno no dobla (`tools.py:4319,4351-4378`) | se conserva |
-| **Idempotencia de pedido** | **no existe clave de pedido** | **añadir `order_attempt_id` único por intento** (UUID), persistido y con confirmación **atómica** (`INSERT … ON CONFLICT (order_attempt_id) DO NOTHING`); **no** usar solo `conversation_id`+hash del carrito (colisionaría pedidos legítimos distintos). Ver [ADR-0007](ADR/ADR-0007-fuente-verdad-pedido.md) |
+| **Idempotencia de pedido** | **no existe clave de pedido** | cada **intento lógico de confirmación** usa un `order_attempt_id` **único y persistido**; los **reintentos del mismo intento** (timeout, doble webhook, reenvío) **reutilizan** ese identificador; la protección contra duplicados es **atómica**. El hash del carrito **no** es la clave. Mecanismo de concurrencia y persistencia definitivo: ver [ADR-0007](ADR/ADR-0007-fuente-verdad-pedido.md) (parte PENDIENTE del Paso 7) |
 | **Concurrencia** | `conversation_lock` por identidad (único mecanismo; sin `FOR UPDATE`) | se conserva; revisar al formalizar pedido |
 | **Expiración** | carrito `CART_SESSION_HOURS=12h`; seguimiento `FOLLOWUP_MAX_AGE_HOURS=48h` | se conserva; definir expiración de `PendienteConfirmacion` |
 | **Recuperación** | `pending_send` (nunca descarta); `SenderWorker` reintenta; `FollowupWorker` re-engancha | se conserva |
