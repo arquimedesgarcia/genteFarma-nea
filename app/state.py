@@ -12,6 +12,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
+from app.application.clinical_handoff import (
+    ClinicalCategory,
+    ClinicalHandoff,
+    ClinicalHandoffState,
+    transicion_permitida as _clin_transicion_permitida,
+)
+from app.application.order_workflow import OrderAttempt, OrderPhase
+
 if TYPE_CHECKING:
     from app.config import Settings
 
@@ -264,6 +272,35 @@ class Store(Protocol):
         cantidad: int,
     ) -> CartItem | None: ...
 
+    # intento de pedido (Paso 7, ADR-0007): reserva atómica e idempotente por
+    # `order_attempt_id`. Satisface el puerto `OrderAttemptStore` de la capa de
+    # aplicación, de modo que `ConfirmarPedidoUseCase` corre sobre Postgres o memoria.
+    async def reservar_intento(
+        self, *, order_attempt_id: str, conversation_id: int, cart_fingerprint: str
+    ) -> OrderAttempt:
+        """Persiste el intento; si el id ya existía, devuelve el guardado (no duplica)."""
+        ...
+    async def obtener_intento(self, order_attempt_id: str) -> OrderAttempt | None: ...
+
+    # derivación clínica (Paso 8, UC-08): reserva atómica e idempotente de UNA
+    # derivación ABIERTA por conversación (anti-duplicado). Satisface el puerto
+    # `ClinicalHandoffStore` de la capa de aplicación.
+    async def reservar_derivacion(
+        self,
+        *,
+        clinical_handoff_id: str,
+        conversation_id: int,
+        category: ClinicalCategory,
+    ) -> ClinicalHandoff:
+        """Crea la derivación si no hay otra abierta; si la hay, devuelve esa (no duplica)."""
+        ...
+    async def derivacion_abierta(
+        self, conversation_id: int
+    ) -> ClinicalHandoff | None: ...
+    async def avanzar_estado_derivacion(
+        self, clinical_handoff_id: str, destino: ClinicalHandoffState
+    ) -> ClinicalHandoff | None: ...
+
     # analytics (Fase 1: dashboard de medicamentos más buscados)
     async def log_med_query(
         self,
@@ -343,6 +380,8 @@ class MemoryStore:
         self.offered: dict[int, list[OfferedSlot]] = {}
         self.pending_sends: dict[int, PendingSend] = {}
         self.cart: dict[int, list[CartItem]] = {}
+        self.order_attempts: dict[str, OrderAttempt] = {}
+        self.clinical_handoffs: dict[str, ClinicalHandoff] = {}
         self.med_queries: list[dict[str, Any]] = []
         # F15 — decisiones de la capa de comprensión (incluidas las que NO buscan).
         self.intent_decisions: list[dict[str, Any]] = []
@@ -523,6 +562,74 @@ class MemoryStore:
 
     async def cart_clear(self, conversation_id: int) -> None:
         self.cart.pop(conversation_id, None)
+
+    async def reservar_intento(
+        self, *, order_attempt_id: str, conversation_id: int, cart_fingerprint: str
+    ) -> OrderAttempt:
+        # ON CONFLICT DO NOTHING: si el id ya existe, no se crea otro ni se
+        # sobrescribe la huella de la primera reserva (escenarios A/B de ADR-0007).
+        existente = self.order_attempts.get(order_attempt_id)
+        if existente is not None:
+            return existente
+        intento = OrderAttempt(
+            order_attempt_id=order_attempt_id,
+            cart_fingerprint=cart_fingerprint,
+            phase=OrderPhase.CONFIRMADO_POR_CLIENTE,
+        )
+        self.order_attempts[order_attempt_id] = intento
+        return intento
+
+    async def obtener_intento(self, order_attempt_id: str) -> OrderAttempt | None:
+        return self.order_attempts.get(order_attempt_id)
+
+    async def reservar_derivacion(
+        self,
+        *,
+        clinical_handoff_id: str,
+        conversation_id: int,
+        category: ClinicalCategory,
+    ) -> ClinicalHandoff:
+        # Anti-duplicado: si ya hay una derivación ABIERTA para la conversación, se
+        # devuelve esa (no se crea otra). Equivale al índice único parcial
+        # `(conversation_id) WHERE abierto` + ON CONFLICT DO NOTHING de PgStore.
+        abierto = await self.derivacion_abierta(conversation_id)
+        if abierto is not None:
+            return abierto
+        h = ClinicalHandoff(
+            clinical_handoff_id=clinical_handoff_id,
+            conversation_id=conversation_id,
+            category=category,
+            state=ClinicalHandoffState.SOLICITADO,
+        )
+        self.clinical_handoffs[clinical_handoff_id] = h
+        return h
+
+    async def derivacion_abierta(
+        self, conversation_id: int
+    ) -> ClinicalHandoff | None:
+        for h in self.clinical_handoffs.values():
+            if h.conversation_id == conversation_id and h.abierto:
+                return h
+        return None
+
+    async def avanzar_estado_derivacion(
+        self, clinical_handoff_id: str, destino: ClinicalHandoffState
+    ) -> ClinicalHandoff | None:
+        actual = self.clinical_handoffs.get(clinical_handoff_id)
+        if actual is None:
+            return None
+        if not _clin_transicion_permitida(actual.state, destino):
+            raise ValueError(
+                f"transición no permitida: {actual.state.value} → {destino.value}"
+            )
+        avanzado = ClinicalHandoff(
+            clinical_handoff_id=actual.clinical_handoff_id,
+            conversation_id=actual.conversation_id,
+            category=actual.category,
+            state=destino,
+        )
+        self.clinical_handoffs[clinical_handoff_id] = avanzado
+        return avanzado
 
     async def log_med_query(
         self,
@@ -721,6 +828,10 @@ class AppContext:
     crm: Any  # CrmClient
     llm: Any  # OpenAiLlm o fake con .complete()
     profile: Any | None = None  # ProfileProvider; None en tests = perfil mínimo
+    # Persistencia de identidad/sesión/auditoría del Staff Agent (Paso 11). Separada
+    # del `store` de Customer a propósito (StaffStore de app/staff/identity.py). None =
+    # superficie Staff no montada (las rutas /staff/* responden 503). Ver app/staff/.
+    staff: Any | None = None  # StaffStore
     coalescer: Any | None = None
     relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
     # Un candado por identidad: los turnos de UNA conversación se serializan.
